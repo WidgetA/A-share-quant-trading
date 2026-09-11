@@ -222,8 +222,8 @@ def test_entry_message_is_explicit_and_keeps_full_v16_style_rows() -> None:
     assert "[带动]银行(+1.23%)" in message
     assert "[带动]=个股自身涨幅已达热门板块门槛" in message
     assert "09:41结束标签" in message
-    assert "账户金额或股数" in message
-    assert "D0=2026-08-27 / rank=2 / 腿份额=5.00%" in message
+    assert "非账户总资金比例" in message
+    assert "推荐日期=2026-08-27 / 当日排名=2 / 原建议资金比例=5.00%" in message
 
 
 def test_entry_current_contract_seals_and_legacy_or_partial_contracts_fail_closed() -> None:
@@ -447,15 +447,15 @@ def test_manual_monitor_armed_seals_as_explicit_monitor_only_confirmation() -> N
     assert "actionable_from" not in payload
     assert "expired_delivery_message" not in payload
     assert message.splitlines()[0] == "[V20] 人工补挂卖出监控已启用"
-    assert "🟢 已启用：2 只模型腿" in message
+    assert "🟢 已启用：2 只股票的卖出提醒" in message
     assert "票单：000001 平安银行、600000 浦发银行" in message
-    assert "D0 原始 09:41 bar.open" in message
-    assert "D1 09:30" in message
-    assert "D1 保护：任一有效分钟 bar.close ≤ 参考价 92%" in message
-    assert "D2 保护：任一有效分钟 bar.close ≤ 参考价 88%" in message
-    assert "合格 MEWS=DANGER 时提高到 95%；14:57 无条件提醒退出" in message
-    assert "只新增卖出监控腿" in message
-    assert "未修改正式入场决定，也未创建订单、持仓或成交" in message
+    assert "推荐当天 09:40 的价格" in message
+    assert "下一交易日 09:30" in message
+    assert "推荐后第1个交易日：任一分钟收盘价跌至参考价的92%或更低" in message
+    assert "推荐后第2个交易日：止损线为参考价的88%" in message
+    assert "市场风险预警生效时提高到95%；最迟14:57提醒全部卖出" in message
+    assert "已添加卖出提醒" in message
+    assert "系统不会自动下单，也不代表你已买入" in message
     assert "已下单" not in message
     assert "已持仓" not in message
 
@@ -1241,10 +1241,10 @@ def test_exit_is_scoped_to_one_model_leg_not_account_holding() -> None:
         commit_marker=9,
     )
 
-    assert "建议退出该模型腿100%" in message
-    assert "账户全部持仓" in message
-    assert "D1 恐慌下杀 -8%" in message
-    assert "该模型腿相对标准批次份额: 5.00%" in message
+    assert "建议：卖出按下述推荐买入的这只股票，全部卖出。" in message
+    assert "仅限这次买入的数量" in message
+    assert "推荐后第1个交易日，价格跌至参考价的92%或更低" in message
+    assert "原建议资金比例: 单次买入预算的 5.00%" in message
 
 
 def test_manual_monitor_exit_identifies_its_origin_without_claiming_order_or_holding() -> None:
@@ -1281,9 +1281,9 @@ def test_manual_monitor_exit_identifies_its_origin_without_claiming_order_or_hol
     )
     message = str(payload["message"])
 
-    assert "来源：人工补挂的冻结票单监控腿" in message
-    assert "只发卖出提醒，不代表系统已下单或持仓" in message
-    assert "建议退出该模型腿100%（不是账户全部持仓）" in message
+    assert "来源：你手动添加的股票卖出提醒" in message
+    assert "不代表系统已下单或你已买入" in message
+    assert "建议：卖出按下述推荐买入的这只股票，全部卖出。" in message
     assert "仅提示，不代表券商成交确认" in message
     assert "已创建订单" not in message
     assert "已确认持仓" not in message

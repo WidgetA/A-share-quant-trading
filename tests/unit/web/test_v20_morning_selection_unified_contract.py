@@ -252,7 +252,11 @@ async def test_complete_current_day_acquisition_starts_only_at_093900(
     v16_client = object()
     v16_state = V15ScanState(initialized=True, realtime_client=v16_client)
 
-    await invoke(service, f"{path}-before-0939")
+    if invoke is _manual:
+        with pytest.raises(V20StateConflict, match="09:39 selection input is not ready"):
+            await invoke(service, f"{path}-before-0939")
+    else:
+        await invoke(service, f"{path}-before-0939")
     assert client.calls == []
     assert client.historical_calls == []
     assert v16_state.initialized is True
@@ -299,7 +303,8 @@ async def test_failed_0939_full_acquisition_is_not_restarted_until_0940(
     # whole market again and can consume the 6,000/minute allowance.
     now[0] = AT_DECISION_BAR.replace(second=1)
     await _scheduled(service, "retry-second-attempt")
-    await _manual(service, "retry-manual-same-minute")
+    with pytest.raises(RuntimeError, match="synthetic current-day rt_min_daily outage"):
+        await _manual(service, "retry-manual-same-minute")
     assert client.calls == [(RAW_EVIDENCE_CODES, TRADE_DATE)]
     assert repository.commit_entry_calls == 0
 
@@ -655,14 +660,14 @@ async def test_committed_morning_slot_replays_exact_prepared_entry_and_body_afte
         "manual-at-094000-real-terminal-parity",
     )
     await _drain_mews_kicks(service)
-    alert = repository.alerts[result["operator_event_id"]]
-    replay_semantic = dict(alert.semantic["entry_render_semantic"])
+    alert = repository.alerts[result["entry_event_id"]]
+    assert alert.event_type == "ENTRY_DECISION"
+    replay_semantic = {**alert.semantic, "event_id": formal_status.event_id}
 
     assert replay_semantic == dict(formal_status.semantic)
     assert _render_entry_strategy_body(replay_semantic) == formal_body
     assert result["calculation_result"] == "SUCCESS"
-    assert result["official_comparison_result"] == "MATCH"
-    assert result["official_mismatch_fields"] == []
+    assert result["exact_automatic_message"] is True
     assert repository.status == formal_status
     assert repository.state == formal_state
     assert repository.commit == formal_commit
@@ -709,10 +714,10 @@ async def test_committed_morning_slot_replays_after_official_state_head_advances
         "manual-at-094000-after-state-advance",
     )
     await _drain_mews_kicks(service)
-    alert = repository.alerts[result["operator_event_id"]]
+    alert = repository.alerts[result["entry_event_id"]]
 
-    assert alert.semantic["entry_render_semantic"] == formal_status.semantic
-    assert result["official_comparison_result"] == "MATCH"
+    assert {**alert.semantic, "event_id": formal_status.event_id} == formal_status.semantic
+    assert alert.event_type == "ENTRY_DECISION"
     assert repository.state == advanced_state
     assert repository.status == formal_status
     assert repository.commit_entry_calls == 1
@@ -761,10 +766,13 @@ async def test_input_invalid_terminal_replays_from_its_exact_prestate(
         "manual-at-094000-invalid-terminal-replay",
     )
     await _drain_mews_kicks(service)
-    alert = repository.alerts[result["operator_event_id"]]
-    assert alert.semantic["entry_render_semantic"] == expected.prepared.commit.semantic
+    alert = repository.alerts[result["entry_event_id"]]
+    assert {
+        **alert.semantic,
+        "event_id": expected.prepared.commit.event_id,
+    } == expected.prepared.commit.semantic
     assert result["calculation_result"] == "SUCCESS"
-    assert result["official_comparison_result"] == "NOT_AVAILABLE"
+    assert alert.event_type == "ENTRY_DECISION"
     assert repository.status == invalid_status
     assert repository.state == invalid_state
     assert repository.commit_entry_calls == 1
@@ -1041,23 +1049,16 @@ async def test_explicit_post_cutoff_manual_accepts_only_legacy_missing_prestate_
         "manual-at-094000-legacy-missing-prestate",
     )
     await _drain_mews_kicks(service)
-    alert = repository.alerts[first["operator_event_id"]]
-    recomputed = alert.semantic["entry_render_semantic"]
+    alert = repository.alerts[first["entry_event_id"]]
+    recomputed = alert.semantic
 
     assert first["created"] is True
     assert second == {**first, "created": False}
     assert first["calculation_result"] == "SUCCESS"
-    assert first["official_comparison_result"] == "NOT_AVAILABLE"
-    assert first["official_comparison_unavailable_reason"] == "LEGACY_TERMINAL_PRESTATE_UNAVAILABLE"
-    assert first["official_mismatch_fields"] == []
-    assert first["official_v16_snapshot_hash"] is None
-    assert first["canonical_artifact_compared"] is True
-    assert first["canonical_artifact_matches"] is True
-    assert alert.semantic["official_comparison_unavailable_reason"] == (
-        "LEGACY_TERMINAL_PRESTATE_UNAVAILABLE"
-    )
+    assert alert.event_type == "ENTRY_DECISION"
+    assert first["exact_automatic_message"] is True
     assert alert.payload is not None
-    assert "LEGACY_TERMINAL_PRESTATE_UNAVAILABLE" in alert.payload["message"]
+    assert "仅核查" not in alert.payload["message"]
     assert recomputed["state_before_hash"] == official_state.state_hash
     assert current_input_calls == ["scheduled", "policy"]
 
@@ -1068,7 +1069,7 @@ async def test_explicit_post_cutoff_manual_accepts_only_legacy_missing_prestate_
     assert repository.raw_write_calls == raw_writes
     assert tuple(artifact.save_calls) == artifact_saves
     assert repository.forbidden_write_calls == []
-    assert repository.alert_write_calls == alert_writes + 1
+    assert repository.alert_write_calls == alert_writes
     assert repository.seal_calls == seal_calls + 1
 
 
@@ -1113,25 +1114,19 @@ async def test_explicit_manual_legacy_input_invalid_uses_existing_fresh_theory_c
         service,
         "manual-at-094000-legacy-input-invalid",
     )
-    alert = repository.alerts[result["operator_event_id"]]
+    alert = repository.alerts[result["entry_event_id"]]
 
     assert result["calculation_result"] == "SUCCESS"
-    assert result["official_comparison_result"] == "NOT_AVAILABLE"
-    assert result["official_comparison_unavailable_reason"] == (
-        "LEGACY_TERMINAL_PRESTATE_UNAVAILABLE"
-    )
-    assert result["official_mismatch_fields"] == []
-    assert result["official_v16_snapshot_hash"] is None
-    assert result["canonical_artifact_compared"] is False
-    assert result["canonical_artifact_matches"] is None
-    assert alert.semantic["entry_render_semantic"]["state_before_hash"] == official_state.state_hash
+    assert alert.event_type == "ENTRY_DECISION"
+    assert result["exact_automatic_message"] is True
+    assert alert.semantic["state_before_hash"] == official_state.state_hash
     assert repository.status == legacy_status
     assert repository.state == official_state
     assert repository.commit_entry_calls == 1
     assert repository.raw_write_calls == raw_writes
     assert tuple(artifact.save_calls) == artifact_saves
     assert repository.forbidden_write_calls == []
-    assert repository.alert_write_calls == 1
+    assert repository.alert_write_calls == 0
 
 
 @pytest.mark.asyncio
@@ -1356,20 +1351,18 @@ async def test_successful_current_calculation_is_not_fail_when_old_official_diff
         "manual-at-094000-old-official-diff",
     )
     await _drain_mews_kicks(check_only)
-    alert = check_repo.alerts[result["operator_event_id"]]
+    alert = check_repo.alerts[result["entry_event_id"]]
     assert alert.payload is not None
-    assert alert.semantic["v20_action"] in {"ENTER", "BLOCK", "NO_SIGNAL"}
-    assert isinstance(alert.semantic["entry_render_semantic"], dict)
+    assert alert.semantic["action"] in {"ENTER", "BLOCK", "NO_SIGNAL"}
+    assert alert.event_type == "ENTRY_DECISION"
 
     if contract == "result_fields":
         assert result.get("calculation_result") == "SUCCESS"
-        assert result.get("official_comparison_result") == "DIFFERENT"
-        assert result.get("probe_result") != "FAIL"
-        assert result.get("probe_mismatch_fields") == []
+        assert result["entry_action"] == alert.semantic["action"]
+        assert result["exact_automatic_message"] is True
     else:
-        assert "核查结论：FAIL" not in alert.payload["message"]
-        assert "本次计算：成功" in alert.payload["message"]
-        assert "与早盘正式结果对比：不一致" in alert.payload["message"]
+        assert "仅核查" not in alert.payload["message"]
+        assert _render_entry_strategy_body(alert.semantic) in alert.payload["message"]
         assert "failure_stage" not in alert.semantic
     assert check_repo.state == state_before
     assert check_repo.status == status_before
@@ -1469,8 +1462,8 @@ async def test_current_code_output_change_is_successful_different_and_read_only(
         "manual-at-094000-current-code-health-change",
     )
     await _drain_mews_kicks(service)
-    alert = repository.alerts[result["operator_event_id"]]
-    recomputed = alert.semantic["entry_render_semantic"]
+    alert = repository.alerts[result["entry_event_id"]]
+    recomputed = alert.semantic
 
     assert recomputed_next_hashes
     assert recomputed_next_hashes[-1] != official_status.semantic["state_after_hash"]
@@ -1478,10 +1471,8 @@ async def test_current_code_output_change_is_successful_different_and_read_only(
     assert recomputed["health_state"] == "HEALTHY"
     assert recomputed["health_state"] != official_status.semantic["health_state"]
     assert result["calculation_result"] == "SUCCESS"
-    assert result["official_comparison_result"] == "DIFFERENT"
-    assert "health_state" in result["official_mismatch_fields"]
-    assert result["probe_result"] == "PASS"
-    assert result["probe_mismatch_fields"] == []
+    assert alert.event_type == "ENTRY_DECISION"
+    assert result["exact_automatic_message"] is True
     assert repository.state == official_state
     assert repository.status == official_status
     assert repository.commit == official_commit

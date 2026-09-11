@@ -1806,6 +1806,10 @@ def migration_sql(schema: str = "v20") -> str:
         + _render_outbox_at_most_once_migration(schema)
         + "\n\n"
         + _render_rolling7_market_health_migration(schema)
+        + "\n\n"
+        + (_PROJECT_ROOT / "migrations/v20/004_selection_runs.sql")
+        .read_text(encoding="utf-8")
+        .replace("v20.", f"{schema}.")
         + "\n"
     )
 
@@ -2966,7 +2970,8 @@ class V20Repository:
                     )
                 return True
 
-    async def commit_entry(self, commit: EntryCommit) -> None:
+    @staticmethod
+    def _validate_entry_commit(commit: EntryCommit) -> None:
         _require_outbox_scope(commit.route_id, commit.official_stream_id, commit.lineage_id)
         allowed_actions = {"ENTER", "BLOCK", "NO_SIGNAL", "INPUT_INVALID"}
         if commit.action not in allowed_actions:
@@ -3092,42 +3097,296 @@ class V20Repository:
         if commit.action in {"NO_SIGNAL", "INPUT_INVALID"} and commit.shadow_batches:
             raise ValueError(f"{commit.action} cannot create shadow batches")
 
-        commit_fingerprint = _entry_commit_fingerprint(commit)
-
+    async def commit_entry(self, commit: EntryCommit) -> None:
+        self._validate_entry_commit(commit)
         async with self.pool.acquire() as connection:
             async with connection.transaction(isolation="serializable"):
-                existing = await connection.fetchrow(
-                    f"SELECT decision_id,event_id,commit_fingerprint FROM "
-                    f"{self.schema}.entry_decisions WHERE decision_id=$1 OR event_id=$2",
-                    commit.decision_id,
-                    commit.event_id,
-                )
-                if existing is not None:
-                    if (
-                        existing["decision_id"] == commit.decision_id
-                        and existing["event_id"] == commit.event_id
-                        and existing["commit_fingerprint"] == commit_fingerprint
-                    ):
-                        return
-                    raise V20SemanticConflict("decision/event ID already has different semantics")
+                await self._commit_entry_transaction(connection, commit)
 
-                registered_config = await connection.fetchrow(
+    async def _commit_entry_transaction(self, connection, commit: EntryCommit) -> None:
+        commit_fingerprint = _entry_commit_fingerprint(commit)
+        existing = await connection.fetchrow(
+            f"SELECT decision_id,event_id,commit_fingerprint FROM "
+            f"{self.schema}.entry_decisions WHERE decision_id=$1 OR event_id=$2",
+            commit.decision_id,
+            commit.event_id,
+        )
+        if existing is not None:
+            if (
+                existing["decision_id"] == commit.decision_id
+                and existing["event_id"] == commit.event_id
+                and existing["commit_fingerprint"] == commit_fingerprint
+            ):
+                return
+            raise V20SemanticConflict("decision/event ID already has different semantics")
+
+        registered_config = await connection.fetchrow(
+            f"""
+            SELECT config_hash,strategy_version,effective_trade_date
+            FROM {self.schema}.runtime_configs
+            WHERE config_id=$1
+            """,
+            commit.config_id,
+        )
+        if registered_config is None:
+            raise V20StateConflict(f"unregistered config_id {commit.config_id!r}")
+        if (
+            registered_config["config_hash"] != commit.config_hash
+            or registered_config["strategy_version"] != commit.strategy_version
+            or registered_config["effective_trade_date"] > commit.trade_date
+        ):
+            raise V20SemanticConflict("entry config does not match runtime registry")
+
+        state = await connection.fetchrow(
+            f"SELECT revision,state_hash FROM {self.schema}.official_state "
+            "WHERE lineage_id=$1 FOR UPDATE",
+            commit.lineage_id,
+        )
+        if state is None:
+            raise V20StateConflict("state lineage does not exist")
+        if (
+            int(state["revision"]) != commit.expected_state_revision
+            or state["state_hash"] != commit.expected_state_hash
+        ):
+            raise V20StateConflict("stale state revision/hash")
+
+        slot = await connection.fetchrow(
+            f"""
+            INSERT INTO {self.schema}.decision_slots
+                (official_stream_id,trade_date,slot_id,strategy_version,
+                 config_id,config_hash,lineage_id,slot_status)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,'OPEN')
+            ON CONFLICT (official_stream_id,trade_date) DO UPDATE
+                SET official_stream_id=EXCLUDED.official_stream_id
+            RETURNING slot_id,strategy_version,config_id,config_hash,lineage_id,
+                      slot_status,slot_revision
+            """,
+            commit.official_stream_id,
+            commit.trade_date,
+            commit.slot_id,
+            commit.strategy_version,
+            commit.config_id,
+            commit.config_hash,
+            commit.lineage_id,
+        )
+        if slot is None:
+            raise V20StateConflict("failed to bind decision slot")
+        binding = (
+            slot["slot_id"],
+            slot["strategy_version"],
+            slot["config_id"],
+            slot["config_hash"],
+            slot["lineage_id"],
+        )
+        expected_binding = (
+            commit.slot_id,
+            commit.strategy_version,
+            commit.config_id,
+            commit.config_hash,
+            commit.lineage_id,
+        )
+        if binding != expected_binding or slot["slot_status"] != "OPEN":
+            raise V20StateConflict("decision slot is bound or terminal")
+
+        await connection.execute(
+            f"""
+            INSERT INTO {self.schema}.input_snapshots
+                (snapshot_id,snapshot_type,trade_date,snapshot_hash,snapshot_json)
+            VALUES ($1,'V16',$2,$3,$4::jsonb)
+            ON CONFLICT (snapshot_id) DO NOTHING
+            """,
+            commit.snapshot_id,
+            commit.trade_date,
+            commit.snapshot_hash,
+            canonical_json(commit.snapshot),
+        )
+        snapshot = await connection.fetchrow(
+            f"SELECT snapshot_hash,snapshot_json FROM {self.schema}.input_snapshots "
+            "WHERE snapshot_id=$1",
+            commit.snapshot_id,
+        )
+        if (
+            snapshot is None
+            or snapshot["snapshot_hash"] != commit.snapshot_hash
+            or sha256_json(_json_value(snapshot["snapshot_json"])) != commit.snapshot_hash
+        ):
+            raise V20SemanticConflict("snapshot_id collision")
+
+        await connection.execute(
+            f"""
+            INSERT INTO {self.schema}.entry_decisions
+                (decision_id,slot_id,event_id,snapshot_id,action,final_multiplier,
+                 semantic_content_hash,commit_fingerprint,semantic_json)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)
+            """,
+            commit.decision_id,
+            commit.slot_id,
+            commit.event_id,
+            commit.snapshot_id,
+            commit.action,
+            commit.final_multiplier,
+            commit.semantic_content_hash,
+            commit_fingerprint,
+            canonical_json(commit.semantic),
+        )
+
+        for shadow_batch in commit.shadow_batches:
+            await connection.execute(
+                f"""
+                INSERT INTO {self.schema}.shadow_batches
+                    (batch_id,decision_id,official_stream_id,lineage_id,
+                     kind,signal_date,t2_date,batch_json)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb)
+                """,
+                shadow_batch.batch_id,
+                commit.decision_id,
+                commit.official_stream_id,
+                commit.lineage_id,
+                shadow_batch.kind,
+                shadow_batch.signal_date,
+                shadow_batch.t2_date,
+                canonical_json(shadow_batch.payload),
+            )
+
+        if commit.model_batch is not None:
+            model_batch = commit.model_batch
+            await connection.execute(
+                f"""
+                INSERT INTO {self.schema}.model_batches
+                    (model_batch_id,decision_id,origin_kind,source_event_id,
+                     official_stream_id,lineage_id,signal_date,multiplier,
+                     evaluation_only,reference_profile_id)
+                VALUES ($1,$2,'OFFICIAL_ENTRY',$3,$4,$5,$6,$7,$8,$9)
+                """,
+                model_batch.model_batch_id,
+                commit.decision_id,
+                commit.event_id,
+                commit.official_stream_id,
+                commit.lineage_id,
+                commit.trade_date,
+                model_batch.multiplier,
+                model_batch.evaluation_only,
+                model_batch.reference_profile_id,
+            )
+            for leg in model_batch.legs:
+                await connection.execute(
                     f"""
-                    SELECT config_hash,strategy_version,effective_trade_date
-                    FROM {self.schema}.runtime_configs
-                    WHERE config_id=$1
+                    INSERT INTO {self.schema}.model_legs
+                        (model_leg_id,model_batch_id,code,stock_name,rank,
+                         relative_weight,d1,d2)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
                     """,
-                    commit.config_id,
+                    leg.model_leg_id,
+                    model_batch.model_batch_id,
+                    leg.code,
+                    leg.stock_name,
+                    leg.rank,
+                    leg.relative_weight,
+                    leg.d1,
+                    leg.d2,
                 )
-                if registered_config is None:
-                    raise V20StateConflict(f"unregistered config_id {commit.config_id!r}")
-                if (
-                    registered_config["config_hash"] != commit.config_hash
-                    or registered_config["strategy_version"] != commit.strategy_version
-                    or registered_config["effective_trade_date"] > commit.trade_date
-                ):
-                    raise V20SemanticConflict("entry config does not match runtime registry")
 
+        await connection.execute(
+            f"""
+            INSERT INTO {self.schema}.outbox_events
+                (event_id,event_type,route_id,official_stream_id,lineage_id,
+                 semantic_content_hash,semantic_json,action_expiry_ts)
+            VALUES ($1,'ENTRY_DECISION',$2,$3,$4,$5,$6::jsonb,$7)
+            """,
+            commit.event_id,
+            commit.route_id,
+            commit.official_stream_id,
+            commit.lineage_id,
+            commit.semantic_content_hash,
+            canonical_json(commit.semantic),
+            commit.action_expiry_ts,
+        )
+        updated = await connection.execute(
+            f"""
+            UPDATE {self.schema}.official_state
+            SET revision=revision+1,state_hash=$1,state_json=$2::jsonb,
+                updated_at=clock_timestamp()
+            WHERE lineage_id=$3 AND revision=$4 AND state_hash=$5
+            """,
+            commit.next_state_hash,
+            canonical_json(commit.next_state),
+            commit.lineage_id,
+            commit.expected_state_revision,
+            commit.expected_state_hash,
+        )
+        if updated != "UPDATE 1":
+            raise V20StateConflict("state CAS lost")
+        terminal_status = "FAILED" if commit.action == "INPUT_INVALID" else "COMPLETED"
+        finalized = await connection.execute(
+            f"""
+            WITH terminal_receipt AS MATERIALIZED (
+                SELECT clock_timestamp() AS terminal_at
+            )
+            UPDATE {self.schema}.decision_slots AS slot
+            SET slot_status=$1,slot_revision=slot_revision+1,
+                terminal_event_id=$2,terminal_decision_id=$3,
+                completed_at=terminal_receipt.terminal_at
+            FROM terminal_receipt
+            WHERE slot.slot_id=$4 AND slot.slot_status='OPEN'
+              AND slot.slot_revision=$5
+              AND (
+                ($6='INPUT_INVALID' AND $8::timestamptz IS NOT NULL
+                    AND terminal_receipt.terminal_at >= $8)
+                OR ($6<>'INPUT_INVALID' AND terminal_receipt.terminal_at < $7
+                    AND (terminal_receipt.terminal_at AT TIME ZONE
+                         'Asia/Shanghai')::date = slot.trade_date)
+              )
+            """,
+            terminal_status,
+            commit.event_id,
+            commit.decision_id,
+            commit.slot_id,
+            int(slot["slot_revision"]),
+            commit.action,
+            commit.action_expiry_ts,
+            commit.invalid_commit_not_before_ts,
+        )
+        if finalized != "UPDATE 1":
+            if commit.action != "INPUT_INVALID":
+                raise V20EntryDeadlineExceeded("database clock reached the normal-entry deadline")
+            raise V20StateConflict("slot CAS/deadline guard rejected entry commit")
+
+    async def get_selection_run_event_id(
+        self, run_id: str, *, official_stream_id: str
+    ) -> str | None:
+        async with self.pool.acquire() as connection:
+            return await connection.fetchval(
+                f"SELECT event_id FROM {self.schema}.selection_runs "
+                "WHERE run_id=$1 AND official_stream_id=$2",
+                run_id,
+                official_stream_id,
+            )
+
+    async def commit_selection_run(self, commit: EntryCommit, *, run_id: str) -> str:
+        """Atomically save every run, with exactly one daily state advancement.
+
+        There is no trigger-source argument. First runs and subsequent runs use
+        the same validation, input/result ledger and ordinary ENTRY_DECISION
+        outbox. The immutable daily projection is updated only when absent.
+        """
+        self._validate_entry_commit(commit)
+        _require_sha256(run_id, "selection run_id")
+        proposal = {
+            "semantic": dict(commit.semantic),
+            "snapshot_hash": commit.snapshot_hash,
+            "expected_state_revision": commit.expected_state_revision,
+            "expected_state_hash": commit.expected_state_hash,
+            "next_state": dict(commit.next_state),
+            "next_state_hash": commit.next_state_hash,
+            "model_batch": _model_batch_semantics(commit.model_batch),
+            "shadow_batches": [
+                {"kind": batch.kind, "payload": dict(batch.payload)}
+                for batch in commit.shadow_batches
+            ],
+        }
+        async with self.pool.acquire() as connection:
+            async with connection.transaction(isolation="serializable"):
+                # Both trigger sources serialize against the same daily state.
                 state = await connection.fetchrow(
                     f"SELECT revision,state_hash FROM {self.schema}.official_state "
                     "WHERE lineage_id=$1 FOR UPDATE",
@@ -3135,214 +3394,101 @@ class V20Repository:
                 )
                 if state is None:
                     raise V20StateConflict("state lineage does not exist")
-                if (
-                    int(state["revision"]) != commit.expected_state_revision
-                    or state["state_hash"] != commit.expected_state_hash
+                existing = await connection.fetchrow(
+                    f"SELECT event_id,official_stream_id,trade_date,config_hash "
+                    f"FROM {self.schema}.selection_runs WHERE run_id=$1",
+                    run_id,
+                )
+                if existing is not None:
+                    if (
+                        existing["official_stream_id"] != commit.official_stream_id
+                        or existing["trade_date"] != commit.trade_date
+                        or existing["config_hash"] != commit.config_hash
+                    ):
+                        raise V20SemanticConflict("selection run_id belongs to another task")
+                    return str(existing["event_id"])
+                registry = await connection.fetchrow(
+                    f"SELECT config_hash,strategy_version,effective_trade_date "
+                    f"FROM {self.schema}.runtime_configs WHERE config_id=$1",
+                    commit.config_id,
+                )
+                if registry is None or (
+                    registry["config_hash"] != commit.config_hash
+                    or registry["strategy_version"] != commit.strategy_version
+                    or registry["effective_trade_date"] > commit.trade_date
                 ):
-                    raise V20StateConflict("stale state revision/hash")
-
+                    raise V20SemanticConflict("selection config does not match runtime registry")
                 slot = await connection.fetchrow(
-                    f"""
-                    INSERT INTO {self.schema}.decision_slots
-                        (official_stream_id,trade_date,slot_id,strategy_version,
-                         config_id,config_hash,lineage_id,slot_status)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,'OPEN')
-                    ON CONFLICT (official_stream_id,trade_date) DO UPDATE
-                        SET official_stream_id=EXCLUDED.official_stream_id
-                    RETURNING slot_id,strategy_version,config_id,config_hash,lineage_id,
-                              slot_status,slot_revision
-                    """,
+                    f"SELECT slot_status,lineage_id FROM {self.schema}.decision_slots "
+                    "WHERE official_stream_id=$1 AND trade_date=$2",
                     commit.official_stream_id,
                     commit.trade_date,
-                    commit.slot_id,
-                    commit.strategy_version,
-                    commit.config_id,
-                    commit.config_hash,
-                    commit.lineage_id,
                 )
-                if slot is None:
-                    raise V20StateConflict("failed to bind decision slot")
-                binding = (
-                    slot["slot_id"],
-                    slot["strategy_version"],
-                    slot["config_id"],
-                    slot["config_hash"],
-                    slot["lineage_id"],
-                )
-                expected_binding = (
-                    commit.slot_id,
-                    commit.strategy_version,
-                    commit.config_id,
-                    commit.config_hash,
-                    commit.lineage_id,
-                )
-                if binding != expected_binding or slot["slot_status"] != "OPEN":
-                    raise V20StateConflict("decision slot is bound or terminal")
-
-                await connection.execute(
-                    f"""
-                    INSERT INTO {self.schema}.input_snapshots
-                        (snapshot_id,snapshot_type,trade_date,snapshot_hash,snapshot_json)
-                    VALUES ($1,'V16',$2,$3,$4::jsonb)
-                    ON CONFLICT (snapshot_id) DO NOTHING
-                    """,
-                    commit.snapshot_id,
-                    commit.trade_date,
-                    commit.snapshot_hash,
-                    canonical_json(commit.snapshot),
-                )
-                snapshot = await connection.fetchrow(
-                    f"SELECT snapshot_hash,snapshot_json FROM {self.schema}.input_snapshots "
-                    "WHERE snapshot_id=$1",
-                    commit.snapshot_id,
-                )
-                if (
-                    snapshot is None
-                    or snapshot["snapshot_hash"] != commit.snapshot_hash
-                    or sha256_json(_json_value(snapshot["snapshot_json"])) != commit.snapshot_hash
-                ):
-                    raise V20SemanticConflict("snapshot_id collision")
-
-                await connection.execute(
-                    f"""
-                    INSERT INTO {self.schema}.entry_decisions
-                        (decision_id,slot_id,event_id,snapshot_id,action,final_multiplier,
-                         semantic_content_hash,commit_fingerprint,semantic_json)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)
-                    """,
-                    commit.decision_id,
-                    commit.slot_id,
-                    commit.event_id,
-                    commit.snapshot_id,
-                    commit.action,
-                    commit.final_multiplier,
-                    commit.semantic_content_hash,
-                    commit_fingerprint,
-                    canonical_json(commit.semantic),
-                )
-
-                for shadow_batch in commit.shadow_batches:
+                advanced = slot is None
+                if advanced:
+                    await self._commit_entry_transaction(connection, commit)
+                    event_id = commit.event_id
+                else:
+                    if slot["slot_status"] not in {"COMPLETED", "FAILED"} or (
+                        slot["lineage_id"] != commit.lineage_id
+                    ):
+                        raise V20StateConflict("selection daily slot is not terminal")
                     await connection.execute(
-                        f"""
-                        INSERT INTO {self.schema}.shadow_batches
-                            (batch_id,decision_id,official_stream_id,lineage_id,
-                             kind,signal_date,t2_date,batch_json)
-                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb)
-                        """,
-                        shadow_batch.batch_id,
-                        commit.decision_id,
-                        commit.official_stream_id,
-                        commit.lineage_id,
-                        shadow_batch.kind,
-                        shadow_batch.signal_date,
-                        shadow_batch.t2_date,
-                        canonical_json(shadow_batch.payload),
-                    )
-
-                if commit.model_batch is not None:
-                    model_batch = commit.model_batch
-                    await connection.execute(
-                        f"""
-                        INSERT INTO {self.schema}.model_batches
-                            (model_batch_id,decision_id,origin_kind,source_event_id,
-                             official_stream_id,lineage_id,signal_date,multiplier,
-                             evaluation_only,reference_profile_id)
-                        VALUES ($1,$2,'OFFICIAL_ENTRY',$3,$4,$5,$6,$7,$8,$9)
-                        """,
-                        model_batch.model_batch_id,
-                        commit.decision_id,
-                        commit.event_id,
-                        commit.official_stream_id,
-                        commit.lineage_id,
+                        f"INSERT INTO {self.schema}.input_snapshots "
+                        "(snapshot_id,snapshot_type,trade_date,snapshot_hash,snapshot_json) "
+                        "VALUES ($1,'V16',$2,$3,$4::jsonb) ON CONFLICT (snapshot_id) DO NOTHING",
+                        commit.snapshot_id,
                         commit.trade_date,
-                        model_batch.multiplier,
-                        model_batch.evaluation_only,
-                        model_batch.reference_profile_id,
+                        commit.snapshot_hash,
+                        canonical_json(commit.snapshot),
                     )
-                    for leg in model_batch.legs:
-                        await connection.execute(
-                            f"""
-                            INSERT INTO {self.schema}.model_legs
-                                (model_leg_id,model_batch_id,code,stock_name,rank,
-                                 relative_weight,d1,d2)
-                            VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-                            """,
-                            leg.model_leg_id,
-                            model_batch.model_batch_id,
-                            leg.code,
-                            leg.stock_name,
-                            leg.rank,
-                            leg.relative_weight,
-                            leg.d1,
-                            leg.d2,
+                    snapshot = await connection.fetchrow(
+                        f"SELECT snapshot_hash,snapshot_json FROM {self.schema}.input_snapshots "
+                        "WHERE snapshot_id=$1",
+                        commit.snapshot_id,
+                    )
+                    if (
+                        snapshot is None
+                        or snapshot["snapshot_hash"] != commit.snapshot_hash
+                        or (
+                            sha256_json(_json_value(snapshot["snapshot_json"]))
+                            != commit.snapshot_hash
                         )
-
+                    ):
+                        raise V20SemanticConflict("selection input snapshot collision")
+                    event_id = sha256_json(["SELECTION_RUN_EVENT_V1", run_id])
+                    semantic = {**commit.semantic, "event_id": event_id}
+                    await connection.execute(
+                        f"INSERT INTO {self.schema}.outbox_events "
+                        "(event_id,event_type,route_id,official_stream_id,lineage_id,"
+                        "semantic_content_hash,semantic_json,action_expiry_ts) "
+                        "VALUES ($1,'ENTRY_DECISION',$2,$3,$4,$5,$6::jsonb,"
+                        "((clock_timestamp() AT TIME ZONE 'Asia/Shanghai')::date + 1) "
+                        "AT TIME ZONE 'Asia/Shanghai')",
+                        event_id,
+                        commit.route_id,
+                        commit.official_stream_id,
+                        commit.lineage_id,
+                        sha256_json(semantic),
+                        canonical_json(semantic),
+                    )
                 await connection.execute(
-                    f"""
-                    INSERT INTO {self.schema}.outbox_events
-                        (event_id,event_type,route_id,official_stream_id,lineage_id,
-                         semantic_content_hash,semantic_json,action_expiry_ts)
-                    VALUES ($1,'ENTRY_DECISION',$2,$3,$4,$5,$6::jsonb,$7)
-                    """,
-                    commit.event_id,
-                    commit.route_id,
+                    f"INSERT INTO {self.schema}.selection_runs "
+                    "(run_id,official_stream_id,lineage_id,trade_date,config_hash,event_id,"
+                    "snapshot_id,proposal_hash,proposal_json,advanced_daily_state) "
+                    "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10)",
+                    run_id,
                     commit.official_stream_id,
                     commit.lineage_id,
-                    commit.semantic_content_hash,
-                    canonical_json(commit.semantic),
-                    commit.action_expiry_ts,
+                    commit.trade_date,
+                    commit.config_hash,
+                    event_id,
+                    commit.snapshot_id,
+                    sha256_json(proposal),
+                    canonical_json(proposal),
+                    advanced,
                 )
-                updated = await connection.execute(
-                    f"""
-                    UPDATE {self.schema}.official_state
-                    SET revision=revision+1,state_hash=$1,state_json=$2::jsonb,
-                        updated_at=clock_timestamp()
-                    WHERE lineage_id=$3 AND revision=$4 AND state_hash=$5
-                    """,
-                    commit.next_state_hash,
-                    canonical_json(commit.next_state),
-                    commit.lineage_id,
-                    commit.expected_state_revision,
-                    commit.expected_state_hash,
-                )
-                if updated != "UPDATE 1":
-                    raise V20StateConflict("state CAS lost")
-                terminal_status = "FAILED" if commit.action == "INPUT_INVALID" else "COMPLETED"
-                finalized = await connection.execute(
-                    f"""
-                    WITH terminal_receipt AS MATERIALIZED (
-                        SELECT clock_timestamp() AS terminal_at
-                    )
-                    UPDATE {self.schema}.decision_slots AS slot
-                    SET slot_status=$1,slot_revision=slot_revision+1,
-                        terminal_event_id=$2,terminal_decision_id=$3,
-                        completed_at=terminal_receipt.terminal_at
-                    FROM terminal_receipt
-                    WHERE slot.slot_id=$4 AND slot.slot_status='OPEN'
-                      AND slot.slot_revision=$5
-                      AND (
-                        ($6='INPUT_INVALID' AND $8::timestamptz IS NOT NULL
-                            AND terminal_receipt.terminal_at >= $8)
-                        OR ($6<>'INPUT_INVALID' AND terminal_receipt.terminal_at < $7
-                            AND (terminal_receipt.terminal_at AT TIME ZONE
-                                 'Asia/Shanghai')::date = slot.trade_date)
-                      )
-                    """,
-                    terminal_status,
-                    commit.event_id,
-                    commit.decision_id,
-                    commit.slot_id,
-                    int(slot["slot_revision"]),
-                    commit.action,
-                    commit.action_expiry_ts,
-                    commit.invalid_commit_not_before_ts,
-                )
-                if finalized != "UPDATE 1":
-                    if commit.action != "INPUT_INVALID":
-                        raise V20EntryDeadlineExceeded(
-                            "database clock reached the normal-entry deadline"
-                        )
-                    raise V20StateConflict("slot CAS/deadline guard rejected entry commit")
+                return event_id
 
     async def seal_event(
         self,

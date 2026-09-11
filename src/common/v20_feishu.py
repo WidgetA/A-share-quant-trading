@@ -517,7 +517,7 @@ def _render_entry_strategy_body(semantic: Mapping[str, Any]) -> str:
             lines.append(
                 f"每只占当天资金份: {_pct(per_leg)}"
                 if slim
-                else f"每只模型腿相对份额: {_pct(per_leg)}（不代表账户金额或股数）"
+                else f"每只股票占单次买入预算: {_pct(per_leg)}（非账户总资金比例）"
             )
             lines.append("参考价规则: 使用原始09:41结束标签的bar.open锁定09:40参考价")
     else:
@@ -529,13 +529,14 @@ def _render_entry_strategy_body(semantic: Mapping[str, Any]) -> str:
 
     scheduled_exits = semantic.get("scheduled_exits_today") or []
     if scheduled_exits:
-        lines.extend(["", f"今天已有模型腿计划退出（{len(scheduled_exits)}只）:"])
+        lines.extend(["", f"今天计划卖出的股票（{len(scheduled_exits)}只）:"])
         for item in scheduled_exits:
             lines.append(
                 f"- {item['code']} {item.get('stock_name', '')}  "
-                f"D0={item.get('signal_date', '-')} / rank={item.get('rank', '-')} / "
-                f"腿份额={_pct(item.get('relative_weight'))}；"
-                f"最迟{item.get('plan_time', '14:57')}整腿退出，保护线命中则提前通知"
+                f"推荐日期={item.get('signal_date', '-')} / 当日排名={item.get('rank', '-')} / "
+                f"原建议资金比例={_pct(item.get('relative_weight'))}；"
+                f"最迟{item.get('plan_time', '14:57')}卖出这次买入的全部数量，"
+                "触及止损线则提前通知"
             )
     return "\n".join(lines)
 
@@ -606,7 +607,7 @@ def _render_manual_entry_check_for_operator(
     lines.extend(
         [
             "",
-            "边界：本消息不创建模型批次、模型腿、持仓或订单；正式策略状态与早盘正式消息不变。",
+            "说明：本消息不会自动买卖股票，也不代表账户已有持仓。",
             (
                 f"交易日：{trade_date}｜计算完成：{computed_at.strftime('%H:%M:%S')}｜"
                 f"请求：{semantic.get('manual_request_id', '-')}｜事件：{event_id[:16]}"
@@ -671,19 +672,20 @@ def _render_data_alert_for_operator(
             [
                 f"{title_prefix} 人工补挂卖出监控已启用",
                 "",
-                f"🟢 已启用：{semantic.get('armed_leg_count', 0)} 只模型腿",
+                f"🟢 已启用：{semantic.get('armed_leg_count', 0)} 只股票的卖出提醒",
                 f"票单：{tickets or '无'}",
-                ("参考价：D0 原始 09:41 bar.open；在 D1 09:30 按固定截止时间统一仲裁锁定"),
-                "D1 保护：任一有效分钟 bar.close ≤ 参考价 92%，触发整腿卖出提醒",
+                "参考价：推荐当天 09:40 的价格，在下一交易日 09:30 前确认",
+                "推荐后第1个交易日：任一分钟收盘价跌至参考价的92%或更低，提醒全部卖出",
                 (
-                    "D2 保护：任一有效分钟 bar.close ≤ 参考价 88%；"
-                    "合格 MEWS=DANGER 时提高到 95%；14:57 无条件提醒退出"
+                    "推荐后第2个交易日：止损线为参考价的88%；"
+                    "市场风险预警生效时提高到95%；最迟14:57提醒全部卖出"
                 ),
                 "",
-                "边界：只新增卖出监控腿；未修改正式入场决定，也未创建订单、持仓或成交。",
+                "说明：已添加卖出提醒；系统不会自动下单，也不代表你已买入。",
                 (
-                    f"D0={semantic.get('signal_date', '-')} | "
-                    f"D1={semantic.get('d1', '-')} | D2={semantic.get('d2', '-')}"
+                    f"推荐日期={semantic.get('signal_date', '-')} | "
+                    f"第1个交易日={semantic.get('d1', '-')} | "
+                    f"第2个交易日={semantic.get('d2', '-')}"
                 ),
                 f"来源事件：{str(semantic.get('source_event_id', '-'))[:16]}",
                 f"确认事件：{event_id[:16]}",
@@ -756,11 +758,12 @@ def render_entry_message(
             lines.append("⚪ 当前为前向观察，不替代V16正式建议。")
         scheduled_exits = semantic.get("scheduled_exits_today") or []
         if scheduled_exits:
-            lines.extend(["", "已有模型腿的卖出计划不受影响："])
+            lines.extend(["", "此前推荐股票的卖出计划："])
             for item in scheduled_exits:
                 lines.append(
                     f"- {item['code']} {item.get('stock_name', '')}："
-                    f"最迟{item.get('plan_time', '14:57')}整腿退出，保护线命中会提前通知"
+                    f"最迟{item.get('plan_time', '14:57')}卖出这次买入的全部数量，"
+                    "触及止损线会提前通知"
                 )
         lines.extend(
             [
@@ -819,10 +822,10 @@ def render_expired_entry_delivery_message(semantic: Mapping[str, Any]) -> str:
 
 
 _EXIT_LABELS = {
-    "D1_CLOSE_CONFIRM_08": "D1 恐慌下杀 -8%",
-    "D2_ENTRY_12": "D2 常驻底线 -12%",
-    "D2_MEWS_DANGER_ENTRY_05": "D2 MEWS危险线 -5%",
-    "PLAN_1457": "D2 14:57计划退出",
+    "D1_CLOSE_CONFIRM_08": "推荐后第1个交易日，价格跌至参考价的92%或更低",
+    "D2_ENTRY_12": "推荐后第2个交易日，价格跌至参考价的88%或更低",
+    "D2_MEWS_DANGER_ENTRY_05": "市场风险预警已生效，价格跌至参考价的95%或更低",
+    "PLAN_1457": "推荐后第2个交易日，按计划于14:57卖出",
 }
 
 
@@ -870,7 +873,7 @@ def render_exit_message(
     commit_marker: int,
 ) -> str:
     mode = str(semantic.get("deployment_mode", "forward_shadow"))
-    title = "[V20][SHADOW] 退出观察" if mode == "forward_shadow" else "[V20] 退出建议"
+    title = "[V20][SHADOW] 卖出提醒" if mode == "forward_shadow" else "[V20] 卖出建议"
     signal_type = str(semantic["exit_signal_type"])
     actionable_from = _public_actionable_from(semantic, generated_at)
     actionable_text = {
@@ -886,19 +889,19 @@ def render_exit_message(
             if mode == "forward_shadow"
             else "⚠️ 正式策略退出建议"
         ),
-        "建议退出该模型腿100%（不是账户全部持仓）",
+        "建议：卖出按下述推荐买入的这只股票，全部卖出。",
+        "范围：仅限这次买入的数量；其他日期买入的同一只股票不在本次提醒范围内。",
         f"股票: {semantic['code']} {semantic.get('stock_name', '')}",
-        (
-            f"模型腿: D0={semantic['signal_date']} / rank={semantic['rank']} / "
-            f"{str(semantic['model_leg_id'])[:16]}"
-        ),
+        (f"推荐日期: {semantic['signal_date']} / 当日排名: 第{semantic['rank']}名"),
         f"触发: {_EXIT_LABELS.get(signal_type, signal_type)}",
     ]
     if semantic.get("origin_kind") == "MANUAL_MONITOR":
-        lines.append("来源：人工补挂的冻结票单监控腿（只发卖出提醒，不代表系统已下单或持仓）")
+        lines.append("来源：你手动添加的股票卖出提醒（不代表系统已下单或你已买入）")
     if semantic.get("origin_final_relative_weight") is not None:
         lines.append(
-            f"该模型腿相对标准批次份额: {_pct(float(semantic['origin_final_relative_weight']))}"
+            "原建议资金比例: 单次买入预算的 "
+            f"{_pct(float(semantic['origin_final_relative_weight']))}"
+            "（非账户总资金比例）"
         )
     reference = semantic.get("reference_entry_price")
     observed = semantic.get("observed_close")
@@ -906,7 +909,7 @@ def render_exit_message(
     if reference is not None:
         lines.append(f"参考价: {float(reference):.2f}")
     else:
-        lines.append("参考价: 不可用（计划退出不因此留豁口）")
+        lines.append("参考价: 暂缺，仍按原定时间提醒卖出")
     if observed is not None:
         if wealth_factor is None:
             raise ValueError("observed exit price requires a wealth factor")
@@ -1601,12 +1604,13 @@ def seal_v20_payload(
             else ""
         )
         message = (
-            f"{title_prefix} 退出提醒（尚未确认停止提醒）\n"
+            f"{title_prefix} 卖出提醒（尚未确认停止提醒）\n"
             f"{shadow_notice}"
             f"股票: {semantic.get('code', '-')} {semantic.get('stock_name', '')}\n"
-            f"模型腿: {str(semantic.get('model_leg_id', '-'))[:16]}\n"
+            f"推荐日期: {semantic.get('signal_date', '-')}\n"
             f"原退出规则: {exit_label}\n"
-            "建议仍为退出该模型腿100%。若已处理，请通过V20确认接口停止后续提醒。\n"
+            "建议：卖出按这次推荐买入的全部数量，其他日期买入的数量不在本次范围内。\n"
+            "若已处理，可确认停止后续提醒。\n"
             f"原事件: {semantic.get('original_exit_event_id', '-')}"
         )
     elif (

@@ -186,18 +186,24 @@ async def test_same_date_entry_commits_with_full_legs_and_date_scoped_delivery(r
 
 
 @pytest.mark.parametrize("blocked", [False, True])
+@pytest.mark.parametrize("first_source", ["timer", "button"])
+@pytest.mark.parametrize("lose_rerun_response", [False, True])
 async def test_v22_slim_real_entry_commit_seal_and_delivery_without_exit_lots(
-    repository, monkeypatch, blocked
+    repository, monkeypatch, blocked, first_source, lose_rerun_response
 ):
     """Exercise the real entry engine, transaction and publisher for both outcomes."""
     from types import SimpleNamespace
 
     import httpx
+    from fastapi import FastAPI
 
     from src.common import feishu_bot
     from src.common.v20_feishu import V20FeishuRoute, V20OutboxPublisher, seal_v20_payload
     from src.strategy.v20.artifacts import load_g_artifacts
     from src.strategy.v20.decision_engine import prepare_entry
+    from src.web.v20_canonical_selection import V20CanonicalSelectionState
+    from src.web.v20_routes import _dispatch_manual_trigger, create_v20_router
+    from src.web.v20_service import V20Service, _DayContext
     from tests.unit.strategy.test_v22_slim_entry import fixture
 
     instance, pool, schema = repository
@@ -249,21 +255,118 @@ async def test_v22_slim_real_entry_commit_seal_and_delivery_without_exit_lots(
         official_stream_id=config.official_stream_id,
         lineage_id=config.state_lineage_id,
     )
-    await instance.commit_entry(commit)
-    await instance.commit_entry(commit)
+    # A ledger failure must roll back the ordinary daily decision and outbox.
+    await pool.execute(
+        f"ALTER TABLE {schema}.selection_runs ADD CONSTRAINT reject_test_run CHECK (false)"
+    )
+    with pytest.raises(asyncpg.CheckViolationError):
+        await instance.commit_selection_run(commit, run_id="a" * 64)
+    assert await pool.fetchval(f"SELECT count(*) FROM {schema}.entry_decisions") == 0
+    assert await pool.fetchval(f"SELECT count(*) FROM {schema}.outbox_events") == 0
+    assert (await instance.load_state(config.state_lineage_id)).revision == 0
+    await pool.execute(f"ALTER TABLE {schema}.selection_runs DROP CONSTRAINT reject_test_run")
+    # Only external market facts and unrelated maintenance are substituted.
+    # Keep the task, entry engine, transaction, renderer and publisher real.
+    task_now = now.replace(hour=14, minute=45)
+    service = V20Service(
+        config=config,
+        repository=instance,
+        scan_state=V20CanonicalSelectionState(),
+        artifacts=load_g_artifacts(
+            config.artifact_manifest_path.parent,
+            expected_manifest_sha256=config.artifact_manifest_sha256,
+        ),
+        publisher=SimpleNamespace(),
+        routes={},
+        clock=lambda: task_now,
+    )
+    calculations = []
+
+    async def no_op(*args, **kwargs):
+        return None
+
+    async def load_calendar(_day):
+        return calendar
+
+    async def calculate(day, **kwargs):
+        calculations.append(day)
+        result = prepare_entry(
+            config=config,
+            state=state,
+            bundle=bundle,
+            completed_health=[],
+            completed_rolling=[],
+            maturity_gaps=[],
+            calendar=calendar,
+            artifacts=service._artifacts,
+        )
+        return SimpleNamespace(bundle=bundle, prepared=result, canonical_first_received_at=now)
+
+    service._require_manual_trigger_ready = no_op
+    service._load_trade_calendar = load_calendar
+    service._reconcile_missed_slots = no_op
+    service._expire_reference_gaps = no_op
+    service._process_mature_shadow = no_op
+    service.kick_mews_for_selection_trigger = lambda current: None
+    service._orchestrate_morning_selection = calculate
+    if first_source == "timer":
+        async with service._decision_cycle_lock:
+            await service._commit_entry_from_bundle(_DayContext(today, calendar), task_now)
+        first_event = commit.event_id
+    else:
+        first = await _dispatch_manual_trigger(service, "postgres-button-first-001")
+        first_event = first["entry_event_id"]
+        assert first["official_state_changed"] is True
+        assert first["task_success"] is False
+    api = FastAPI()
+    api.include_router(create_v20_router())
+    api.state.v20_service = service
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=api), base_url="http://testserver"
+    ) as client:
+        responses = await asyncio.gather(
+            *(
+                client.post(
+                    "/api/v20/trigger-scan",
+                    headers={"Idempotency-Key": "postgres-button-rerun-001"},
+                )
+                for _ in range(3)
+            )
+        )
+    assert [response.status_code for response in responses] == [202, 202, 202]
+    results = [response.json() for response in responses]
+    assert sum(result["created"] for result in results) == 1
+    assert len({result["entry_event_id"] for result in results}) == 1
+    rerun = results[0]
+    second_event = rerun["entry_event_id"]
+    assert rerun["official_state_changed"] is False
+    assert rerun["task_success"] is False
+    retry = await _dispatch_manual_trigger(service, "postgres-button-rerun-001")
+    assert retry["entry_event_id"] == second_event and retry["created"] is False
+    assert calculations == [today, today]
+    assert first_event != second_event
     status = await instance.get_entry_status(config.official_stream_id, today)
     assert status.action == ("BLOCK" if blocked else "ENTER")
     assert len(status.semantic["symbols"]) == (0 if blocked else 3)
     assert len(status.semantic["reference_symbols"]) == 10
     assert await pool.fetchval(f"SELECT count(*) FROM {schema}.model_legs") == 0
     assert await pool.fetchval(f"SELECT count(*) FROM {schema}.shadow_batches") == 1
-    assert await pool.fetchval(f"SELECT count(*) FROM {schema}.outbox_events") == 1
+    assert await pool.fetchval(f"SELECT count(*) FROM {schema}.outbox_events") == 2
+    assert await pool.fetchval(f"SELECT count(*) FROM {schema}.selection_runs") == 2
     sealed = await instance.seal_event(commit.event_id, seal_v20_payload)
     assert "V22-slim" in sealed.payload["message"]
+    repeated = await instance.seal_event(second_event, seal_v20_payload)
+    assert repeated.event_type == sealed.event_type == "ENTRY_DECISION"
+    assert {**repeated.semantic, "event_id": first_event} == sealed.semantic
+    assert "仅核查" not in repeated.payload["message"]
     posts = []
 
     def reply(request):
         posts.append(json.loads(request.content))
+        if lose_rerun_response and len(posts) == 2:
+            raise httpx.ReadTimeout(
+                "relay accepted the rerun but its reply was lost", request=request
+            )
         return httpx.Response(200, json={"code": 0, "msg": "success"})
 
     original_client = httpx.AsyncClient
@@ -290,8 +393,9 @@ async def test_v22_slim_real_entry_commit_seal_and_delivery_without_exit_lots(
         lineage_id=config.state_lineage_id,
     )
     assert await publisher.publish_once() == 1
+    assert await publisher.publish_once() == (0 if lose_rerun_response else 1)
     assert await publisher.publish_once() == 0
-    assert len(posts) == 1
+    assert len(posts) == 2
     delivered = await instance.get_outbox_event(
         commit.event_id,
         route_id=config.route_id,
@@ -299,6 +403,30 @@ async def test_v22_slim_real_entry_commit_seal_and_delivery_without_exit_lots(
         lineage_id=config.state_lineage_id,
     )
     assert delivered.delivery_status == "SENT"
+    repeated_delivery = await instance.get_outbox_event(
+        second_event,
+        route_id=config.route_id,
+        official_stream_id=config.official_stream_id,
+        lineage_id=config.state_lineage_id,
+    )
+    assert repeated_delivery.delivery_status == (
+        "DELIVERY_UNKNOWN" if lose_rerun_response else "SENT"
+    )
+    delivered_result = await _dispatch_manual_trigger(service, "postgres-button-rerun-001")
+    assert delivered_result["task_success"] is (not lose_rerun_response)
+    assert delivered_result["feishu_delivery_confirmed"] is (not lose_rerun_response)
+    # A restarted publisher must not resend a delivered or uncertain attempt.
+    for index in range(3):
+        restarted = V20OutboxPublisher(
+            instance,
+            {config.route_id: route},
+            worker_id=f"restart-{index}",
+            route_id=config.route_id,
+            official_stream_id=config.official_stream_id,
+            lineage_id=config.state_lineage_id,
+        )
+        assert await restarted.publish_once() == 0
+    assert calculations == [today, today] and len(posts) == 2
     assert (await instance.load_state(config.state_lineage_id)).revision == 1
 
 

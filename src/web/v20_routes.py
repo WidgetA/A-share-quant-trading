@@ -48,11 +48,6 @@ _ENTRY_LOOKBACK_SESSIONS = 10
 _MANUAL_ENTRY_LOCK_TIMEOUT_SECONDS = 180.0
 _FROZEN_ENTRY_REPLAY_ALERT_CODE = "MANUAL_MORNING_ENTRY_MESSAGE_REPLAY"
 _FROZEN_ENTRY_REPLAY_PROFILE = "FROZEN_OFFICIAL_ENTRY_MESSAGE_V1"
-_POST_CUTOFF_SERIALIZATION_RETRY_LIMIT = 4
-_POST_CUTOFF_SERIALIZATION_RETRY_BASE_SECONDS = 0.01
-
-
-_POST_CUTOFF_TERMINAL_ACTIONS = frozenset({"ENTER", "BLOCK", "NO_SIGNAL", "INPUT_INVALID"})
 
 
 class V20RouteService(Protocol):
@@ -65,14 +60,6 @@ class V20RouteService(Protocol):
     async def record_reminder_stop_ack(self, payload: Mapping[str, Any]) -> Any: ...
 
     async def trigger_morning_selection(self, request_id: str) -> Any: ...
-
-    async def trigger_canonical_selection_check_only(
-        self,
-        request_id: str,
-        now: datetime,
-    ) -> Any: ...
-
-    def kick_mews_for_selection_trigger(self, now: datetime) -> Any: ...
 
     async def enroll_manual_monitor(self, source_event_id: str, request_id: str) -> Any: ...
 
@@ -448,139 +435,13 @@ async def _replay_frozen_entry_message(
         )
 
 
-async def _today_terminal_entry(service: Any, now: datetime) -> Any | None:
-    repository = service._repository
-    config = service.config
-    status = await repository.get_entry_status(
-        config.official_stream_id,
-        now.date(),
-    )
-    if status is not None:
-        if status.action not in _POST_CUTOFF_TERMINAL_ACTIONS:
-            raise V20StateConflict("current V20 morning slot is not terminal")
-        service._verify_entry_binding(status)
-        return status
-
-    decision_lock = getattr(service, "_decision_cycle_lock", None)
-    if decision_lock is None:
-        raise V20StateConflict("V20 decision lane lock is unavailable")
-    try:
-        await asyncio.wait_for(
-            decision_lock.acquire(),
-            timeout=_MANUAL_ENTRY_LOCK_TIMEOUT_SECONDS,
-        )
-    except TimeoutError as exc:
-        raise V20StateConflict("V20 decision lane is busy") from exc
-    try:
-        status = await repository.get_entry_status(
-            config.official_stream_id,
-            now.date(),
-        )
-    finally:
-        decision_lock.release()
-    if status is not None:
-        if status.action not in _POST_CUTOFF_TERMINAL_ACTIONS:
-            raise V20StateConflict("current V20 morning slot is not terminal")
-        service._verify_entry_binding(status)
-    return status
-
-
-def _kick_mews_for_selection_trigger(service: Any, now: datetime) -> Any:
-    kick = getattr(service, "kick_mews_for_selection_trigger", None)
-    if kick is None:
-        raise V20StateConflict("V20 MEWS trigger kick is unavailable")
-    return kick(now)
-
-
-def _is_postgres_serialization_conflict(exc: BaseException) -> bool:
-    """Recognize only PostgreSQL serialization failures (SQLSTATE 40001)."""
-
-    current: BaseException | None = exc
-    seen: set[int] = set()
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        code = getattr(current, "pgcode", None) or getattr(current, "sqlstate", None)
-        if code == "40001":
-            return True
-        current = current.__cause__ or current.__context__
-    return False
-
-
-async def _run_post_cutoff_idempotent_check(
-    canonical_trigger: Callable[[str, datetime], Awaitable[Any]],
-    request_id: str,
-    now: datetime,
-) -> Any:
-    """Converge concurrent same-key operator probes after a serializable race.
-
-    This adapter is intentionally restricted to the post-cutoff canonical
-    check-only hook.  That hook has a deterministic event id and may only
-    persist its idempotent operator notification; official state, orders, and
-    model batches are read-only.  The live morning/ordering lanes never call
-    this retry boundary.
-    """
-
-    for attempt in range(_POST_CUTOFF_SERIALIZATION_RETRY_LIMIT):
-        try:
-            return await canonical_trigger(request_id, now)
-        except Exception as exc:
-            if (
-                not _is_postgres_serialization_conflict(exc)
-                or attempt + 1 >= _POST_CUTOFF_SERIALIZATION_RETRY_LIMIT
-            ):
-                raise
-            logger.warning(
-                "V20 post-cutoff same-key probe hit PostgreSQL serialization conflict; "
-                "retrying idempotent durable read (attempt %s/%s)",
-                attempt + 2,
-                _POST_CUTOFF_SERIALIZATION_RETRY_LIMIT,
-            )
-            await asyncio.sleep(_POST_CUTOFF_SERIALIZATION_RETRY_BASE_SECONDS * (2**attempt))
-    raise AssertionError("unreachable post-cutoff serialization retry state")
-
-
 async def _dispatch_manual_trigger(service: Any, request_id: str) -> Any:
-    """Run the live lane or a post-cutoff durable-artifact check-only probe."""
-
+    """The button invokes the ordinary selection task; it has no cutoff branch."""
     if _MANUAL_REQUEST_ID.fullmatch(request_id) is None:
         raise ValueError(
             "Idempotency-Key must be 8-128 characters using letters, digits, . _ : or -"
         )
-    now = service._aware_now()
-    wall = now.timetz().replace(tzinfo=None)
-    clock = service.config.clock
-    if wall < clock.publish_deadline:
-        _kick_mews_for_selection_trigger(service, now)
-        return await service.trigger_morning_selection(request_id)
-    # A missing same-day slot still runs the full live lane after 09:40/09:45.
-    # Terminal slots remain immutable; the operator can recompute those as a
-    # diagnostic without creating a second official decision.
-    status = await _today_terminal_entry(service, now)
-    if status is None:
-        _kick_mews_for_selection_trigger(service, now)
-        return await service.trigger_morning_selection(request_id)
-    canonical_trigger = getattr(
-        service,
-        "trigger_canonical_selection_check_only",
-        None,
-    )
-    if canonical_trigger is None:
-        raise V20StateConflict("canonical V20 check-only selection adapter is unavailable")
-    mews_attempt = _kick_mews_for_selection_trigger(service, now)
-    try:
-        return await _run_post_cutoff_idempotent_check(
-            canonical_trigger,
-            request_id,
-            now,
-        )
-    finally:
-        # A post-cutoff operator probe is allowed to wait for the independently
-        # managed MEWS singleflight to settle.  Its success/failure never changes
-        # the canonical selection result, while awaiting it here guarantees that
-        # a genuine failure has finished its idempotent alert before the request
-        # returns.  Narrow route doubles may expose a synchronous no-op kick.
-        if isinstance(mews_attempt, Awaitable):
-            await asyncio.gather(mews_attempt, return_exceptions=True)
+    return await service.trigger_morning_selection(request_id)
 
 
 def create_v20_router() -> APIRouter:
@@ -607,11 +468,7 @@ def create_v20_router() -> APIRouter:
         request: Request,
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     ) -> Any:
-        """Run the morning calculation and expose its result with the proper actionability.
-
-        An uncommitted same-day slot runs the complete ordinary decision lane.
-        An existing terminal slot is checked without rewriting its decision.
-        """
+        """Run the same complete task as the timer, including on a new repeat request."""
 
         async for chunk in request.stream():
             if chunk:
