@@ -847,7 +847,7 @@ def test_legacy_runtime_factory_owns_v20_resources_and_accepts_no_shared_state(
     )
     captured: dict[str, object] = {}
 
-    monkeypatch.setattr(service_module, "load_v20_runtime_config", lambda _root: base)
+    monkeypatch.setattr(service_module, "load_v20_runtime_config", lambda _root, _path=None: base)
 
     repository_pools: list[object | None] = []
 
@@ -926,7 +926,7 @@ async def test_embedded_runtime_uses_its_own_tushare_trade_calendar_client(
         chat_id="legacy-chat",
         transport="legacy_send",
     )
-    monkeypatch.setattr(service_module, "load_v20_runtime_config", lambda _root: base)
+    monkeypatch.setattr(service_module, "load_v20_runtime_config", lambda _root, _path=None: base)
     monkeypatch.setattr(
         service_module,
         "create_embedded_v20_repository_from_config",
@@ -1028,7 +1028,9 @@ def test_default_factory_rejects_resolved_database_yaml_drift_before_connect(
 
     writer = _NeverConnected(writer_config)
     fundamentals = _NeverConnected(reader_config)
-    monkeypatch.setattr(service_module, "load_v20_runtime_config", lambda _root: runtime)
+    monkeypatch.setattr(
+        service_module, "load_v20_runtime_config", lambda _root, _path=None: runtime
+    )
     monkeypatch.setattr(
         service_module,
         "create_v20_repository_from_config",
@@ -1073,7 +1075,9 @@ def test_literal_database_yaml_drift_fails_before_asyncpg_connect(
         nonlocal create_pool_calls
         create_pool_calls += 1
 
-    monkeypatch.setattr(service_module, "load_v20_runtime_config", lambda _root: runtime)
+    monkeypatch.setattr(
+        service_module, "load_v20_runtime_config", lambda _root, _path=None: runtime
+    )
     monkeypatch.setattr(
         service_module,
         "create_v20_repository_from_config",
@@ -8697,11 +8701,14 @@ class _ExitRepository:
         self.sealed = event_id
 
 
+@pytest.mark.parametrize("selection_version", ["V20_BAD_E50_G_BASE_V1", "V22-slim"])
 async def test_d2_minus_12_creates_and_seals_full_model_leg_exit(
     monkeypatch: pytest.MonkeyPatch,
+    selection_version: str,
 ) -> None:
     repository = _ExitRepository()
     service = _service(monkeypatch, repository)
+    service.config = replace(service.config, strategy_version=selection_version)
     leg = ActiveModelLeg(
         model_leg_id="leg",
         model_batch_id="batch",
@@ -8729,6 +8736,7 @@ async def test_d2_minus_12_creates_and_seals_full_model_leg_exit(
 
     assert repository.commit is not None
     assert repository.commit.signal_type == "D2_ENTRY_12"
+    assert repository.commit.semantic["strategy_version"] == "V20_BAD_E50_G_BASE_V1"
     assert repository.commit.semantic["exit_scope"] == "FULL_MODEL_LEG"
     assert repository.commit.semantic["recommended_exit_fraction"] == 1.0
     assert repository.commit.semantic["delivery_priority_class"] == "LIVE_EXIT"

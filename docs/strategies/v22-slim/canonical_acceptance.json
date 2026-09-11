@@ -1,0 +1,13 @@
+{
+  "day": "2026-09-11",
+  "top10_match": true,
+  "fresh_restart_match": true,
+  "whole_market_count": 3185,
+  "top3": [
+    "603052",
+    "000636",
+    "002384"
+  ],
+  "model_sha256": "55b6c1eb6afe9b642893fcdad2d073cb8851e73914592ee7d95946e06da82525",
+  "notifications_sent": 0
+}

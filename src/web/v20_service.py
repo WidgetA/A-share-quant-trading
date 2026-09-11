@@ -1309,6 +1309,7 @@ class V20Service:
         self.config = config
         self._repository = repository
         self._scan_state = scan_state
+        self._scan_state.selection_version = config.strategy_version
         self._artifacts = artifacts
         self._publisher = publisher
         self._routes = dict(routes)
@@ -1412,7 +1413,7 @@ class V20Service:
         from src.data.database.fundamentals_db import create_fundamentals_db_from_config
 
         project_root = Path(__file__).resolve().parents[2]
-        config = load_v20_runtime_config(project_root)
+        config = load_v20_runtime_config(project_root, project_root / "config/v22-slim.yaml")
         database_config_path = project_root / "config" / "database-config.yaml"
         repository = create_v20_repository_from_config(database_config_path)
         if (
@@ -1495,7 +1496,7 @@ class V20Service:
         from src.data.database.fundamentals_db import create_fundamentals_db_from_config
 
         project_root = Path(__file__).resolve().parents[2]
-        base_config = load_v20_runtime_config(project_root)
+        base_config = load_v20_runtime_config(project_root, project_root / "config/v22-slim.yaml")
         if base_config.deployment_mode != "forward_shadow":
             raise V20ConfigError("embedded V20 only supports forward_shadow mode")
         if base_config.enabled:
@@ -2143,6 +2144,8 @@ class V20Service:
         immutable event and an idempotency key.
         """
 
+        if self.config.strategy_version == "V22-slim":
+            raise V20StateConflict("V22-slim is entry-only; new exit-monitor lots are disabled")
         await self._require_manual_trigger_ready()
         if not isinstance(source_event_id, str) or len(source_event_id) != 64:
             raise ValueError("source_event_id must be a 64-character V20 event id")
@@ -7022,6 +7025,25 @@ class V20Service:
                 if len(code) == 6 and code.startswith(("00", "60")) and previous_close > 0
             )
         )
+        if self.config.strategy_version == "V22-slim" and fact_received_before is None:
+            from src.strategy.v22_slim.runtime_inputs import api_rows
+
+            limits = await api_rows(
+                client, "stk_limit", {"trade_date": trade_date.strftime("%Y%m%d")}
+            )
+            if any(row["trade_date"] != trade_date.strftime("%Y%m%d") for row in limits):
+                raise V20SemanticConflict("V22-slim price-limit universe date is invalid")
+            # Include resumed stocks absent from yesterday's trading rows.
+            # The exact acquired code set is retained in the canonical artifact.
+            breadth_codes = tuple(
+                sorted(
+                    set(breadth_codes).union(
+                        row["ts_code"][:6]
+                        for row in limits
+                        if row["ts_code"].startswith(("00", "60"))
+                    )
+                )
+            )
         today = self._aware_now().astimezone(SHANGHAI).date()
         minute_source = "rt_min_daily" if trade_date == today else "stk_mins"
         logger.info(
@@ -7048,7 +7070,15 @@ class V20Service:
             minute_source,
             len(seed),
         )
-        if trade_date == today:
+        if self.config.strategy_version == "V22-slim":
+            from src.strategy.v22_slim.selection import FrozenBoards
+
+            frozen_names = FrozenBoards().names
+            names = {code: frozen_names[code] for code in frozen_universe}
+            st_eligible_codes = tuple(
+                sorted(code for code, name in names.items() if "ST" not in name.upper())
+            )
+        elif trade_date == today:
             fundamentals = self._scan_state.fundamentals_db
             if fundamentals is None or not callable(
                 getattr(fundamentals, "batch_current_names", None)
@@ -7698,9 +7728,10 @@ class V20Service:
         if bundle.trade_date != trade_date:
             raise V20SemanticConflict("canonical V16 artifact belongs to another trade date")
         expected_dependencies = self.config.strategy_dependency_hashes
+        model_directory = "v22_slim" if self.config.strategy_version == "V22-slim" else "v20"
         for logical_path, snapshot_field in (
-            ("models/v20/lgbrank_latest.txt", "scorer_model_sha256"),
-            ("models/v20/feature_list.json", "scorer_feature_sha256"),
+            (f"models/{model_directory}/lgbrank_latest.txt", "scorer_model_sha256"),
+            (f"models/{model_directory}/feature_list.json", "scorer_feature_sha256"),
         ):
             if bundle.snapshot.get(snapshot_field) != expected_dependencies.get(logical_path):
                 raise V20SemanticConflict(
@@ -7814,6 +7845,32 @@ class V20Service:
                     trade_date,
                 )
         scheduled = tuple(dict(item) for item in scheduled_source)
+        if self.config.strategy_version == "V22-slim":
+            if status is not None:
+                if status.strategy_version != "V22-slim":
+                    raise V20SemanticConflict(
+                        "This day's immutable slot belongs to V20; "
+                        "V22-slim starts with the next new slot"
+                    )
+                snapshot = {
+                    **dict(bundle.snapshot),
+                    "v22_slim_inputs": status.snapshot["v22_slim_inputs"],
+                    "breadth_valid_n": status.snapshot["breadth_valid_n"],
+                    "breadth_down_n": status.snapshot["breadth_down_n"],
+                }
+                bundle = replace(
+                    bundle,
+                    snapshot=snapshot,
+                    snapshot_hash=sha256_json(snapshot),
+                    breadth_valid_n=snapshot["breadth_valid_n"],
+                    breadth_down_n=snapshot["breadth_down_n"],
+                )
+            else:
+                from src.strategy.v22_slim.runtime_inputs import build_inputs
+
+                bundle, completed_health, completed_rolling, maturity_gaps = await build_inputs(
+                    self, bundle, completed_health, completed_rolling, maturity_gaps
+                )
         prepared = prepare_entry(
             config=self.config,
             state=calculation_state,
@@ -8064,6 +8121,13 @@ class V20Service:
             },
             "board_avg_gains": dict(sorted(result.step2_board_avg_gains.items())),
         }
+        if (
+            canonical.model_sha256
+            == "55b6c1eb6afe9b642893fcdad2d073cb8851e73914592ee7d95946e06da82525"
+        ):
+            from src.strategy.v22_slim.selection import market_projection
+
+            snapshot["v22_market"] = market_projection(canonical.early_bars, canonical.trade_date)
         return FrozenV16ScanBundle(
             trade_date=canonical.trade_date,
             frozen_at=canonical.computed_at,
@@ -9500,7 +9564,13 @@ class V20Service:
             "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
             "event_id": exit_event_id,
             "event_type": "EXIT_SIGNAL",
-            "strategy_version": self.config.strategy_version,
+            # V22-slim creates no exit lots. Existing lots retain the V20 exit
+            # contract even while the morning selector uses its new profile.
+            "strategy_version": (
+                "V20_BAD_E50_G_BASE_V1"
+                if self.config.strategy_version == "V22-slim"
+                else self.config.strategy_version
+            ),
             "config_hash": self.config.config_hash,
             "deployment_mode": self.config.deployment_mode,
             "model_batch_id": record.model_batch_id,

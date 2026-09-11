@@ -1,0 +1,2 @@
+# Frozen V22 assets are authenticated byte-for-byte across Windows and Linux.
+models/v22_slim/* -text whitespace=cr-at-eol

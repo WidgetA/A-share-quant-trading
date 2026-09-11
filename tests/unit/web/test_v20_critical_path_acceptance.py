@@ -1011,13 +1011,19 @@ async def test_real_factories_and_app_lifecycle_have_no_scan_pipeline(
         except BaseException as exc:
             return exc
 
-    monkeypatch.setattr(service_module, "load_v20_runtime_config", lambda _root: strict_config)
+    monkeypatch.setattr(
+        service_module, "load_v20_runtime_config", lambda _root, _path=None: strict_config
+    )
     strict = await call_factory(V20Service.from_default_config)
-    monkeypatch.setattr(service_module, "load_v20_runtime_config", lambda _root: embedded_config)
+    monkeypatch.setattr(
+        service_module, "load_v20_runtime_config", lambda _root, _path=None: embedded_config
+    )
     embedded = await call_factory(V20Service.from_legacy_runtime)
     app = web_app.create_app()
     app.state.fundamentals_db = SimpleNamespace(connection_pool=object())
-    monkeypatch.setattr(service_module, "load_v20_runtime_config", lambda _root: strict_config)
+    monkeypatch.setattr(
+        service_module, "load_v20_runtime_config", lambda _root, _path=None: strict_config
+    )
     try:
         await web_app._start_v20_lifecycle(app)
         assert app.state.v20_service_started is True

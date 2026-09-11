@@ -1,0 +1,38 @@
+{
+  "day": "2026-09-11",
+  "top3": [
+    "603052",
+    "000636",
+    "002384"
+  ],
+  "full_list": [
+    "603052",
+    "000636",
+    "002384",
+    "603773",
+    "603124",
+    "001267",
+    "002025",
+    "002138",
+    "002281",
+    "603459"
+  ],
+  "action": "BLOCK",
+  "risk_before": 2,
+  "risk_after": 3,
+  "h90": {
+    "known": true,
+    "block": false,
+    "h10_ratio": 1.0511216256135945,
+    "h10_common_n": 3049,
+    "h20_ratio": 1.0451337491658466,
+    "h20_common_n": 2995,
+    "reason": "OK"
+  },
+  "strong": true,
+  "base": 0.0,
+  "rolling": "BAD",
+  "d0_reference_return": -0.0006762706767811859,
+  "checkpoint_sha256": "c6d826592bce05e40b47bf029dfb5baa5d764e5dc121b65f5ac077fb1aea78f0",
+  "notifications_sent": 0
+}

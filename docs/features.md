@@ -1,5 +1,14 @@
 # Feature Specifications
 
+## V22-slim — replace V20 morning selection (2026-09-11)
+
+User-authorized implementation and rollout: frozen V22 ranking and complete
+BASE × rolling7/G → H90 → D0-N2 entry gates, with the original Top3 as the
+actionable list. Preserve the full reference list and causal state separately.
+Reuse the V20 notification/runtime boundary; preserve V16 isolation and existing
+V20 exit-lot ownership. No account sizing or order execution is introduced.
+See [implementation contract and acceptance](strategies/v22-slim/README.md).
+
 > **Important**: This document is the single source of truth for feature requirements.
 > Always update this document BEFORE implementing any new feature or change.
 

@@ -1,0 +1,38 @@
+[
+  {
+    "day": "20260907",
+    "top3": [
+      "002552",
+      "002975",
+      "603738"
+    ],
+    "top10_match": true,
+    "maximum_score_error": 0.0
+  },
+  {
+    "day": "20260908",
+    "top3": [
+      "001267",
+      "605016",
+      "002317"
+    ],
+    "top10_match": true,
+    "maximum_score_error": 0.0
+  },
+  {
+    "day": "20260909",
+    "top3": [
+      "002792",
+      "002281",
+      "001267"
+    ],
+    "top10_match": true,
+    "maximum_score_error": 0.0
+  },
+  {
+    "day": "20260910",
+    "top3": [],
+    "top10_match": true,
+    "maximum_score_error": 0.0
+  }
+]

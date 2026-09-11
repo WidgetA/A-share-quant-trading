@@ -418,6 +418,7 @@ def _service(
 ) -> V20Service:
     instance = V20Service.__new__(V20Service)
     instance.config = SimpleNamespace(
+        strategy_version="V20_BAD_E50_G_BASE_V1",
         official_stream_id="rolling-official",
         state_lineage_id="rolling-lineage",
         clock=SimpleNamespace(reference_bar_label="09:41"),
