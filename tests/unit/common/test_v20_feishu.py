@@ -795,6 +795,31 @@ def _manual_0939_chain_probe_semantic(
     return semantic
 
 
+def test_cross_version_check_seals_and_discloses_why_old_decision_is_not_compared() -> None:
+    semantic = _manual_0939_chain_probe_semantic()
+    semantic.update(
+        strategy_version="V22-slim",
+        calculation_result="SUCCESS",
+        official_comparison_result="NOT_AVAILABLE",
+        official_comparison_unavailable_reason="DIFFERENT_SELECTION_VERSION",
+        official_mismatch_fields=[],
+        probe_mismatch_fields=[],
+    )
+    semantic["entry_render_semantic"].update(
+        strategy_version="V22-slim", entry_only=True, reference_symbols=semantic["symbols"]
+    )
+    payload = seal_v20_payload(
+        _outbox_record("DATA_ALERT", semantic, event_id=semantic["event_id"]),
+        datetime(2026, 8, 31, 15, 30, tzinfo=TZ),
+        21,
+        True,
+    )
+    assert "V22-slim" in payload["message"]
+    assert "属于其他选股版本" in payload["message"]
+    assert "本次计算：成功" in payload["message"]
+    assert "不生成新的入场指令" in payload["message"]
+
+
 def test_manual_0939_chain_probe_pass_message_is_check_only_manual_render() -> None:
     semantic = _manual_0939_chain_probe_semantic()
     generated_at = datetime(2026, 8, 31, 15, 30, tzinfo=TZ)

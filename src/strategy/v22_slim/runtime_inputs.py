@@ -28,6 +28,21 @@ def checkpoint() -> dict:
     return result
 
 
+def checkpoint_for_day(day: date) -> dict:
+    """Use a causal predecessor for both automatic and manual calculations."""
+    result = checkpoint()
+    if date.fromisoformat(result["as_of"]) >= day:
+        result = json.loads(
+            gzip.decompress(read_asset("reference_checkpoint_before_cutover.json.gz"))
+        )
+        if result.get("schema") != "v22-slim-reference-checkpoint/v1":
+            raise ValueError("unsupported V22-slim predecessor checkpoint")
+        deserialize_health_snapshot(result["health"])
+    if date.fromisoformat(result["as_of"]) >= day:
+        raise ValueError("V22-slim has no reference checkpoint strictly before the target date")
+    return result
+
+
 async def api_rows(client, api: str, params: dict) -> list[dict]:
     # pre_close is explicitly opt-in in the official stk_limit contract.
     # https://tushare.pro/document/2?doc_id=183
@@ -48,8 +63,8 @@ async def api_rows(client, api: str, params: dict) -> list[dict]:
 
 
 async def build_inputs(service, bundle, health, rolling, gaps):
-    seed = checkpoint()
     day = bundle.trade_date
+    seed = checkpoint_for_day(day)
     anchor = date.fromisoformat(seed["as_of"])
     if day <= anchor:
         raise ValueError("V22-slim decision must follow the frozen state checkpoint")

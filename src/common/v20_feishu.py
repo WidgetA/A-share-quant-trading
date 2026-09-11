@@ -577,7 +577,9 @@ def _render_manual_entry_check_for_operator(
             unavailable_reason = semantic.get("official_comparison_unavailable_reason")
             if isinstance(unavailable_reason, str) and unavailable_reason:
                 reason_text = (
-                    "旧版早盘正式记录未保存计算前状态"
+                    "早盘正式记录属于其他选股版本，本次按当前版本独立核查"
+                    if unavailable_reason == "DIFFERENT_SELECTION_VERSION"
+                    else "旧版早盘正式记录未保存计算前状态"
                     if unavailable_reason == "LEGACY_TERMINAL_PRESTATE_UNAVAILABLE"
                     else unavailable_reason
                 )
@@ -1164,9 +1166,11 @@ def _validate_manual_0939_chain_probe(
         if comparison not in {"MATCH", "DIFFERENT", "NOT_AVAILABLE"}:
             raise ValueError("V20 chain probe official comparison result is invalid")
         unavailable_reason = semantic.get("official_comparison_unavailable_reason")
-        if unavailable_reason not in {None, "LEGACY_TERMINAL_PRESTATE_UNAVAILABLE"} or (
-            unavailable_reason is not None and comparison != "NOT_AVAILABLE"
-        ):
+        if unavailable_reason not in {
+            None,
+            "LEGACY_TERMINAL_PRESTATE_UNAVAILABLE",
+            "DIFFERENT_SELECTION_VERSION",
+        } or (unavailable_reason is not None and comparison != "NOT_AVAILABLE"):
             raise ValueError("V20 chain probe comparison-unavailable reason is invalid")
         mismatch_fields = semantic["official_mismatch_fields"]
         if not isinstance(mismatch_fields, list) or any(

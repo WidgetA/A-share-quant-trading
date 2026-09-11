@@ -184,6 +184,123 @@ async def test_same_date_entry_commits_with_full_legs_and_date_scoped_delivery(r
     assert "已过09:40" not in sealed.payload["message"]
 
 
+@pytest.mark.parametrize("blocked", [False, True])
+async def test_v22_slim_real_entry_commit_seal_and_delivery_without_exit_lots(
+    repository, monkeypatch, blocked
+):
+    """Exercise the real entry engine, transaction and publisher for both outcomes."""
+    from types import SimpleNamespace
+
+    import httpx
+
+    from src.common import feishu_bot
+    from src.common.v20_feishu import V20FeishuRoute, V20OutboxPublisher, seal_v20_payload
+    from src.strategy.v20.artifacts import load_g_artifacts
+    from src.strategy.v20.decision_engine import prepare_entry
+    from tests.unit.strategy.test_v22_slim_entry import fixture
+
+    instance, pool, schema = repository
+    config, state, bundle = fixture()
+    now = (await pool.fetchval("SELECT clock_timestamp()")).astimezone(ZoneInfo("Asia/Shanghai"))
+    today = now.date()
+    calendar = tuple(today + timedelta(days=i) for i in range(3))
+    inputs = {**bundle.snapshot["v22_slim_inputs"], "h90": {"known": True, "block": blocked}}
+    snapshot = {**bundle.snapshot, "trade_date": today.isoformat(), "v22_slim_inputs": inputs}
+    bundle = replace(
+        bundle,
+        trade_date=today,
+        frozen_at=now,
+        computation_calendar=calendar,
+        snapshot=snapshot,
+        snapshot_hash=sha256_json(snapshot),
+    )
+    prepared = prepare_entry(
+        config=config,
+        state=state,
+        bundle=bundle,
+        completed_health=[],
+        completed_rolling=[],
+        maturity_gaps=[],
+        calendar=calendar,
+        artifacts=load_g_artifacts(
+            config.artifact_manifest_path.parent,
+            expected_manifest_sha256=config.artifact_manifest_sha256,
+        ),
+    )
+    commit = prepared.commit
+    await instance.register_config(
+        config_id=commit.config_id,
+        config_hash=commit.config_hash,
+        strategy_version=commit.strategy_version,
+        deployment_mode=config.deployment_mode,
+        effective_trade_date=today,
+        payload=config.frozen_payload,
+    )
+    await pool.execute(
+        f"INSERT INTO {schema}.official_state (lineage_id,revision,state_hash,state_json) "
+        "VALUES ($1,0,$2,$3::jsonb)",
+        state.lineage_id,
+        state.state_hash,
+        json.dumps(state.payload),
+    )
+    await instance.acquire_runtime_leader(
+        route_id=config.route_id,
+        official_stream_id=config.official_stream_id,
+        lineage_id=config.state_lineage_id,
+    )
+    await instance.commit_entry(commit)
+    await instance.commit_entry(commit)
+    status = await instance.get_entry_status(config.official_stream_id, today)
+    assert status.action == ("BLOCK" if blocked else "ENTER")
+    assert len(status.semantic["symbols"]) == (0 if blocked else 3)
+    assert len(status.semantic["reference_symbols"]) == 10
+    assert await pool.fetchval(f"SELECT count(*) FROM {schema}.model_legs") == 0
+    assert await pool.fetchval(f"SELECT count(*) FROM {schema}.shadow_batches") == 1
+    assert await pool.fetchval(f"SELECT count(*) FROM {schema}.outbox_events") == 1
+    sealed = await instance.seal_event(commit.event_id, seal_v20_payload)
+    assert "V22-slim" in sealed.payload["message"]
+    posts = []
+
+    def reply(request):
+        posts.append(json.loads(request.content))
+        return httpx.Response(200, json={"code": 0, "msg": "success"})
+
+    original_client = httpx.AsyncClient
+
+    class RelayClient(original_client):
+        def __init__(self, **kwargs):
+            super().__init__(**{**kwargs, "transport": httpx.MockTransport(reply)})
+
+    monkeypatch.setattr(feishu_bot, "httpx", SimpleNamespace(AsyncClient=RelayClient))
+    route = V20FeishuRoute(
+        route_id=config.route_id,
+        bot_url="https://relay.test",
+        app_id="test-app",
+        app_secret="test-secret",
+        chat_id="test-chat",
+        transport="legacy_send",
+    )
+    publisher = V20OutboxPublisher(
+        instance,
+        {config.route_id: route},
+        worker_id="slim-test",
+        route_id=config.route_id,
+        official_stream_id=config.official_stream_id,
+        lineage_id=config.state_lineage_id,
+    )
+    assert await publisher.publish_once() == 1
+    assert await publisher.publish_once() == 0
+    assert len(posts) == 1
+    delivered = await instance.get_outbox_event(
+        commit.event_id,
+        route_id=config.route_id,
+        official_stream_id=config.official_stream_id,
+        lineage_id=config.state_lineage_id,
+    )
+    assert delivered.delivery_status == "SENT"
+    assert (await instance.load_state(config.state_lineage_id)).revision == 1
+
+
 async def test_disconnected_leader_can_be_replaced_without_duplicate_runtime():
     """Kill an isolated test leader and recover using production-owned pools."""
     schema = _schema()
