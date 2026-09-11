@@ -14,9 +14,16 @@
 - One `rt_min_daily` call serves one stock. The approved client fan-out is one service-level acquisition with at most 40 concurrent per-stock requests. Same-provider-minute scheduled, manual, cold-start, and retry contenders must join the same in-process singleflight rather than starting another acquisition; bounded per-stock transport retries remain inside the client.
 - Never overlap two 40-worker V20 acquisitions or combine the V16 and V20 paths into an intentional 80-worker burst. The measured stable case is about 3,000 symbols at concurrency 40; about 6,000 requests at concurrency 80 produced terminal failures under the provider's per-minute limit.
 
-## V20 morning-selection parity
+## Selection task contract — user correction, 2026-09-12
 
-- The scheduled 09:39 V20 run and a manual trigger must call the same canonical strategy-calculation entry point. Time may change actionability or message wrapping after the calculation, but must not select a different data or strategy algorithm.
+- Source of truth: [execution-contract.md](docs/strategies/v22-slim/execution-contract.md), based on the user's explicit instructions. Older implementation notes and tests cannot override it.
+- The timer and manual button invoke the same COMPLETE selection task: input acquisition, calculation, persistence, message generation, and delivery. Sharing only the calculation helper is insufficient.
+- A new manual request runs the task again, including when the day's scheduled run already exists. It must not select a read-only/check-only path, replay a stored message instead of calculating, or use a manual-only message template.
+- Only the trigger source differs. Run IDs, actual execution timestamps and retry deduplication may differ; selection, gates, persistence contract, and message body may not depend on trigger source.
+- Preserve date-based market API routing and once-per-day state advancement as shared task rules, not manual-only bypasses. A repeated HTTP request with the SAME run ID is a retry; a NEW button click gets a new run ID and recomputes.
+- Before repairing a recurrence, add a behavioral test which FAILS against the reported broken behavior. Do not rewrite that test to approve the existing behavior. Correct conflicting documentation in the same change.
+- Do not report the task as fixed/onlined merely because CI, health checks, a calculation helper, or an operator notification succeeded. Require the shared task's persisted result and confirmed delivery on the deployed commit, plus scheduler/button parity tests.
+- Public trading messages must describe stocks, recommendation dates, buy/sell quantities or proportions in ordinary language. Do not expose "模型腿", "整腿", "监控腿", D0/rank labels or opaque model IDs as user instructions.
 
 ## V16/V20 isolation
 

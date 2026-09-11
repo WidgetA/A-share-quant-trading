@@ -11,6 +11,19 @@ env:
   REGISTRY: ${{ secrets.ACR_REGISTRY }}
 
 jobs:
+  selection-contract:
+    name: Selection Task Contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+      - run: uv python install 3.11
+      - run: uv sync --extra dev
+      - name: Enforce the user's timer-button contract
+        run: uv run pytest -q tests/unit/web/test_selection_task_contract.py --tb=short
+
   lint:
     name: Lint & Format Check
     runs-on: ubuntu-latest
@@ -120,7 +133,7 @@ jobs:
           --tb=short
 
   build-and-push:
-    needs: [lint, typecheck, test, postgres-integration]
+    needs: [selection-contract, lint, typecheck, test, postgres-integration]
     # Only run when pushing to main AND ACR secrets are configured
     if: github.ref == 'refs/heads/main' && github.event_name == 'push' && vars.ACR_ENABLED == 'true'
     runs-on: ubuntu-latest
