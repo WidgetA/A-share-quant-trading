@@ -2,19 +2,25 @@ from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
 
 import pytest
 
 from src.common.v20_feishu import render_entry_message
-from src.data.database.v20_repository import StateRecord, V20StateConflict, sha256_json
+from src.data.database.v20_repository import (
+    StateRecord,
+    V20SemanticConflict,
+    V20StateConflict,
+    sha256_json,
+)
 from src.strategy.v20.artifacts import load_g_artifacts
 from src.strategy.v20.decision_engine import genesis_state, prepare_entry
 from src.strategy.v20.models import V20_V16_SNAPSHOT_SCHEMA
 from src.strategy.v20.runtime_config import load_v20_runtime_config
 from src.strategy.v20.selection_scanner import V16ScanResult
 from src.strategy.v20.selection_scorer import ScoredStock
-from src.strategy.v22_slim.runtime_inputs import build_inputs
+from src.strategy.v22_slim.runtime_inputs import build_inputs, checkpoint_for_day
 from src.web.v20_scan_pipeline import FrozenV16ScanBundle
 from src.web.v20_service import V20Service
 
@@ -22,6 +28,15 @@ ROOT = Path(__file__).resolve().parents[3]
 DAY = date(2026, 9, 14)
 TZ = ZoneInfo("Asia/Shanghai")
 CALENDAR = tuple(DAY + timedelta(days=i) for i in range(-40, 4))
+
+
+def test_target_date_selects_only_a_strictly_prior_checkpoint():
+    friday = checkpoint_for_day(date(2026, 9, 11))
+    monday = checkpoint_for_day(date(2026, 9, 14))
+    assert (friday["as_of"], friday["risk_after"]) == ("2026-09-10", 2)
+    assert (monday["as_of"], monday["risk_after"]) == ("2026-09-11", 3)
+    with pytest.raises(ValueError, match="strictly before"):
+        checkpoint_for_day(date(2026, 9, 10))
 
 
 @pytest.mark.asyncio
@@ -89,6 +104,98 @@ def fixture():
         CALENDAR,
     )
     return config, state, bundle
+
+
+@pytest.mark.asyncio
+async def test_old_version_slot_is_readonly_but_uses_the_same_entry_engine_for_manual_check(
+    monkeypatch,
+):
+    config, state, bundle = fixture()
+    service = object.__new__(V20Service)
+    service.config = config
+    service._artifacts = load_g_artifacts(
+        config.artifact_manifest_path.parent,
+        expected_manifest_sha256=config.artifact_manifest_sha256,
+    )
+    old = SimpleNamespace(strategy_version="V20_BAD_E50_G_BASE_V1")
+    service._repository = SimpleNamespace(
+        get_entry_status=AsyncMock(return_value=old), load_state=AsyncMock(return_value=state)
+    )
+    service._verify_entry_binding = lambda status: None
+    service._scheduled_exits_today = AsyncMock(return_value=[])
+    service._policy_inputs = AsyncMock(return_value=([], [], []))
+    service._resolve_canonical_morning_bundle = AsyncMock(
+        return_value=(
+            bundle,
+            bundle.frozen_at,
+            CALENDAR,
+            "PERSISTED_RAW_SCANNER_RECOMPUTATION",
+            False,
+            None,
+        )
+    )
+    inputs = AsyncMock(return_value=(bundle, [], [], []))
+    monkeypatch.setattr("src.strategy.v22_slim.runtime_inputs.build_inputs", inputs)
+    manual = await service._orchestrate_morning_selection(
+        DAY, allow_legacy_terminal_fresh_theoretical=True
+    )
+    assert manual.cross_version_check and manual.prepared.action == "ENTER"
+    assert (
+        service._resolve_canonical_morning_bundle.await_args.kwargs["independent_reference"] is True
+    )
+    with pytest.raises(V20SemanticConflict, match="read-only"):
+        await service._orchestrate_morning_selection(DAY)
+    service._repository.get_entry_status.return_value = None
+    automatic = await service._orchestrate_morning_selection(DAY)
+    assert not automatic.cross_version_check
+    assert manual.prepared.commit == automatic.prepared.commit
+    assert inputs.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_independent_version_reference_does_not_read_or_overwrite_old_artifact():
+    config, _, bundle = fixture()
+    snapshot = {
+        **bundle.snapshot,
+        "scorer_model_sha256": config.strategy_dependency_hashes[
+            "models/v22_slim/lgbrank_latest.txt"
+        ],
+        "scorer_feature_sha256": config.strategy_dependency_hashes[
+            "models/v22_slim/feature_list.json"
+        ],
+    }
+    bundle = replace(bundle, snapshot=snapshot, snapshot_hash=sha256_json(snapshot))
+    canonical = SimpleNamespace(
+        trade_date=DAY, computed_at=bundle.frozen_at, computation_calendar=CALENDAR
+    )
+    service = object.__new__(V20Service)
+    service.config = config
+    service._canonical_artifact_store = object()
+    service._context = None
+    service._calendar_cache = CALENDAR
+    service._calendar_loaded_for = DAY
+    service._load_canonical_artifact = AsyncMock(side_effect=AssertionError("old artifact read"))
+    service._persist_canonical_artifact_barrier = AsyncMock(
+        side_effect=AssertionError("old artifact overwrite")
+    )
+    service._compute_canonical_v16_from_persisted_raw = AsyncMock(return_value=canonical)
+    service._project_canonical_v16 = lambda *args, **kwargs: bundle
+    old = SimpleNamespace(strategy_version="V20_BAD_E50_G_BASE_V1", action="BLOCK")
+    result = await service._resolve_canonical_morning_bundle(
+        DAY, terminal_status=old, independent_reference=True
+    )
+    assert result[-2:] == (False, None)
+    context = service._compute_canonical_v16_from_persisted_raw.await_args.args[0]
+    assert context.canonical_fact_received_before is None and context.canonical_fact_allow_backfill
+    assert context.canonical_fact_persist_raw
+    service._load_canonical_artifact.assert_not_awaited()
+    service._persist_canonical_artifact_barrier.assert_not_awaited()
+    with pytest.raises(V20SemanticConflict, match="different terminal version"):
+        await service._resolve_canonical_morning_bundle(
+            DAY,
+            terminal_status=SimpleNamespace(strategy_version="V22-slim"),
+            independent_reference=True,
+        )
 
 
 @pytest.mark.parametrize("block", [False, True])

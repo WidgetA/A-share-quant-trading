@@ -128,6 +128,7 @@ _STRATEGY_DEPENDENCY_FILES = (
     "models/v22_slim/board_constituents.json",
     "models/v22_slim/manifest.json",
     "models/v22_slim/reference_checkpoint.json.gz",
+    "models/v22_slim/reference_checkpoint_before_cutover.json.gz",
     "data/sectors.json",
     "data/board_constituents.json",
     "data/v20_mews_bootstrap.json.gz",

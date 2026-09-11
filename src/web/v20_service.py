@@ -426,6 +426,7 @@ class _MorningSelectionComputation:
     canonical_artifact_compared: bool
     canonical_artifact_matches: bool | None
     legacy_terminal_fresh_theoretical: bool
+    cross_version_check: bool = False
 
 
 _ENTRY_BUSINESS_SEMANTIC_FIELDS = (
@@ -3034,6 +3035,10 @@ class V20Service:
                 "formal_decision_available": semantic.get("official_entry_event_id") is not None,
                 "entry_action": semantic.get("v20_action"),
                 "v20_action": semantic.get("v20_action"),
+                "selection_version": semantic.get("strategy_version"),
+                "reference_symbols": list(
+                    (semantic.get("entry_render_semantic") or {}).get("reference_symbols") or ()
+                ),
                 "final_multiplier": semantic.get("final_multiplier"),
                 "current_version_recomputed": True,
                 "canonical_selection_recomputed": scanner_recomputed,
@@ -3126,6 +3131,7 @@ class V20Service:
                     status_before is not None
                     and status_before.action != "INPUT_INVALID"
                     and not calculation.legacy_terminal_fresh_theoretical
+                    and not calculation.cross_version_check
                 ):
                     official_semantic_v16_hash = status_before.semantic.get("v16_snapshot_hash")
                     official_snapshot_v16_hash = status_before.snapshot.get("v16_snapshot_hash")
@@ -3156,6 +3162,7 @@ class V20Service:
                     status_before is None
                     or status_before.action == "INPUT_INVALID"
                     or calculation.legacy_terminal_fresh_theoretical
+                    or calculation.cross_version_check
                 ):
                     official_comparison_result = "NOT_AVAILABLE"
                 else:
@@ -3219,7 +3226,9 @@ class V20Service:
                 "calculation_result": "SUCCESS",
                 "official_comparison_result": official_comparison_result,
                 "official_comparison_unavailable_reason": (
-                    "LEGACY_TERMINAL_PRESTATE_UNAVAILABLE"
+                    "DIFFERENT_SELECTION_VERSION"
+                    if calculation.cross_version_check
+                    else "LEGACY_TERMINAL_PRESTATE_UNAVAILABLE"
                     if calculation.legacy_terminal_fresh_theoretical
                     else None
                 ),
@@ -3259,6 +3268,8 @@ class V20Service:
                 "retrospective_expired": True,
                 "visible_message_mode": "MANUAL_OPERATOR_RENDER",
                 "entry_render_semantic": entry_render_semantic,
+                "calculation_snapshot": prepared.commit.snapshot,
+                "calculation_snapshot_hash": prepared.commit.snapshot_hash,
                 "message": (
                     "当前V20策略计算器已基于持久化 canonical 09:39 事实完成一次只读核查；"
                     f"canonical来源={calculation.canonical_source}；"
@@ -7592,6 +7603,7 @@ class V20Service:
         trade_date: date,
         *,
         terminal_status: EntryStatus | None = None,
+        independent_reference: bool = False,
     ) -> tuple[FrozenV16ScanBundle, datetime, tuple[date, ...], str, bool, bool | None]:
         """Rerun V16 and bind any replay to its durable artifact fact boundary.
 
@@ -7603,9 +7615,15 @@ class V20Service:
         identities must match before output differences can be reported.
         """
 
+        if independent_reference and (
+            terminal_status is None
+            or terminal_status.strategy_version == self.config.strategy_version
+        ):
+            raise V20SemanticConflict("independent reference requires a different terminal version")
         loaded = (
             await self._load_canonical_artifact(trade_date)
-            if getattr(self, "_canonical_artifact_store", None) is not None
+            if not independent_reference
+            and getattr(self, "_canonical_artifact_store", None) is not None
             else None
         )
         expected_bundle: FrozenV16ScanBundle | None = None
@@ -7613,7 +7631,7 @@ class V20Service:
         # An artifact found later (or written by the legacy mixed-hash build)
         # is not an official comparison boundary: compute the current theory,
         # report NOT_AVAILABLE upstream, and leave that artifact untouched.
-        ignore_existing_artifact = (
+        ignore_existing_artifact = independent_reference or (
             loaded is not None
             and terminal_status is not None
             and getattr(terminal_status, "action", None) == "INPUT_INVALID"
@@ -7637,11 +7655,16 @@ class V20Service:
                 expected_bundle = hydrated
             else:
                 raise V20SemanticConflict("canonical V16 artifact hydration is invalid")
-        elif terminal_status is not None and terminal_status.action in {
-            "ENTER",
-            "BLOCK",
-            "NO_SIGNAL",
-        }:
+        elif (
+            not independent_reference
+            and terminal_status is not None
+            and terminal_status.action
+            in {
+                "ENTER",
+                "BLOCK",
+                "NO_SIGNAL",
+            }
+        ):
             raise V20SemanticConflict(
                 "terminal V20 slot lacks its canonical V16 artifact fact boundary"
             )
@@ -7806,8 +7829,16 @@ class V20Service:
         )
         if status is not None:
             self._verify_entry_binding(status)
+        cross_version_check = (
+            status is not None
+            and self.config.strategy_version == "V22-slim"
+            and status.strategy_version != self.config.strategy_version
+        )
+        if cross_version_check and not allow_legacy_terminal_fresh_theoretical:
+            raise V20SemanticConflict("an existing different-version slot is read-only")
         legacy_terminal_fresh_theoretical = (
             status is not None
+            and not cross_version_check
             and allow_legacy_terminal_fresh_theoretical
             and self._terminal_lacks_canonical_state_before(status)
         )
@@ -7824,8 +7855,9 @@ class V20Service:
         ) = await self._resolve_canonical_morning_bundle(
             trade_date,
             terminal_status=status,
+            **({"independent_reference": True} if cross_version_check else {}),
         )
-        if status is not None and not legacy_terminal_fresh_theoretical:
+        if status is not None and not legacy_terminal_fresh_theoretical and not cross_version_check:
             scheduled_source = status.semantic.get("scheduled_exits_today") or ()
             completed_health, completed_rolling, maturity_gaps = (
                 self._policy_inputs_from_terminal_status(status)
@@ -7846,7 +7878,7 @@ class V20Service:
                 )
         scheduled = tuple(dict(item) for item in scheduled_source)
         if self.config.strategy_version == "V22-slim":
-            if status is not None:
+            if status is not None and not cross_version_check:
                 if status.strategy_version != "V22-slim":
                     raise V20SemanticConflict(
                         "This day's immutable slot belongs to V20; "
@@ -7882,7 +7914,7 @@ class V20Service:
             calendar=calendar,
             scheduled_exits_today=scheduled,
         )
-        if status is not None and not legacy_terminal_fresh_theoretical:
+        if status is not None and not legacy_terminal_fresh_theoretical and not cross_version_check:
             self._verify_terminal_replay_transition(status, prepared)
         if prepared.commit.semantic.get("action") not in {"ENTER", "BLOCK", "NO_SIGNAL"}:
             raise V20SemanticConflict(
@@ -7898,6 +7930,7 @@ class V20Service:
             canonical_artifact_compared=artifact_compared,
             canonical_artifact_matches=artifact_matches,
             legacy_terminal_fresh_theoretical=legacy_terminal_fresh_theoretical,
+            cross_version_check=cross_version_check,
         )
 
     async def _orchestrate_morning_selection(

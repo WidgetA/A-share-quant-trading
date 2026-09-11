@@ -20,6 +20,11 @@ def iso(value):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--research-workspace", type=Path, required=True)
+    parser.add_argument(
+        "--output-name",
+        default="reference_checkpoint_before_cutover.json.gz",
+        choices=("reference_checkpoint.json.gz", "reference_checkpoint_before_cutover.json.gz"),
+    )
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(root))
@@ -127,7 +132,7 @@ def main():
     content = gzip.compress(
         json.dumps(checkpoint, ensure_ascii=False, allow_nan=False).encode(), mtime=0
     )
-    path = ASSET_ROOT / "reference_checkpoint.json.gz"
+    path = ASSET_ROOT / args.output_name
     path.write_bytes(content)
     manifest_path = ASSET_ROOT / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))

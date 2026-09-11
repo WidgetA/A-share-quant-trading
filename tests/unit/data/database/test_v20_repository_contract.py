@@ -491,6 +491,35 @@ def _enter(multiplier: float, leg_count: int) -> EntryCommit:
     )
 
 
+@pytest.mark.parametrize(
+    "case", ["legacy_without_batch", "slim_missing_contract", "slim_with_batch"]
+)
+async def test_entry_only_exception_preserves_version_and_batch_contract(case) -> None:
+    commit = _enter(1.0, 3)
+    if case == "legacy_without_batch":
+        commit = replace(commit, model_batch=None)
+        expected = "ENTER requires a model batch"
+    else:
+        semantic = {**commit.semantic, "strategy_version": "V22-slim"}
+        if case == "slim_with_batch":
+            semantic["entry_only"] = True
+        commit = replace(
+            commit,
+            strategy_version="V22-slim",
+            semantic=semantic,
+            semantic_content_hash=sha256_json(semantic),
+        )
+        expected = (
+            "requires its entry-only semantic contract"
+            if case == "slim_missing_contract"
+            else "cannot create exit-monitor model batches"
+        )
+    connection = _FakeConnection()
+    with pytest.raises(ValueError, match=expected):
+        await _repository(connection).commit_entry(commit)
+    assert connection.calls == []
+
+
 def _entry_connection(commit: EntryCommit, *, extra_execute_count: int = 0) -> _FakeConnection:
     return _FakeConnection(
         fetchrows=[

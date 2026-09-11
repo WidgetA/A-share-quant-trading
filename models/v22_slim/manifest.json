@@ -7,6 +7,7 @@
     "lgbrank_latest.txt": "55b6c1eb6afe9b642893fcdad2d073cb8851e73914592ee7d95946e06da82525",
     "feature_list.json": "a9c9d819675b767a8be124a824a6d6803cf703f77c8b646ea6bb55c93da7d43b",
     "board_constituents.json": "23f0d8199cd93347124258b9fbf337ece7c4b58a96805ec196e2a364b09a16a1",
-    "reference_checkpoint.json.gz": "c6d826592bce05e40b47bf029dfb5baa5d764e5dc121b65f5ac077fb1aea78f0"
+    "reference_checkpoint.json.gz": "c6d826592bce05e40b47bf029dfb5baa5d764e5dc121b65f5ac077fb1aea78f0",
+    "reference_checkpoint_before_cutover.json.gz": "f065d0b0572819303e941e551ec60f043a6e33a2f2d1ab4cd1b870dc78279062"
   }
 }

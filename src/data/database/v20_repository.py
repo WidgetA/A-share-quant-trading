@@ -3032,8 +3032,17 @@ class V20Repository:
         )
         if sha256_json(commit.snapshot) != commit.snapshot_hash:
             raise V20SemanticConflict("snapshot_hash mismatch")
+        entry_only = commit.strategy_version == "V22-slim"
+        if entry_only and commit.action != "INPUT_INVALID":
+            if (
+                commit.semantic.get("entry_only") is not True
+                or commit.semantic.get("strategy_version") != "V22-slim"
+            ):
+                raise ValueError("V22-slim requires its entry-only semantic contract")
+            if commit.model_batch is not None:
+                raise ValueError("V22-slim cannot create exit-monitor model batches")
         if commit.model_batch is None:
-            if commit.action == "ENTER":
+            if commit.action == "ENTER" and not entry_only:
                 raise ValueError("ENTER requires a model batch")
         else:
             batch = commit.model_batch
