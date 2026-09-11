@@ -76,6 +76,7 @@ async def repository():
         await instance.connect(migrate=True)
         yield instance, pool, schema
     finally:
+        await instance.close()
         await _drop_schema(pool, schema)
         await pool.close()
 
