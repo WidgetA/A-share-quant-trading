@@ -143,6 +143,7 @@ class _DecisionRepository:
         self.seal_calls = 0
         self.commit_entry_calls = 0
         self.alert_write_calls = 0
+        self.selection_runs: dict[str, str] = {}
         self.raw_write_calls = 0
         self.forbidden_write_calls: list[str] = []
         self.rolling7_rows: tuple[Any, ...] = ()
@@ -274,6 +275,37 @@ class _DecisionRepository:
             delivery_status="PENDING",
             attempt_count=0,
         )
+
+    async def get_selection_run_event_id(self, run_id: str, **_scope: Any) -> str | None:
+        return self.selection_runs.get(run_id)
+
+    async def commit_selection_run(self, commit: EntryCommit, *, run_id: str) -> str:
+        if run_id in self.selection_runs:
+            return self.selection_runs[run_id]
+        if self.status is None:
+            await self.commit_entry(commit)
+            event_id = commit.event_id
+        else:
+            event_id = sha256_json(["SELECTION_RUN_EVENT_V1", run_id])
+            semantic = {**commit.semantic, "event_id": event_id}
+            self.alerts[event_id] = OutboxRecord(
+                event_id=event_id,
+                event_type="ENTRY_DECISION",
+                route_id=commit.route_id,
+                official_stream_id=commit.official_stream_id,
+                lineage_id=commit.lineage_id,
+                semantic=semantic,
+                semantic_content_hash=sha256_json(semantic),
+                payload=None,
+                payload_hash=None,
+                generated_at=None,
+                commit_marker=None,
+                action_expiry_ts=commit.action_expiry_ts,
+                delivery_status="PENDING",
+                attempt_count=0,
+            )
+        self.selection_runs[run_id] = event_id
+        return event_id
 
     async def enqueue_alert(
         self,
@@ -719,9 +751,9 @@ async def test_automatic_and_manual_directly_share_morning_selection_entry_point
     def install_spy(service: V20Service) -> None:
         original = service._compute_morning_selection
 
-        async def spy(trade_date: date) -> Any:
+        async def spy(trade_date: date, **kwargs: Any) -> Any:
             entry_calls.append((service, trade_date))
-            return await original(trade_date)
+            return await original(trade_date, **kwargs)
 
         monkeypatch.setattr(service, "_compute_morning_selection", spy)
 

@@ -1067,7 +1067,7 @@ async def test_outbox_lease_cannot_consume_another_route_or_lineage_backlog() ->
     assert call[2][:3] == ("formal-route", "official", "lineage-1")
 
 
-def test_runtime_migration_is_mechanically_identical_to_001_plus_002_plus_003() -> None:
+def test_runtime_migration_is_mechanically_identical_to_all_standalone_migrations() -> None:
     root = Path(__file__).resolve().parents[4]
     standalone_002 = (root / "migrations" / "v20" / "002_outbox_at_most_once.sql").read_text(
         encoding="utf-8"
@@ -1076,7 +1076,10 @@ def test_runtime_migration_is_mechanically_identical_to_001_plus_002_plus_003() 
         encoding="utf-8"
     )
     sql = migration_sql("v20")
-    assert sql.endswith("\n\n" + standalone_002 + "\n\n" + standalone_003 + "\n")
+    standalone_004 = (root / "migrations/v20/004_selection_runs.sql").read_text(encoding="utf-8")
+    assert sql.endswith(
+        "\n\n" + standalone_002 + "\n\n" + standalone_003 + "\n\n" + standalone_004 + "\n"
+    )
     assert "CONSTRAINT ck_rolling7_market_health_d0_references_positive" in sql
     assert "CONSTRAINT ck_rolling7_market_health_d2_closes_positive" in sql
     declaration_pattern = re.compile(r"migration_checksum text := '([^']*)';")

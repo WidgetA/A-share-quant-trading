@@ -650,7 +650,7 @@ def test_trigger_returns_202_and_passes_idempotency_key_without_api_key() -> Non
 
     assert response.status_code == 202
     assert service.trigger_request_id == "deploy-check-20260831"
-    assert service.mews_trigger_times == [service.now]
+    assert service.mews_trigger_times == []  # MEWS is owned by the complete task, not HTTP.
     assert response.json() == {
         "accepted": True,
         "created": True,

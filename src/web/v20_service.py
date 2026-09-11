@@ -2824,133 +2824,49 @@ class V20Service:
             )
 
     async def trigger_morning_selection(self, request_id: str) -> Mapping[str, Any]:
-        """Run the complete same-date decision lane without a manual wrapper message.
-
-        A successful new decision is the ordinary ``ENTRY_DECISION`` written by
-        :meth:`_run_decision_iteration_with_cutoff`; consequently model legs and
-        the intraday-exit lane are armed exactly as they are under the automatic
-        scheduler.  This method never creates a second, formatter-specific
-        receipt.  The route may therefore promise that the visible Feishu text
-        comes only from the production entry renderer.
-        """
-
+        """Button adapter: select the session and invoke the scheduled task again."""
         await self._require_manual_trigger_ready()
         if not isinstance(request_id, str) or _MANUAL_REQUEST_ID.fullmatch(request_id) is None:
-            raise ValueError(
-                "Idempotency-Key must be 8-128 characters using letters, digits, . _ : or -"
-            )
-        await self._repository.assert_runtime_leader()
+            raise ValueError("invalid selection request ID")
         now = self._aware_now()
-        wall = now.timetz().replace(tzinfo=None)
-        if self._manual_trigger_lock.locked():
-            raise V20StateConflict("another V20 manual trigger is already running")
-
-        async with self._manual_trigger_lock:
-            await self._require_manual_trigger_ready()
-            await self._repository.assert_runtime_leader()
-            trade_date = self._aware_now().date()
+        calendar = tuple(await self._load_trade_calendar(now.date()))
+        sessions = [day for day in calendar if day <= now.date()]
+        if not sessions:
+            raise V20StateConflict("no confirmed trading session is available")
+        trade_date = sessions[-1]
+        if trade_date == now.date() and now.time() < time(9, 39):
+            raise V20StateConflict("09:39 selection input is not ready")
+        async with self._decision_cycle_lock:
             status_before = await self._repository.get_entry_status(
-                self.config.official_stream_id,
-                trade_date,
+                self.config.official_stream_id, trade_date
             )
-            if status_before is not None:
-                self._verify_entry_binding(status_before)
-
-            if status_before is None and wall >= self.config.clock.prewarm:
-                try:
-                    await asyncio.wait_for(
-                        self._decision_cycle_lock.acquire(),
-                        timeout=MANUAL_TRIGGER_DECISION_LOCK_TIMEOUT_SECONDS,
-                    )
-                except TimeoutError as exc:
-                    raise V20StateConflict("V20 decision lane is busy") from exc
-                try:
-                    # Re-sample the service clock inside the serialized lane;
-                    # an HTTP request can never extend the legal entry window.
-                    await self._run_decision_iteration_with_cutoff(self._aware_now())
-                finally:
-                    self._decision_cycle_lock.release()
-
-            status_after = await self._repository.get_entry_status(
-                self.config.official_stream_id,
-                trade_date,
+            context = _DayContext(trade_date=trade_date, calendar=calendar)
+            record, created = await self._execute_selection_task(
+                context, now, request_id=request_id
             )
-            completed_at = self._aware_now()
-            retrospective_expired = completed_at.date() != trade_date
-            if status_after is None:
-                context = (
-                    self._context
-                    if self._context is not None and self._context.trade_date == trade_date
-                    else None
-                )
-                completed_wall = completed_at.timetz().replace(tzinfo=None)
-                if completed_wall < self.config.clock.prewarm:
-                    cycle_result = "BEFORE_WINDOW"
-                elif completed_wall < time.fromisoformat(self.config.clock.decision_bar_label):
-                    cycle_result = "COLLECTING"
-                else:
-                    cycle_result = context.last_phase if context is not None else "DECISION_PENDING"
-                return {
-                    "accepted": True,
-                    "created": False,
-                    "manual_request_id": request_id,
-                    "trade_date": trade_date.isoformat(),
-                    "cycle_result": cycle_result,
-                    "formal_decision_available": False,
-                    "entry_action": None,
-                    "entry_event_id": None,
-                    "symbols": [],
-                    "official_state_changed": False,
-                    "orders_changed": False,
-                    "retrospective_expired": retrospective_expired,
-                    "exact_automatic_message": False,
-                    "delivery_status": None,
-                    "feishu_delivery_confirmed": False,
-                }
-
-            self._verify_entry_binding(status_after)
-            entry_record = await self._repository.get_outbox_event(
-                status_after.event_id,
-                route_id=self.config.route_id,
-                **self._ledger_scope,
-            )
-            if entry_record is None:
-                raise V20RepositoryError("committed V20 entry outbox event is unreadable")
-            if entry_record.payload is None:
-                await self._require_manual_trigger_ready()
-                await self._repository.assert_runtime_leader()
-                entry_record = await self._repository.seal_event(
-                    status_after.event_id,
-                    seal_v20_payload,
-                )
-            symbols = [
-                {
-                    "rank": item.get("rank"),
-                    "code": item.get("code"),
-                    "name": item.get("name"),
-                    "snapshot_price": item.get("snapshot_price"),
-                }
-                for item in (status_after.semantic.get("symbols") or [])
-                if isinstance(item, Mapping)
-            ]
-            created = status_before is None
-            return {
-                "accepted": True,
-                "created": created,
-                "manual_request_id": request_id,
-                "trade_date": trade_date.isoformat(),
-                "cycle_result": "DECISION_COMMITTED" if created else "ALREADY_TERMINAL",
-                "formal_decision_available": True,
-                "entry_action": status_after.action,
-                "entry_event_id": status_after.event_id,
-                "symbols": symbols,
-                "official_state_changed": created,
-                "orders_changed": False,
-                "retrospective_expired": retrospective_expired,
-                "exact_automatic_message": True,
-                "delivery_status": entry_record.delivery_status,
-                "feishu_delivery_confirmed": entry_record.delivery_status == "SENT",
-            }
+        semantic = record.semantic
+        return {
+            "accepted": True,
+            "created": created,
+            "manual_request_id": request_id,
+            "trade_date": trade_date.isoformat(),
+            "cycle_result": "SELECTION_RESULT_READY",
+            "entry_event_id": record.event_id,
+            "entry_action": semantic["action"],
+            "selection_version": semantic["strategy_version"],
+            "final_multiplier": semantic["final_multiplier"],
+            "symbols": list(semantic.get("symbols") or []),
+            "reference_symbols": list(semantic.get("reference_symbols") or []),
+            "calculation_result": "SUCCESS",
+            "exact_automatic_message": True,
+            "formal_decision_available": context.entry_status is not None,
+            "official_state_changed": status_before is None and context.entry_status is not None,
+            "retrospective_expired": self._aware_now().date() != trade_date,
+            "orders_changed": False,
+            "delivery_status": record.delivery_status,
+            "feishu_delivery_confirmed": record.delivery_status == "SENT",
+            "task_success": record.delivery_status == "SENT",
+        }
 
     async def trigger_canonical_selection_check_only(
         self,
@@ -3275,7 +3191,7 @@ class V20Service:
                     f"canonical来源={calculation.canonical_source}；"
                     "本次计算=SUCCESS；"
                     f"早盘正式结果对比={official_comparison_result}；"
-                    "未修改正式决策、模型批次、模型腿、持仓或订单。"
+                    "未修改已保存的每日决策、买卖提醒、持仓或订单。"
                 ),
             }
             await self._decision_cycle_lock.acquire()
@@ -3437,66 +3353,12 @@ class V20Service:
                 "ENTRY_COLLECTION_FAILED",
                 self._run_entry_collection_cycle(context, current),
             )
-            reconciliation_ready = await self._run_phase_isolated(
-                context,
-                current,
-                "MISSED_SLOT_RECONCILIATION_FAILED",
-                asyncio.wait_for(
-                    self._reconcile_missed_slots(current, calendar),
-                    timeout=20.0,
-                ),
-            )
-
-            # Reconcile every older D0 reference against the original D1 09:30
-            # receipt cutoff before consuming any mature shadow batch.  This is
-            # what makes a restart on D1/D3 equivalent to an uninterrupted worker:
-            # already-persisted D0 09:41 evidence is recovered, while a bar first
-            # received after the cutoff can never be promoted retroactively.
-            reference_ready = await self._run_phase_isolated(
-                context,
-                current,
-                "REFERENCE_EXPIRY_FAILED",
-                self._expire_reference_gaps(context, current),
-            )
-
-            # Mature shadow facts are consumed before today's state transition.
-            maturity_ready = reference_ready and reconciliation_ready
-            if (
-                reference_ready
-                and reconciliation_ready
-                and current.timetz().replace(tzinfo=None) >= self.config.clock.prewarm
-            ):
-                maturity_timeout = (
-                    5.0 if current.timetz().replace(tzinfo=None) >= time(9, 35) else 60.0
-                )
-                maturity_phase_ready = await self._run_phase_isolated(
-                    context,
-                    current,
-                    "SHADOW_MATURITY_FAILED",
-                    asyncio.wait_for(
-                        self._process_mature_shadow(context, current),
-                        timeout=maturity_timeout,
-                    ),
-                )
-                maturity_ready = maturity_phase_ready and context.maturity_done
-
-            # Entry remains independent of stale exits and reference-data errors.
-            # A completed calculation is never rejected for intraday latency.
-            if reconciliation_ready and (
-                maturity_ready
-                or current.timetz().replace(tzinfo=None) >= self.config.clock.publish_deadline
-            ):
+            if current.time() >= time.fromisoformat(self.config.clock.decision_bar_label):
                 await self._run_phase_isolated(
                     context,
                     current,
                     "ENTRY_CYCLE_FAILED",
                     self._run_entry_cycle(context, current),
-                )
-            else:
-                context.last_phase = (
-                    "ENTRY_BLOCKED_BY_MATURITY"
-                    if reconciliation_ready
-                    else "ENTRY_BLOCKED_BY_STATE_RECONCILIATION"
                 )
             await self._run_phase_isolated(
                 context,
@@ -8274,43 +8136,59 @@ class V20Service:
         context: _DayContext,
         now: datetime,
     ) -> None:
-        calculation = await self._orchestrate_morning_selection(context.trade_date)
-        resolved_bundle = calculation.bundle
-        prepared = calculation.prepared
-        context.canonical_bundle = resolved_bundle
-        context.canonical_first_received_at = calculation.canonical_first_received_at
+        await self._execute_selection_task(context, now, request_id="scheduled")
 
-        if (
-            resolved_bundle.frozen_at.tzinfo is None
-            or resolved_bundle.frozen_at.utcoffset() is None
-        ):
-            raise V20SemanticConflict("V16 decision formation clock must be timezone-aware")
-        formed_at = resolved_bundle.frozen_at.astimezone(SHANGHAI)
-        if formed_at.date() != context.trade_date:
-            raise V20SemanticConflict("V16 decision formation date does not match its slot")
-        # Calculation latency does not invalidate correct 09:39 facts. Keep
-        # only the trading-date boundary, independently enforced by PostgreSQL.
-        observed_at = self._aware_now()
-        received_at = calculation.canonical_first_received_at
-        if received_at.astimezone(SHANGHAI).date() != context.trade_date:
-            raise V20SemanticConflict("canonical receipt date does not match its slot")
-        if observed_at.date() != context.trade_date:
-            raise V20StateConflict("entry calculation belongs to a previous trading date")
-        context.canonical_entry_mode = "ACTIONABLE"
-        context.canonical_entry_action = (
-            "NO_SIGNAL" if len(resolved_bundle.scan_result.recommended) == 0 else "CANDIDATES_READY"
+    async def _execute_selection_task(
+        self,
+        context: _DayContext,
+        now: datetime,
+        *,
+        request_id: str,
+    ) -> tuple[OutboxRecord, bool]:
+        """Complete task shared by timer and button, including ordinary persistence.
+
+        The caller holds the decision lock. Request identity controls retry
+        deduplication only; it never selects a different algorithm or renderer.
+        """
+        await self._repository.assert_runtime_leader()
+        run_id = named_hash(
+            "V20_SELECTION_TASK_RUN_V1",
+            {
+                "stream": self.config.official_stream_id,
+                "lineage": self.config.state_lineage_id,
+                "config_hash": self.config.config_hash,
+                "trade_date": context.trade_date.isoformat(),
+                "request_id": request_id,
+            },
         )
-        await self._repository.commit_entry(prepared.commit)
-        status = await self._repository.get_entry_status(
-            self.config.official_stream_id,
-            context.trade_date,
+        existing_id = await self._repository.get_selection_run_event_id(
+            run_id, official_stream_id=self.config.official_stream_id
         )
-        if status is None:
-            raise V20RepositoryError("committed V20 entry is not readable")
-        self._verify_entry_binding(status)
-        context.entry_status = status
+        created = existing_id is None
+        if created:
+            await self._reconcile_missed_slots(now, context.calendar)
+            await self._expire_reference_gaps(context, now)
+            await self._process_mature_shadow(context, now)
+            self.kick_mews_for_selection_trigger(now)
+            calculation = await self._orchestrate_morning_selection(
+                context.trade_date, allow_legacy_terminal_fresh_theoretical=True
+            )
+            context.canonical_bundle = calculation.bundle
+            context.canonical_first_received_at = calculation.canonical_first_received_at
+            existing_id = await self._repository.commit_selection_run(
+                calculation.prepared.commit, run_id=run_id
+            )
+        assert existing_id is not None
+        record = await self._repository.seal_event(existing_id, seal_v20_payload)
+        context.entry_status = await self._repository.get_entry_status(
+            self.config.official_stream_id, context.trade_date
+        )
+        if context.entry_status is not None:
+            self._verify_entry_binding(context.entry_status)
         context.last_phase = "DECISION_COMMITTED"
-        await self._repository.seal_event(prepared.commit.event_id, seal_v20_payload)
+        # Both sources feed the same durable outbox and the same running
+        # publisher. PENDING means accepted, not end-to-end success.
+        return record, created
 
     async def _finalize_invalid_entry(
         self,
@@ -8694,8 +8572,10 @@ class V20Service:
                         f"model_conflict={len(model_result.conflict_codes)}, "
                         f"shadow_missing={len(shadow_result.missing_codes)}, "
                         f"shadow_conflict={len(shadow_result.conflict_codes)}；"
-                        "模型腿截止=D1 09:30，影子批次截止=D0 09:45；"
-                        "有效模型腿已独立锁定，缺失腿仅保留D2计划退出"
+                        "卖出提醒所用参考价在推荐后第1个交易日09:30前确认，"
+                        "观察记录所用参考价在推荐当天09:45前确认；"
+                        "已有参考价的股票正常监控，缺少参考价的股票仅保留"
+                        "推荐后第2个交易日14:57的卖出提醒"
                     ),
                     now=now,
                 )

@@ -9,7 +9,7 @@ from datetime import datetime
 
 import pytest
 
-from src.common.v20_feishu import render_exit_message
+from src.common.v20_feishu import _render_entry_strategy_body, render_exit_message
 from src.web.v20_routes import _dispatch_manual_trigger
 from tests.unit.web.test_v20_auto_manual_exact_parity_acceptance import (
     POST_CUTOFF_AT,
@@ -60,6 +60,35 @@ async def test_new_button_click_after_daily_run_recomputes_and_publishes_normal_
     assert "手工触发" not in record.payload["message"]
     assert "仅核查" not in record.payload["message"]
     assert record.payload["message"].splitlines()[0] == first.payload["message"].splitlines()[0]
+    assert _render_entry_strategy_body(record.semantic) == _render_entry_strategy_body(
+        first.semantic
+    )
+    assert result["task_success"] is False, "PENDING delivery must never mean task success"
+    assert repository.state.revision == 1
+    retry = await _dispatch_manual_trigger(service, f"contract-rerun-{hour}-0001")
+    assert retry["entry_event_id"] == record.event_id and retry["created"] is False
+    assert len(calls) == 2 and repository.state.revision == 1
+
+
+@pytest.mark.parametrize("stage", ["calculation", "persistence", "sealing"])
+async def test_failed_stage_cannot_be_reported_as_success(monkeypatch, stage):
+    service, repository, _ = _service_and_artifact(monkeypatch)
+    await service._run_decision_iteration_with_cutoff(RUN_AT)
+    initial_state = repository.state
+
+    async def fail(*_args, **_kwargs):
+        raise RuntimeError(f"injected {stage} failure")
+
+    owner, method = {
+        "calculation": (service, "_compute_morning_selection"),
+        "persistence": (repository, "commit_selection_run"),
+        "sealing": (repository, "seal_event"),
+    }[stage]
+    monkeypatch.setattr(owner, method, fail)
+    with pytest.raises(RuntimeError, match=f"injected {stage} failure"):
+        await _dispatch_manual_trigger(service, f"contract-{stage}-failed")
+    assert repository.state == initial_state
+    assert all(record.delivery_status != "SENT" for record in repository.alerts.values())
 
 
 def test_exit_instruction_uses_stock_and_recommendation_date_in_plain_language():

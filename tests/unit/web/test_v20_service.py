@@ -4132,10 +4132,13 @@ async def test_morning_selection_trigger_uses_only_official_entry_message_lane(
     repository = _ManualTriggerRepository()
     service = _service(monkeypatch, repository)
     service._clock = lambda: datetime(2026, 8, 31, 9, 39, 5, tzinfo=TZ)
+    service._calendar_provider = AsyncMock(
+        return_value=[date(2026, 8, 28), date(2026, 8, 31), date(2026, 9, 1), date(2026, 9, 2)]
+    )
     tasks = _arm_manual_trigger_runtime(service)
     decision_calls: list[datetime] = []
 
-    async def commit_official_decision(now: datetime) -> None:
+    async def commit_official_decision(context, now: datetime, *, request_id: str):
         assert service._decision_cycle_lock.locked()
         decision_calls.append(now)
         status = _rich_entry_status(service.config)
@@ -4157,19 +4160,24 @@ async def test_morning_selection_trigger_uses_only_official_entry_message_lane(
             delivery_status="PENDING",
             attempt_count=0,
         )
+        context.entry_status = status
+        return repository.events[status.event_id], True
 
-    monkeypatch.setattr(service, "_run_decision_iteration_with_cutoff", commit_official_decision)
+    monkeypatch.setattr(service, "_execute_selection_task", commit_official_decision)
     try:
         result = await service.trigger_morning_selection("deploy-20260831-exact")
     finally:
         await _disarm_manual_trigger_runtime(service, tasks)
 
     assert decision_calls == [datetime(2026, 8, 31, 9, 39, 5, tzinfo=TZ)]
-    assert result["cycle_result"] == "DECISION_COMMITTED"
+    assert result["cycle_result"] == "SELECTION_RESULT_READY"
     assert result["entry_action"] == "ENTER"
     assert result["exact_automatic_message"] is True
     assert result["retrospective_expired"] is False
-    assert result["symbols"] == [
+    assert [
+        {key: item[key] for key in ("rank", "code", "name", "snapshot_price")}
+        for item in result["symbols"]
+    ] == [
         {
             "rank": 1,
             "code": "000001",
@@ -7161,12 +7169,18 @@ async def test_late_normal_v16_candidate_commits_without_intraday_rejection(
     observed_at: datetime,
 ) -> None:
     repository = SimpleNamespace(
-        commit_entry=AsyncMock(),
+        assert_runtime_leader=AsyncMock(),
+        get_selection_run_event_id=AsyncMock(return_value=None),
+        commit_selection_run=AsyncMock(return_value="valid-late-entry"),
         get_entry_status=AsyncMock(return_value=SimpleNamespace(action="ENTER")),
         seal_event=AsyncMock(),
     )
     service = _service(monkeypatch, repository)
     service._clock = lambda: observed_at
+    service._reconcile_missed_slots = AsyncMock()
+    service._expire_reference_gaps = AsyncMock()
+    service._process_mature_shadow = AsyncMock()
+    service.kick_mews_for_selection_trigger = lambda now: None
     commit = SimpleNamespace(event_id="valid-late-entry")
     bundle = SimpleNamespace(
         frozen_at=formed_at,
@@ -7182,9 +7196,9 @@ async def test_late_normal_v16_candidate_commits_without_intraday_rejection(
     service._verify_entry_binding = lambda status: None
     context = _DayContext(date(2026, 8, 31), ())
     await service._attempt_entry(context, observed_at)
-    repository.commit_entry.assert_awaited_once_with(commit)
+    repository.commit_selection_run.assert_awaited_once()
+    assert repository.commit_selection_run.call_args.args == (commit,)
     repository.seal_event.assert_awaited_once()
-    assert context.canonical_entry_mode == "ACTIONABLE"
     assert context.last_phase == "DECISION_COMMITTED"
 
 
@@ -9589,6 +9603,9 @@ async def test_run_once_reconciliation_failure_does_not_starve_exit_cycle(
     service = _service(monkeypatch, SimpleNamespace())
     service._repository_started = True
     now = datetime(2026, 8, 31, 14, 57, tzinfo=TZ)
+    service._clock = lambda: now
+    service._repository.get_entry_status = AsyncMock(return_value=None)
+    service._repository.get_selection_run_event_id = AsyncMock(return_value=None)
     context = _DayContext(
         trade_date=now.date(),
         calendar=(
@@ -9635,7 +9652,7 @@ async def test_run_once_reconciliation_failure_does_not_starve_exit_cycle(
     monkeypatch.setattr(service, "_expire_reference_gaps", no_op)
     monkeypatch.setattr(service, "_run_exit_cycle", exit_cycle)
     monkeypatch.setattr(service, "_run_stale_exit_cycle", no_op)
-    monkeypatch.setattr(service, "_run_entry_cycle", entry_must_not_run)
+    monkeypatch.setattr(service, "_orchestrate_morning_selection", entry_must_not_run)
     monkeypatch.setattr(service, "_run_reference_cycle", no_op)
     monkeypatch.setattr(service, "_run_reminders", no_op)
     monkeypatch.setattr(service, "_safe_alert", no_op)
@@ -9643,7 +9660,8 @@ async def test_run_once_reconciliation_failure_does_not_starve_exit_cycle(
     await service.run_once(now)
 
     assert exit_calls == [now]
-    assert context.last_phase == "ENTRY_BLOCKED_BY_STATE_RECONCILIATION"
+    assert context.last_phase == "ENTRY_RETRY"
+    assert "state predecessor unavailable" in context.last_entry_failure_detail
 
 
 async def test_entry_collection_runs_while_health_maturity_is_pending(
@@ -10363,8 +10381,8 @@ async def test_manual_monitor_arms_complete_0941_evidence_without_using_snapshot
     )
     confirmation = repository.events[result["confirmation_event_id"]]
     assert confirmation.payload is not None
-    assert "09:41 bar.open" in confirmation.payload["message"]
-    assert "未创建订单、持仓或成交" in confirmation.payload["message"]
+    assert "推荐当天 09:40 的价格" in confirmation.payload["message"]
+    assert "系统不会自动下单，也不代表你已买入" in confirmation.payload["message"]
 
 
 async def test_manual_monitor_recovers_and_persists_d0_0941_before_enrollment(
