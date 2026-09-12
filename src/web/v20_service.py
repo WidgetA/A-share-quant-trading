@@ -9654,6 +9654,10 @@ class V20Service:
             return selected
 
     async def _run_reminders(self, context: _DayContext, now: datetime) -> None:
+        # Keep the existing exit-reminder schedule after removing the outer
+        # calendar shortcut from selection. This does not gate realtime input.
+        if context.trade_date not in context.calendar:
+            return
         if context.reminders_done:
             return
         wall = now.timetz().replace(tzinfo=None)
