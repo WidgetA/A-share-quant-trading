@@ -252,6 +252,7 @@ async def test_checkpoint_bootstrap_is_repeatable_and_only_consumes_prior_daily_
     }
     monkeypatch.setattr("src.strategy.v22_slim.runtime_inputs.checkpoint", lambda: seed)
     calls = []
+    empty_limits = False
 
     class Client:
         async def _api_call(self, api, params, **kwargs):
@@ -274,6 +275,8 @@ async def test_checkpoint_bootstrap_is_repeatable_and_only_consumes_prior_daily_
                 ]
             else:
                 assert api == "stk_limit" and "pre_close" in kwargs["fields"]
+                if empty_limits:
+                    return {"data": {"fields": [], "items": []}}
                 rows = [
                     {"ts_code": code + ".SH", "trade_date": params["trade_date"], "pre_close": 21.0}
                     for code in market
@@ -290,6 +293,11 @@ async def test_checkpoint_bootstrap_is_repeatable_and_only_consumes_prior_daily_
     assert a[0].snapshot["v22_slim_inputs"]["risk_before"] == 3
     assert a[0].breadth_down_n == 1000  # today's pre_close, not yesterday's close
     assert all(api in {"daily", "stk_limit", "index_daily"} for api, _, _ in calls)
+    # Empty limits may not stop acquisition, but a populated realtime snapshot
+    # still cannot become a decision without its current-session pre_close.
+    empty_limits = True
+    with pytest.raises(ValueError, match="stk_limit: empty"):
+        await build_inputs(service(), bundle, [], [], [])
     seed["market_history"].pop(CALENDAR[-24].isoformat())
     with pytest.raises(ValueError, match="lacks market session"):
         await build_inputs(service(), bundle, [], [], [])

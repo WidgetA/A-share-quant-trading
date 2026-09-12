@@ -6912,7 +6912,13 @@ class V20Service:
             from src.strategy.v22_slim.runtime_inputs import api_rows
 
             limits = await api_rows(
-                client, "stk_limit", {"trade_date": trade_date.strftime("%Y%m%d")}
+                client,
+                "stk_limit",
+                {"trade_date": trade_date.strftime("%Y%m%d")},
+                # This lookup only expands the acquisition universe. An empty
+                # table must not prevent the realtime request. build_inputs
+                # still requires valid current limits before any decision.
+                allow_empty=True,
             )
             if any(row["trade_date"] != trade_date.strftime("%Y%m%d") for row in limits):
                 raise V20SemanticConflict("V22-slim price-limit universe date is invalid")
