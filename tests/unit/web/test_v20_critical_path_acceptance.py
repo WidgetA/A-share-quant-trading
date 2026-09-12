@@ -1532,6 +1532,26 @@ async def test_v16_and_v20_resource_ownership_are_independent_and_cleanup_safe(
     assert not hasattr(v20_state, "scheduler_task")
     assert not hasattr(v20_state, "today_recommendation")
 
+    from src.web.v22_exit_monitor import V22ExitMonitor
+
+    monitor = V22ExitMonitor(
+        SimpleNamespace(
+            _scan_state=v20_state,
+            _repository=SimpleNamespace(schema="v20"),
+            config=SimpleNamespace(),
+        )
+    )
+    assert monitor.service._scan_state.realtime_client is Realtime.instances[1]
+    assert len(Realtime.instances) == 2
+
+    async def unavailable_positions(**kwargs):
+        raise RuntimeError("V22 position storage unavailable")
+
+    monitor.store.list = unavailable_positions
+    with pytest.raises(RuntimeError, match="V22 position storage unavailable"):
+        await monitor.run(datetime(2026, 9, 8, 10, tzinfo=TZ))
+    assert v16_state.initialized and Realtime.instances[0].stop_calls == 0
+
     await canonical_selection.cleanup_v20_selection_resources(v20_state)
     assert v20_state.initialized is False
     assert v20_state.resource_owner is None
@@ -1547,6 +1567,16 @@ async def test_v16_and_v20_resource_ownership_are_independent_and_cleanup_safe(
     assert v16_state.resource_owner is None
     assert Realtime.instances[0].stop_calls == 1
     assert v16_fundamentals.close_calls == 1
+
+    # The monitor owns no lifecycle hooks: independently closing V16 also cannot
+    # close a newly initialized V20 resource or its held-stock monitor.
+    v20_state.fundamentals_db = Fundamentals()
+    await _init_owned_embedded_v20_scan_resources(v20_state)
+    assert v20_state.initialized and Realtime.instances[-1].stop_calls == 0
+    await v15_scan_service.cleanup_scan_resources(v16_state)
+    assert v20_state.initialized and Realtime.instances[-1].stop_calls == 0
+    assert monitor.service._scan_state.realtime_client is Realtime.instances[-1]
+    await canonical_selection.cleanup_v20_selection_resources(v20_state)
 
 
 @pytest.mark.parametrize("failure", ["rt-start", "historical", "mapper", "filter"])

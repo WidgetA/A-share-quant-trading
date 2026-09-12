@@ -1,5 +1,8 @@
+import asyncio
+import json
 from dataclasses import replace
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
@@ -228,3 +231,54 @@ async def test_calibration_api_auth_validation_and_preserves_omitted_fields(monk
     service.calibrate_v22_position.assert_awaited_once_with(
         "p1", "calibrate-001", {"expected_revision": 0, "quantity": 300}
     )
+
+
+def test_frozen_september_7_positions_exit_signals_match_research_evidence():
+    # Fixed existing research exits: Baoding next-minute execution 09-08 11:25;
+    # the other two scheduled 09-09 closing-auction exits. Only completed signal
+    # prefixes and strictly earlier daily candles are supplied here.
+    fixtures = json.loads(
+        (Path(__file__).parents[2] / "fixtures/v22_exit_signals.json").read_text()
+    )
+    expected = {
+        "002552": ("RECOVERY_FAILED", "2026-09-08T11:24:00+08:00"),
+        "002975": ("D2_PLAN", "2026-09-09T14:57:00+08:00"),
+        "603738": ("D2_PLAN", "2026-09-09T14:57:00+08:00"),
+    }
+    for fixture in fixtures:
+        bars = [
+            Bar(
+                datetime.fromisoformat(row["trade_time"]).replace(tzinfo=TZ),
+                *(row[k] for k in ("open", "high", "low", "close", "vol", "amount")),
+            )
+            for row in fixture["bars"]
+        ]
+        inputs = {
+            k: fixture[k]
+            for k in ("phase", "entry", "prior", "pre_close", "before_factor", "up_limit")
+        }
+        signal, _ = evaluate_day(bars, now=bars[-1].at, **inputs)
+        assert (signal.reason, signal.at.isoformat()) == expected[fixture["code"]]
+        assert evaluate_day(bars[:-1], now=bars[-2].at, **inputs)[0] is None
+
+
+@pytest.mark.parametrize("failed", ["legacy", "v22"])
+async def test_new_alert_failure_and_old_exit_failure_do_not_skip_the_other(monkeypatch, failed):
+    from tests.unit.web.test_v20_service import _service
+
+    service = _service(monkeypatch, SimpleNamespace())
+    service.config = replace(service.config, strategy_version="V22-slim")
+    completed = []
+
+    async def operation(name):
+        await asyncio.sleep(0)
+        completed.append(name)
+        if name == failed:
+            raise ValueError(name)
+
+    service._run_exit_cycle = lambda *a, **k: operation("legacy")
+    service._run_v22_exit_tick = lambda now: operation("v22")
+    with pytest.raises(ValueError, match=failed):
+        await service._run_live_exit_tick(SimpleNamespace(), bar().at)
+    assert sorted(completed) == ["legacy", "v22"]
+    assert not service._live_exit_lock.locked()

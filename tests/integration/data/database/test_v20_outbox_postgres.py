@@ -498,7 +498,7 @@ async def test_v22_slim_real_entry_commit_seal_and_delivery_without_exit_lots(
             lineage_id=config.state_lineage_id,
         )
         assert await restarted.publish_once() == 0
-    assert calculations == [today, today] and len(posts) == 2
+    assert calculations == [today, today] and len(posts) == (2 if blocked else 3)
     assert (await instance.load_state(config.state_lineage_id)).revision == 1
 
 
