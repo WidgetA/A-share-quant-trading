@@ -5,6 +5,7 @@ The fixture substitutes market facts and the database, not the task behavior.
 Real PostgreSQL coverage is a separate required release check.
 """
 
+from dataclasses import replace
 from datetime import date, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -14,10 +15,12 @@ import pytest
 import src.web.v20_service as service_module
 from src.common.v20_feishu import _render_entry_strategy_body, render_exit_message
 from src.data.clients.tushare_realtime import TushareDailyBar, TushareRealtimeClient
+from src.strategy.v20.runtime_config import load_v20_runtime_config
 from src.web.v20_routes import _dispatch_manual_trigger
 from src.web.v20_service import V20Service
 from tests.unit.web.test_v20_auto_manual_exact_parity_acceptance import (
     POST_CUTOFF_AT,
+    PROJECT_ROOT,
     RUN_AT,
     TZ,
     _service_and_artifact,
@@ -25,10 +28,20 @@ from tests.unit.web.test_v20_auto_manual_exact_parity_acceptance import (
 
 
 @pytest.mark.parametrize("day", [date(2026, 9, 12), date(2026, 9, 14)])
-async def test_empty_current_realtime_returns_no_tickets_for_both_triggers(monkeypatch, day):
+@pytest.mark.parametrize("profile", ["V20", "V22-slim"])
+async def test_empty_current_realtime_returns_no_tickets_for_both_triggers(
+    monkeypatch, day, profile
+):
     """The provider is called on Saturday too; no calendar-based shortcut or Friday replay."""
     now = datetime.combine(day, datetime.min.time(), tzinfo=TZ).replace(hour=10)
     service, repository, _ = _service_and_artifact(monkeypatch, now=now)
+    if profile == "V22-slim":
+        service.config = replace(
+            load_v20_runtime_config(PROJECT_ROOT, PROJECT_ROOT / "config/v22-slim.yaml"),
+            enabled=True,
+        )
+        service._scan_state.selection_version = service.config.strategy_version
+        repository.bind_lineage(service.config.state_lineage_id)
     calendar = [date(2026, 9, 11), date(2026, 9, 14), date(2026, 9, 15), date(2026, 9, 16)]
     service._calendar_provider = AsyncMock(return_value=calendar)
     service._canonical_artifact_store = None
@@ -68,8 +81,10 @@ async def test_empty_current_realtime_returns_no_tickets_for_both_triggers(monke
     repository.seal_event = AsyncMock(side_effect=AssertionError("empty input sealed tickets"))
     repository.enqueue_alert = AsyncMock(side_effect=AssertionError("empty input generated a push"))
     await service._run_decision_iteration_with_cutoff(now)
-    assert client._api_call.await_count == len(codes), "timer must fetch current realtime"
+    realtime_calls = [c for c in client._api_call.await_args_list if c.args[0] == "rt_min_daily"]
+    assert len(realtime_calls) == len(codes), "timer must fetch current realtime"
     assert service._context.last_phase == "NO_CURRENT_DATA"
+    assert service._lane_health["decision"].last_error is None
     result = await _dispatch_manual_trigger(service, f"current-data-{day.isoformat()}")
     assert result["trade_date"] == day.isoformat()
     assert result["cycle_result"] == "NO_CURRENT_DATA"
@@ -78,10 +93,12 @@ async def test_empty_current_realtime_returns_no_tickets_for_both_triggers(monke
     assert result["delivery_status"] == "NOT_REQUIRED"
     assert result["calculation_result"] == "NOT_RUN"
     # Both requests share the existing provider-minute acquisition, even empty data.
-    assert client._api_call.await_count == len(codes)
-    assert all(call.args[0] == "rt_min_daily" for call in client._api_call.await_args_list)
-    assert all("start_date" not in call.args[1] for call in client._api_call.await_args_list)
-    assert {call.args[1]["ts_code"] for call in client._api_call.await_args_list} == {
+    assert [c for c in client._api_call.await_args_list if c.args[0] == "rt_min_daily"] == (
+        realtime_calls
+    )
+    assert all(c.args[0] in {"rt_min_daily", "stk_limit"} for c in client._api_call.await_args_list)
+    assert all("start_date" not in call.args[1] for call in realtime_calls)
+    assert {call.args[1]["ts_code"] for call in realtime_calls} == {
         "000001.SZ",
         "600001.SH",
     }

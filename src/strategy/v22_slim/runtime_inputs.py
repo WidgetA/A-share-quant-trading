@@ -43,7 +43,7 @@ def checkpoint_for_day(day: date) -> dict:
     return result
 
 
-async def api_rows(client, api: str, params: dict) -> list[dict]:
+async def api_rows(client, api: str, params: dict, *, allow_empty: bool = False) -> list[dict]:
     # pre_close is explicitly opt-in in the official stk_limit contract.
     # https://tushare.pro/document/2?doc_id=183
     response = await client._api_call(
@@ -57,7 +57,7 @@ async def api_rows(client, api: str, params: dict) -> list[dict]:
     )
     data = response["data"]
     rows = [dict(zip(data["fields"], values, strict=True)) for values in data["items"]]
-    if not rows or len(rows) >= (5800 if api == "stk_limit" else 6000):
+    if (not rows and not allow_empty) or len(rows) >= (5800 if api == "stk_limit" else 6000):
         raise ValueError(f"V22-slim {api}: empty or possibly truncated response")
     return rows
 
