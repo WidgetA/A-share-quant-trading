@@ -120,6 +120,8 @@ def test_strong_requires_exact_prefix_and_never_uses_full_day_candle():
     signal, _ = evaluate([bar()], phase=3, extended=True)
     assert signal.reason == "D3_PLAN"
     assert evaluate([], phase=3, extended=True)[0] is None
+    assert evaluate([bar("09:30")], phase=3, extended=True)[0].at == bar("09:30").at
+    assert evaluate([bar("12:00")], phase=3, extended=True)[0] is None
 
 
 def test_earlier_stop_cannot_be_cancelled_by_strong_and_plan_has_no_fake_price():

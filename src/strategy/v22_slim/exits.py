@@ -306,7 +306,10 @@ def evaluate_day(
                 if b.valid
                 and b.volume > 0
                 and b.amount > 0
-                and "09:31" <= b.at.strftime("%H:%M") <= "14:57"
+                and (
+                    "09:30" <= b.at.strftime("%H:%M") <= "11:30"
+                    or "13:01" <= b.at.strftime("%H:%M") <= "14:57"
+                )
             ),
             None,
         )

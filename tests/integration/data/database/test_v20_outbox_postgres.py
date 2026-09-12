@@ -447,7 +447,13 @@ async def test_v22_slim_real_entry_commit_seal_and_delivery_without_exit_lots(
         )
         assert await publisher.publish_once() == 1
         assert await publisher.publish_once() == 0
-        assert (await instance.get_outbox_event(alert_id)).delivery_status == "SENT"
+        alert_delivery = await instance.get_outbox_event(
+            alert_id,
+            route_id=config.route_id,
+            official_stream_id=config.official_stream_id,
+            lineage_id=config.state_lineage_id,
+        )
+        assert alert_delivery.delivery_status == "SENT"
         closed = await position_store.calibrate(
             held["position_id"],
             "close-001",
