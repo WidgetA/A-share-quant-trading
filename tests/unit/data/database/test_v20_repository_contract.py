@@ -1077,8 +1077,17 @@ def test_runtime_migration_is_mechanically_identical_to_all_standalone_migration
     )
     sql = migration_sql("v20")
     standalone_004 = (root / "migrations/v20/004_selection_runs.sql").read_text(encoding="utf-8")
+    standalone_005 = (root / "migrations/v20/005_v22_exit_alerts.sql").read_text(encoding="utf-8")
     assert sql.endswith(
-        "\n\n" + standalone_002 + "\n\n" + standalone_003 + "\n\n" + standalone_004 + "\n"
+        "\n\n"
+        + standalone_002
+        + "\n\n"
+        + standalone_003
+        + "\n\n"
+        + standalone_004
+        + "\n"
+        + standalone_005
+        + "\n"
     )
     assert "CONSTRAINT ck_rolling7_market_health_d0_references_positive" in sql
     assert "CONSTRAINT ck_rolling7_market_health_d2_closes_positive" in sql

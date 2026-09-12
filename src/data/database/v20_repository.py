@@ -1811,6 +1811,10 @@ def migration_sql(schema: str = "v20") -> str:
         .read_text(encoding="utf-8")
         .replace("v20.", f"{schema}.")
         + "\n"
+        + (_PROJECT_ROOT / "migrations/v20/005_v22_exit_alerts.sql")
+        .read_text(encoding="utf-8")
+        .replace("v20.", f"{schema}.")
+        + "\n"
     )
 
 
@@ -3488,6 +3492,9 @@ class V20Repository:
                     canonical_json(proposal),
                     advanced,
                 )
+                from src.data.database.v22_positions import register_selection
+
+                await register_selection(connection, self.schema, commit, event_id)
                 return event_id
 
     async def seal_event(

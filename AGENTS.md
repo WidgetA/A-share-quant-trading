@@ -26,7 +26,20 @@
 - Do not report the task as fixed/onlined merely because CI, health checks, a calculation helper, or an operator notification succeeded. Require the shared task's persisted result and confirmed delivery on the deployed commit, plus scheduler/button parity tests.
 - Public trading messages must describe stocks, recommendation dates, buy/sell quantities or proportions in ordinary language. Do not expose "模型腿", "整腿", "监控腿", D0/rank labels or opaque model IDs as user instructions.
 
-## V16/V20 isolation
+## V22 notification-only holdings — user instruction, 2026-09-13
+
+- Automatically record the first allowed Top3 once per selection day, in the
+  same transaction for both timer and button. BLOCK/NO_SIGNAL/empty data cannot
+  create holdings. A new rerun cannot duplicate records or overwrite corrections.
+- Initial cost is the strategy's raw 09:41 open when available; quantity is
+  unknown until corrected. Never invent an actual fill or quantity.
+- API corrections are audited and retry-idempotent. A notification is not a
+  sale; keep the record until the user marks it closed or not bought.
+- Apply frozen V22 stops, recovery-failure and STRONG extension as alerts only.
+  Keep original V20 positions under their original rules. See
+  [exit-alerts.md](docs/strategies/v22-slim/exit-alerts.md).
+
+## V16/V20 runtime isolation
 
 - A V20 change must never require a production V16 source, model, configuration,
   route, or test change. Production V16 modules must not import V20 modules.
