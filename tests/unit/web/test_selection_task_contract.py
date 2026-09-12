@@ -5,18 +5,90 @@ The fixture substitutes market facts and the database, not the task behavior.
 Real PostgreSQL coverage is a separate required release check.
 """
 
-from datetime import datetime
+from datetime import date, datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
+import src.web.v20_service as service_module
 from src.common.v20_feishu import _render_entry_strategy_body, render_exit_message
+from src.data.clients.tushare_realtime import TushareDailyBar, TushareRealtimeClient
 from src.web.v20_routes import _dispatch_manual_trigger
+from src.web.v20_service import V20Service
 from tests.unit.web.test_v20_auto_manual_exact_parity_acceptance import (
     POST_CUTOFF_AT,
     RUN_AT,
     TZ,
     _service_and_artifact,
 )
+
+
+@pytest.mark.parametrize("day", [date(2026, 9, 12), date(2026, 9, 14)])
+async def test_empty_current_realtime_returns_no_tickets_for_both_triggers(monkeypatch, day):
+    """The provider is called on Saturday too; no calendar-based shortcut or Friday replay."""
+    now = datetime.combine(day, datetime.min.time(), tzinfo=TZ).replace(hour=10)
+    service, repository, _ = _service_and_artifact(monkeypatch, now=now)
+    calendar = [date(2026, 9, 11), date(2026, 9, 14), date(2026, 9, 15), date(2026, 9, 16)]
+    service._calendar_provider = AsyncMock(return_value=calendar)
+    service._canonical_artifact_store = None
+    service._mews_cached_for = day
+    service._scan_state.historical_adapter = SimpleNamespace()
+    client = TushareRealtimeClient("test-only")
+    client._client = SimpleNamespace()
+    client._api_call = AsyncMock(return_value={"data": {"fields": [], "items": []}})
+    codes = ("000001", "600001")
+    client.fetch_daily_bars = AsyncMock(
+        return_value={code: TushareDailyBar(code, "20260911", 10.0, 100000.0) for code in codes}
+    )
+    service._scan_state.realtime_client = client
+    monkeypatch.setattr(
+        service_module,
+        "derive_canonical_v16_universe",
+        lambda state, **kwargs: (
+            None,
+            None,
+            {"board": tuple((code, code) for code in codes)},
+            codes,
+        ),
+    )
+    service._compute_canonical_v16_from_persisted_raw = (
+        V20Service._compute_canonical_v16_from_persisted_raw.__get__(service)
+    )
+    repository.get_entry_status = AsyncMock(return_value=None)
+    repository.list_raw_minute_bar_records = AsyncMock(return_value=[])
+
+    async def daily_snapshot(day, payload):
+        return SimpleNamespace(payload=payload)
+
+    repository.record_daily_bar_snapshot = daily_snapshot
+    repository.commit_selection_run = AsyncMock(
+        side_effect=AssertionError("empty input wrote tickets")
+    )
+    repository.seal_event = AsyncMock(side_effect=AssertionError("empty input sealed tickets"))
+    repository.enqueue_alert = AsyncMock(side_effect=AssertionError("empty input generated a push"))
+    await service._run_decision_iteration_with_cutoff(now)
+    assert client._api_call.await_count == len(codes), "timer must fetch current realtime"
+    assert service._context.last_phase == "NO_CURRENT_DATA"
+    result = await _dispatch_manual_trigger(service, f"current-data-{day.isoformat()}")
+    assert result["trade_date"] == day.isoformat()
+    assert result["cycle_result"] == "NO_CURRENT_DATA"
+    assert result["symbols"] == result["reference_symbols"] == []
+    assert result["entry_event_id"] is None and result["created"] is False
+    assert result["delivery_status"] == "NOT_REQUIRED"
+    assert result["calculation_result"] == "NOT_RUN"
+    # Both requests share the existing provider-minute acquisition, even empty data.
+    assert client._api_call.await_count == len(codes)
+    assert all(call.args[0] == "rt_min_daily" for call in client._api_call.await_args_list)
+    assert all("start_date" not in call.args[1] for call in client._api_call.await_args_list)
+    assert {call.args[1]["ts_code"] for call in client._api_call.await_args_list} == {
+        "000001.SZ",
+        "600001.SH",
+    }
+    repository.commit_selection_run.assert_not_awaited()
+    repository.seal_event.assert_not_awaited()
+    repository.enqueue_alert.assert_not_awaited()
+    assert not repository.selection_runs and repository.state.revision == 0
 
 
 @pytest.mark.parametrize("hour", [9, 14, 19])

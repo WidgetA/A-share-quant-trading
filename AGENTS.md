@@ -18,6 +18,7 @@
 
 - Source of truth: [execution-contract.md](docs/strategies/v22-slim/execution-contract.md), based on the user's explicit instructions. Older implementation notes and tests cannot override it.
 - The timer and manual button invoke the same COMPLETE selection task: input acquisition, calculation, persistence, message generation, and delivery. Sharing only the calculation helper is insufficient.
+- User correction on 2026-09-12: invoke the current realtime source. Do not add a weekday/holiday admission check, change today's request to the latest trading day, or fill an empty current response using historical minute data or old tickets. An empty realtime result ends selection without producing or pushing tickets. Historical daily features retain their own existing purpose.
 - A new manual request runs the task again, including when the day's scheduled run already exists. It must not select a read-only/check-only path, replay a stored message instead of calculating, or use a manual-only message template.
 - Only the trigger source differs. Run IDs, actual execution timestamps and retry deduplication may differ; selection, gates, persistence contract, and message body may not depend on trigger source.
 - Preserve date-based market API routing and once-per-day state advancement as shared task rules, not manual-only bypasses. A repeated HTTP request with the SAME run ID is a retry; a NEW button click gets a new run ID and recomputes.

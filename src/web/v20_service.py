@@ -482,6 +482,10 @@ class V20LiveExitStageTimeout(RuntimeError):
         self.diagnostic_alert_emitted: bool | None = False
 
 
+class _NoCurrentSelectionData(V20RepositoryError):
+    """The current realtime source returned no usable selection input."""
+
+
 class V20LiveExitIncidentError(V20RepositoryError):
     """A live-exit failure whose more specific durable alert was attempted."""
 
@@ -2824,17 +2828,14 @@ class V20Service:
             )
 
     async def trigger_morning_selection(self, request_id: str) -> Mapping[str, Any]:
-        """Button adapter: select the session and invoke the scheduled task again."""
+        """Invoke the ordinary task for today; never substitute a historical day."""
         await self._require_manual_trigger_ready()
         if not isinstance(request_id, str) or _MANUAL_REQUEST_ID.fullmatch(request_id) is None:
             raise ValueError("invalid selection request ID")
         now = self._aware_now()
         calendar = tuple(await self._load_trade_calendar(now.date()))
-        sessions = [day for day in calendar if day <= now.date()]
-        if not sessions:
-            raise V20StateConflict("no confirmed trading session is available")
-        trade_date = sessions[-1]
-        if trade_date == now.date() and now.time() < time(9, 39):
+        trade_date = now.date()
+        if now.time() < time(9, 39):
             raise V20StateConflict("09:39 selection input is not ready")
         async with self._decision_cycle_lock:
             status_before = await self._repository.get_entry_status(
@@ -2844,6 +2845,26 @@ class V20Service:
             record, created = await self._execute_selection_task(
                 context, now, request_id=request_id
             )
+        if record is None:
+            return {
+                "accepted": True,
+                "created": False,
+                "manual_request_id": request_id,
+                "trade_date": trade_date.isoformat(),
+                "cycle_result": "NO_CURRENT_DATA",
+                "entry_event_id": None,
+                "selection_version": self.config.strategy_version,
+                "symbols": [],
+                "reference_symbols": [],
+                "calculation_result": "NOT_RUN",
+                "data_source": "rt_min_daily",
+                "delivery_status": "NOT_REQUIRED",
+                "feishu_delivery_confirmed": False,
+                "task_success": False,
+                "official_state_changed": False,
+                "orders_changed": False,
+                "message": "实时接口没有返回可用的当日数据，本次不出票。",
+            }
         semantic = record.semantic
         return {
             "accepted": True,
@@ -3314,15 +3335,6 @@ class V20Service:
         exit_tasks = tuple(
             task for task in (*pre_calendar_tasks, stale_exit_task) if task is not None
         )
-        if current.date() not in calendar:
-            self._context = _DayContext(
-                trade_date=current.date(),
-                calendar=calendar,
-                last_phase="NON_TRADING_DAY",
-            )
-            await asyncio.gather(*exit_tasks)
-            self._last_success_at = current
-            return
         try:
             context = await self._ensure_context(current, calendar)
             bootstrap_covers_today = await self._bootstrap_anchor_covers(context.trade_date)
@@ -6670,6 +6682,8 @@ class V20Service:
                     targets,
                     current_loader,
                 )
+                if not early_response:
+                    raise _NoCurrentSelectionData("rt_min_daily returned no current selection data")
                 payloads = [
                     _bar_payload(bar)
                     for code in targets
@@ -6783,10 +6797,6 @@ class V20Service:
             calendar = context_calendar
         else:
             calendar = tuple(await self._load_trade_calendar(trade_date))
-        if trade_date not in calendar:
-            raise V20RepositoryError(
-                f"Rolling7 canonical bootstrap calendar lacks {trade_date.isoformat()}"
-            )
         predecessors = [day for day in calendar if day < trade_date]
         successors = [day for day in calendar if day > trade_date]
         if not predecessors or len(successors) < 2:
@@ -8144,7 +8154,7 @@ class V20Service:
         now: datetime,
         *,
         request_id: str,
-    ) -> tuple[OutboxRecord, bool]:
+    ) -> tuple[OutboxRecord | None, bool]:
         """Complete task shared by timer and button, including ordinary persistence.
 
         The caller holds the decision lock. Request identity controls retry
@@ -8170,9 +8180,13 @@ class V20Service:
             await self._expire_reference_gaps(context, now)
             await self._process_mature_shadow(context, now)
             self.kick_mews_for_selection_trigger(now)
-            calculation = await self._orchestrate_morning_selection(
-                context.trade_date, allow_legacy_terminal_fresh_theoretical=True
-            )
+            try:
+                calculation = await self._orchestrate_morning_selection(
+                    context.trade_date, allow_legacy_terminal_fresh_theoretical=True
+                )
+            except _NoCurrentSelectionData:
+                context.last_phase = "NO_CURRENT_DATA"
+                return None, False
             context.canonical_bundle = calculation.bundle
             context.canonical_first_received_at = calculation.canonical_first_received_at
             existing_id = await self._repository.commit_selection_run(
