@@ -42,7 +42,7 @@ class _Service:
         }
 
 
-def test_dedicated_host_exposes_only_the_four_v20_routes() -> None:
+def test_dedicated_host_exposes_only_selection_evidence_and_holding_alert_routes() -> None:
     app = create_v20_app(v20_service=_Service(enabled=False))
 
     routes = {(route.path, frozenset(route.methods or ())) for route in app.routes}
@@ -52,6 +52,8 @@ def test_dedicated_host_exposes_only_the_four_v20_routes() -> None:
         ("/api/v20/reminder-stop-acks", frozenset({"POST"})),
         ("/api/v20/trigger-scan", frozenset({"POST"})),
         ("/api/v20/manual-monitor", frozenset({"POST"})),
+        ("/api/v20/v22-positions", frozenset({"GET"})),
+        ("/api/v20/v22-positions/{position_id}/calibrate", frozenset({"POST"})),
     }
 
 

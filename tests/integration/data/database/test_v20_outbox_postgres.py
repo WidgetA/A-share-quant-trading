@@ -319,6 +319,26 @@ async def test_v22_slim_real_entry_commit_seal_and_delivery_without_exit_lots(
         assert first["official_state_changed"] is True
         assert first["task_success"] is False
     api = FastAPI()
+    from src.data.database.v22_positions import V22PositionStore
+
+    position_store = V22PositionStore(instance, config)
+    initial_positions = await position_store.list()
+    assert len(initial_positions) == (0 if blocked else 3)
+    corrected = None
+    if not blocked:
+        initial = initial_positions[0]
+        assert initial["entry_price"] is None and initial["quantity"] is None
+        correction = {"expected_revision": 0, "entry_price": 100, "quantity": 300}
+        corrected = await position_store.calibrate(
+            initial["position_id"], "correct-001", correction
+        )
+        assert (
+            await position_store.calibrate(initial["position_id"], "correct-001", correction)
+            == corrected
+        )
+        assert await position_store.apply(initial, reference=999) is None
+        with pytest.raises(V20StateConflict):
+            await position_store.calibrate(initial["position_id"], "correct-stale", correction)
     api.include_router(create_v20_router())
     api.state.v20_service = service
     async with httpx.AsyncClient(
@@ -344,6 +364,11 @@ async def test_v22_slim_real_entry_commit_seal_and_delivery_without_exit_lots(
     retry = await _dispatch_manual_trigger(service, "postgres-button-rerun-001")
     assert retry["entry_event_id"] == second_event and retry["created"] is False
     assert calculations == [today, today]
+    after_rerun = await position_store.list()
+    assert len(after_rerun) == len(initial_positions)
+    if corrected is not None:
+        assert after_rerun[0]["entry_price"] == 100
+        assert after_rerun[0]["quantity"] == 300 and after_rerun[0]["calibrated"]
     assert first_event != second_event
     status = await instance.get_entry_status(config.official_stream_id, today)
     assert status.action == ("BLOCK" if blocked else "ENTER")
@@ -403,6 +428,53 @@ async def test_v22_slim_real_entry_commit_seal_and_delivery_without_exit_lots(
         lineage_id=config.state_lineage_id,
     )
     assert delivered.delivery_status == "SENT"
+    if corrected is not None:
+        from src.strategy.v22_slim.exits import REASONS, Signal
+
+        signal = Signal("D1_STOP", now, 92, REASONS["D1_STOP"])
+        alert_id = await position_store.apply(corrected, signal=signal)
+        assert alert_id is not None
+        assert await position_store.apply(corrected, signal=signal) is None
+        held = (await position_store.list())[0]
+        assert held["status"] == "MONITORING" and held["quantity"] == 300
+        assert held["alert_event_id"] == alert_id
+        assert len(await position_store.list(active=True)) == 2
+        alert = await instance.seal_event(alert_id, seal_v20_payload)
+        assert "300 股" in alert.payload["message"] and "实际买入价" in alert.payload["message"]
+        assert all(
+            word not in alert.payload["message"]
+            for word in ("腿", "D0", "rank", held["position_id"])
+        )
+        assert await publisher.publish_once() == 1
+        assert await publisher.publish_once() == 0
+        alert_delivery = await instance.get_outbox_event(
+            alert_id,
+            route_id=config.route_id,
+            official_stream_id=config.official_stream_id,
+            lineage_id=config.state_lineage_id,
+        )
+        assert alert_delivery.delivery_status == "SENT"
+        closed = await position_store.calibrate(
+            held["position_id"],
+            "close-001",
+            {
+                "expected_revision": held["revision"],
+                "quantity": 0,
+            },
+        )
+        assert closed["status"] == "CLOSED"
+        assert await position_store.apply(closed, signal=signal) is None
+        not_bought = (await position_store.list())[1]
+        canceled = await position_store.calibrate(
+            not_bought["position_id"],
+            "not-bought-001",
+            {
+                "expected_revision": not_bought["revision"],
+                "status": "NOT_BOUGHT",
+            },
+        )
+        assert await position_store.apply(canceled, signal=signal) is None
+        assert await pool.fetchval(f"SELECT count(*) FROM {schema}.v22_position_calibrations") == 3
     repeated_delivery = await instance.get_outbox_event(
         second_event,
         route_id=config.route_id,
@@ -426,7 +498,7 @@ async def test_v22_slim_real_entry_commit_seal_and_delivery_without_exit_lots(
             lineage_id=config.state_lineage_id,
         )
         assert await restarted.publish_once() == 0
-    assert calculations == [today, today] and len(posts) == 2
+    assert calculations == [today, today] and len(posts) == (2 if blocked else 3)
     assert (await instance.load_state(config.state_lineage_id)).revision == 1
 
 

@@ -1358,6 +1358,7 @@ class V20Service:
             ],
         ] = {}
         self._live_exit_lock = asyncio.Lock()
+        self._v22_exit_monitor: Any = None
         self._mews_refresh_lock = asyncio.Lock()
         self._mews_singleflight_lock = asyncio.Lock()
         # One shared per-date MEWS attempt joined by the 09:10 scheduler and by
@@ -2135,6 +2136,34 @@ class V20Service:
             **self._ledger_scope,
         )
         return {"ack_id": str(payload["ack_id"]), "accepted": True, "created": created}
+
+    def _v22_monitor(self) -> Any:
+        from src.web.v22_exit_monitor import V22ExitMonitor
+
+        if self.config.strategy_version != "V22-slim":
+            raise V20StateConflict("V22 holding alerts require V22-slim")
+        if self._v22_exit_monitor is None:
+            self._v22_exit_monitor = V22ExitMonitor(self)
+        return self._v22_exit_monitor
+
+    async def list_v22_positions(self) -> Any:
+        self._require_running()
+        return await self._v22_monitor().store.list()
+
+    async def calibrate_v22_position(
+        self, position_id: str, request_id: str, payload: Mapping[str, Any]
+    ) -> Any:
+        self._require_running()
+        await self._repository.assert_runtime_leader()
+        if "entry_date" in payload:
+            day = date.fromisoformat(str(payload["entry_date"]))
+            calendar = await self._load_trade_calendar(self._aware_now().date())
+            if day > self._aware_now().date() or day not in calendar:
+                raise ValueError("buy date must be a completed or current exchange session")
+        return await self._v22_monitor().store.calibrate(position_id, request_id, dict(payload))
+
+    async def _run_v22_exit_tick(self, now: datetime) -> None:
+        await asyncio.wait_for(self._v22_monitor().run(now), timeout=self._live_exit_tick_budget())
 
     async def enroll_manual_monitor(
         self,
@@ -3598,13 +3627,24 @@ class V20Service:
             except asyncio.TimeoutError as exc:
                 raise lock_timeout() from exc
             try:
-                await self._run_exit_cycle(
+                ordinary_cycle = self._run_exit_cycle(
                     context,
                     now,
                     include_stale=False,
                     deadline=deadline,
                     tick_started_at=tick_started_at,
                 )
+                if self.config.strategy_version == "V22-slim":
+                    results = await asyncio.gather(
+                        ordinary_cycle,
+                        self._run_v22_exit_tick(now),
+                        return_exceptions=True,
+                    )
+                    for result in results:
+                        if isinstance(result, BaseException):
+                            raise result
+                else:
+                    await ordinary_cycle
             finally:
                 self._live_exit_lock.release()
         except V20LiveExitStageTimeout as exc:

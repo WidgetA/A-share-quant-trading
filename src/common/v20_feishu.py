@@ -661,6 +661,27 @@ def _render_data_alert_for_operator(
     """Give runtime alerts a human title and an explicit operator impact."""
 
     code = str(semantic.get("alert_code", "UNKNOWN"))
+    if code == "V22_EXIT_ALERT":
+        quantity = semantic.get("quantity")
+        amount = f"{quantity} 股（已校准）" if quantity is not None else "数量尚未校准"
+        price = semantic.get("entry_price")
+        cost = f"{float(price):.2f} 元" if price is not None else "尚未取得"
+        source = "实际买入价" if semantic.get("price_source") == "MANUAL" else "按策略参考价暂记"
+        trigger_price = semantic.get("trigger_price")
+        quote = f"{float(trigger_price):.2f} 元" if trigger_price is not None else "无对应分钟价格"
+        return "\n".join(
+            [
+                "[V22] 卖出提醒",
+                f"股票：{semantic.get('code')} {semantic.get('stock_name')}",
+                f"买入日期：{semantic.get('entry_date')}",
+                f"建议卖出：剩余全部，{amount}",
+                f"原因：{semantic.get('message')}",
+                f"触发时间：{semantic.get('trigger_at')}",
+                f"触发时价格：{quote}",
+                f"买入成本：{cost}（{source}）",
+                "请按实际持仓处理；此消息不代表已成交，卖出后请校准剩余数量。",
+            ]
+        )
     if code == "MANUAL_MONITOR_ARMED":
         symbols = semantic.get("symbols") or []
         tickets = "、".join(

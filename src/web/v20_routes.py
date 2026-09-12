@@ -1,9 +1,8 @@
 """Narrow HTTP boundary for the V20 decision-notification service.
 
-The router deliberately exposes no account, order, holding, fill, or execution
-API.  It reports service health, accepts the two external evidence records
-required by the documented V20 state machine, and exposes one non-bypassable
-manual trigger for the production morning-selection path.
+The router reports service health, accepts evidence and V22 notification-only
+holding corrections, and exposes one complete production selection trigger.
+Holding corrections do not place orders or claim executions.
 """
 
 from __future__ import annotations
@@ -21,7 +20,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.security import APIKeyHeader
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from src.common.v20_feishu import seal_v20_payload
 from src.data.database.v20_repository import (
@@ -62,6 +61,12 @@ class V20RouteService(Protocol):
     async def trigger_morning_selection(self, request_id: str) -> Any: ...
 
     async def enroll_manual_monitor(self, source_event_id: str, request_id: str) -> Any: ...
+
+    async def list_v22_positions(self) -> Any: ...
+
+    async def calibrate_v22_position(
+        self, position_id: str, request_id: str, payload: Mapping[str, Any]
+    ) -> Any: ...
 
 
 class MewsSnapshotRequest(BaseModel):
@@ -110,6 +115,23 @@ class ManualMonitorRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     source_event_id: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+
+
+class V22CalibrationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    expected_revision: int = Field(ge=0, strict=True)
+    entry_price: float | None = Field(default=None, gt=0)
+    quantity: int | None = Field(default=None, ge=0, strict=True)
+    entry_date: date | None = None
+    status: Literal["MONITORING", "NOT_BOUGHT", "CLOSED"] | None = None
+
+    @model_validator(mode="after")
+    def require_change(self) -> V22CalibrationRequest:
+        changes = self.model_fields_set - {"expected_revision"}
+        if not changes or any(getattr(self, field) is None for field in changes):
+            raise ValueError("provide at least one non-null holding correction")
+        return self
 
 
 def _require_ingest_api_key(
@@ -459,6 +481,32 @@ def create_v20_router() -> APIRouter:
         service = _get_service(request)
         payload = body.model_dump(mode="json")
         return await _call_service(lambda: service.record_reminder_stop_ack(payload))
+
+    @router.get("/v22-positions", dependencies=[Depends(_require_ingest_api_key)])
+    async def v22_positions(request: Request) -> Any:
+        return await _call_service(_get_service(request).list_v22_positions)
+
+    @router.post(
+        "/v22-positions/{position_id}/calibrate", dependencies=[Depends(_require_ingest_api_key)]
+    )
+    async def calibrate_v22_position(
+        request: Request,
+        position_id: str,
+        body: V22CalibrationRequest,
+        idempotency_key: str = Header(alias="Idempotency-Key"),
+    ) -> Any:
+        if _MANUAL_REQUEST_ID.fullmatch(idempotency_key) is None:
+            raise HTTPException(
+                status_code=400, detail="Idempotency-Key must be 8-128 safe characters"
+            )
+        service = _get_service(request)
+        return await _call_service(
+            lambda: service.calibrate_v22_position(
+                position_id,
+                idempotency_key,
+                body.model_dump(mode="json", exclude_unset=True),
+            )
+        )
 
     @router.post(
         "/trigger-scan",
