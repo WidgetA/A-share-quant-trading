@@ -51,8 +51,12 @@ def evaluate(bars, **changes):
 def test_frozen_stop_boundaries(phase, price, danger, reason):
     signal, _ = evaluate([bar(price=price)], phase=phase, danger=danger, now=bar("10:00").at)
     assert (signal.reason if signal else None) == reason
-    if reason == "D1_STOP":
-        assert signal.detail == "T+1 止损线 8%"
+    if reason is not None:
+        assert signal.detail == {
+            "D1_STOP": "T+1 止损线 8%",
+            "D2_STOP": "T+2 止损线 12%",
+            "D2_RISK_STOP": "T+2 风险止损线 5%",
+        }[reason]
 
 
 def test_stop_uses_completed_close_and_valid_volume_not_low():
@@ -82,6 +86,7 @@ def test_rebound_failure_can_trigger_while_still_profitable():
     bars = rebound_bars()
     signal = recovery(bars)
     assert signal is not None and signal.reason == "RECOVERY_FAILED"
+    assert signal.detail == "T+1 反弹失败"
     assert signal.at == bars[-1].at and signal.price == 101
     assert recovery(bars[:-1]) is None
     assert recovery(bars, up_limit=101) is None
@@ -124,6 +129,7 @@ def test_strong_requires_exact_prefix_and_never_uses_full_day_candle():
     assert signal is None and extended
     signal, _ = evaluate([bar()], phase=3, extended=True)
     assert signal.reason == "D3_PLAN"
+    assert signal.detail == "T+3 起计划卖出"
     assert evaluate([], phase=3, extended=True)[0] is None
     assert evaluate([bar("09:30")], phase=3, extended=True)[0].at == bar("09:30").at
     assert evaluate([bar("12:00")], phase=3, extended=True)[0] is None
@@ -135,6 +141,7 @@ def test_earlier_stop_cannot_be_cancelled_by_strong_and_plan_has_no_fake_price()
     assert evaluate(bars, phase=2, entry=10, prior=prior, pre_close=10)[0].reason == "D2_STOP"
     signal, _ = evaluate([bar("15:00", 101)], phase=2)
     assert signal.reason == "D2_PLAN" and signal.price is None
+    assert signal.detail == "T+2 尾盘计划卖出"
 
 
 def monitor(client):
