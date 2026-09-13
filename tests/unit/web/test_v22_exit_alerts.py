@@ -51,6 +51,8 @@ def evaluate(bars, **changes):
 def test_frozen_stop_boundaries(phase, price, danger, reason):
     signal, _ = evaluate([bar(price=price)], phase=phase, danger=danger, now=bar("10:00").at)
     assert (signal.reason if signal else None) == reason
+    if reason == "D1_STOP":
+        assert signal.detail == "T+1 止损线 8%"
 
 
 def test_stop_uses_completed_close_and_valid_volume_not_low():
