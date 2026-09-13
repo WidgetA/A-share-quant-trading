@@ -52,11 +52,14 @@ def test_frozen_stop_boundaries(phase, price, danger, reason):
     signal, _ = evaluate([bar(price=price)], phase=phase, danger=danger, now=bar("10:00").at)
     assert (signal.reason if signal else None) == reason
     if reason is not None:
-        assert signal.detail == {
-            "D1_STOP": "T+1 止损线 8%",
-            "D2_STOP": "T+2 止损线 12%",
-            "D2_RISK_STOP": "T+2 风险止损线 5%",
-        }[reason]
+        assert (
+            signal.detail
+            == {
+                "D1_STOP": "T+1 止损线 8%",
+                "D2_STOP": "T+2 止损线 12%",
+                "D2_RISK_STOP": "T+2 风险止损线 5%",
+            }[reason]
+        )
 
 
 def test_stop_uses_completed_close_and_valid_volume_not_low():
