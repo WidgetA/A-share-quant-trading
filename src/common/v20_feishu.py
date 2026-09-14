@@ -440,7 +440,13 @@ def _render_entry_strategy_body(semantic: Mapping[str, Any]) -> str:
             f"最终 {funnel.get('final_candidates', '-')}只"
         )
 
-    symbols = semantic.get("symbols") or []
+    buy_symbols = semantic.get("symbols") or []
+    symbols = (semantic.get("reference_symbols") or buy_symbols)[:10] if slim else buy_symbols
+    if slim:
+        if action == "ENTER" and multiplier > 0 and buy_symbols:
+            lines.append(f"计划买入前 {len(buy_symbols)} 只，其余仅供观察。")
+        else:
+            lines.append("今天不新开仓，保留现金；候选仅供观察。")
     if isinstance(symbols, list) and symbols:
         from src.strategy.filters.board_filter import BROAD_CONCEPT_BOARDS
 
@@ -483,7 +489,7 @@ def _render_entry_strategy_body(semantic: Mapping[str, Any]) -> str:
         lines.extend(
             [
                 "",
-                f"V22-slim推荐（{len(symbols)}只）:"
+                f"V22-slim选股（{len(symbols)}只）:"
                 if slim
                 else f"V16完整推荐（{len(symbols)}只）:",
                 f"推荐 Top-1: {top1['code']} {top1.get('name', '')}",
@@ -494,7 +500,7 @@ def _render_entry_strategy_body(semantic: Mapping[str, Any]) -> str:
                     f"{optional_metrics(top1)}"
                 ),
                 "",
-                "推荐前3:" if semantic.get("entry_only") else "评分前10:",
+                "评分前10:",
             ]
         )
         for item in symbols:
@@ -512,10 +518,10 @@ def _render_entry_strategy_body(semantic: Mapping[str, Any]) -> str:
                 "[带动]=个股自身涨幅已达热门板块门槛(0.8%),自己就能带火板块 | "
                 "[扩增]=仅个股涨幅未到0.8%,靠板块内其他股票拉高均值才被纳入"
             )
-        if multiplier > 0:
-            per_leg = multiplier / len(symbols)
+        if multiplier > 0 and buy_symbols and (not slim or action == "ENTER"):
+            per_leg = multiplier / len(buy_symbols)
             lines.append(
-                f"每只占当天资金份: {_pct(per_leg)}"
+                f"计划买入的每只股票占当天资金份: {_pct(per_leg)}"
                 if slim
                 else f"每只股票占单次买入预算: {_pct(per_leg)}（非账户总资金比例）"
             )
@@ -805,7 +811,7 @@ def render_entry_message(
         lines.extend(["", "V22-slim：本次仅提供选股与开仓判断；放行使用当天资金份，非全账户满仓。"])
         if action == "BLOCK":
             lines.append("原始候选仅供观察，今天不新买。")
-        lines.append("本版本未启用 V22 卖出规则。")
+        lines.append("卖出方式：触发退出条件后通知，实际卖出由你操作。")
 
     lines.extend(
         [

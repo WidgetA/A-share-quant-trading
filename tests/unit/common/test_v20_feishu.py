@@ -226,6 +226,78 @@ def test_entry_message_is_explicit_and_keeps_full_v16_style_rows() -> None:
     assert "推荐日期=2026-08-27 / 当日排名=2 / 原建议资金比例=5.00%" in message
 
 
+@pytest.mark.parametrize("action,candidate_count", [("ENTER", 10), ("BLOCK", 10), ("ENTER", 2)])
+def test_v22_shows_candidates_without_expanding_buy_plan(action, candidate_count) -> None:
+    candidates = [
+        {
+            "rank": rank,
+            "code": f"{rank:06d}",
+            "name": f"股票{rank}",
+            "score": 2.0 - rank / 100,
+            "snapshot_price": 10.0 + rank / 10,
+            "boards": ["银行"],
+            "best_board": "银行",
+            "is_driver": True,
+            "cci": 80.0,
+            "volume_937": 100000.0,
+            "history_hash": "a" * 64,
+            "early_source_hash": "b" * 64,
+        }
+        for rank in range(1, candidate_count + 1)
+    ]
+    buys = candidates[:3] if action == "ENTER" else []
+    semantic = {
+        "schema_version": V20_ENTRY_SEMANTIC_SCHEMA,
+        "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
+        "strategy_version": "V22-slim",
+        "entry_only": True,
+        "event_id": "e" * 64,
+        "deployment_mode": "production_push",
+        "trade_date": "2026-09-14",
+        "action": action,
+        "final_multiplier": 1.0 if buys else 0.0,
+        "health_state": "ACTIVE",
+        "base_multiplier": 1.0,
+        "rolling7_state": "GOOD",
+        "rolling7_r7": None,
+        "rolling7_l7": None,
+        "g_state": "CLEAR",
+        "defense_multiplier": 1.0,
+        "reason_codes": [],
+        "last_complete_bar": "09:39",
+        "scheduled_exits_today": [],
+        "symbols": buys,
+        "reference_symbols": candidates,
+        "v16_funnel": {
+            "step0_universe_count": 3000,
+            "step2_hot_board_count": 10,
+            "final_candidates": candidate_count,
+        },
+        "v16_board_avg_gains": {"银行": 1.23},
+    }
+    original_hash = sha256_json(semantic)
+
+    payload = seal_v20_payload(
+        _outbox_record("ENTRY_DECISION", semantic),
+        datetime(2026, 9, 14, 9, 40, tzinfo=TZ),
+        7,
+        True,
+    )
+    message = str(payload["message"])
+
+    for candidate in candidates:
+        assert f"{candidate['rank']}. {candidate['code']} {candidate['name']}  " in message
+    if buys:
+        assert f"计划买入前 {len(buys)} 只，其余仅供观察。" in message
+        assert f"计划买入的每只股票占当天资金份: {100 / len(buys):.2f}%" in message
+    else:
+        assert "今天不新开仓，保留现金；候选仅供观察。" in message
+        assert "计划买入" not in message
+    assert "本版本未启用 V22 卖出规则" not in message
+    assert "触发退出条件后通知，实际卖出由你操作" in message
+    assert sha256_json(semantic) == original_hash
+
+
 def test_entry_current_contract_seals_and_legacy_or_partial_contracts_fail_closed() -> None:
     semantic = {
         "schema_version": V20_ENTRY_SEMANTIC_SCHEMA,
