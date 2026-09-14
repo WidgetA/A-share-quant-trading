@@ -81,6 +81,40 @@ async def repository():
         await pool.close()
 
 
+@pytest.mark.parametrize("with_signal", [True, False])
+async def test_v22_canonical_barrier_uses_production_codec_and_survives_restart(
+    repository, monkeypatch, with_signal
+):
+    from src.data.database.v16_canonical_artifact_store import V16CanonicalArtifactStore
+    from tests.unit.web.test_v20_service import _service
+    from tests.unit.web.test_v22_canonical_artifact import v22_canonical
+
+    instance, _pool, _schema_name = repository
+    canonical = v22_canonical(with_signal=with_signal)
+    service = _service(monkeypatch, instance)
+    service._canonical_artifact_store = V16CanonicalArtifactStore(instance)
+    # No custom store hydrator and no mocked raw/codec/write/readback methods.
+    await service._persist_canonical_artifact_barrier(canonical)
+    first = await service._load_canonical_artifact(canonical.trade_date)
+    assert first is not None
+    expected = service._project_canonical_v16(canonical, calendar=canonical.computation_calendar)
+    assert first[0].snapshot == expected.snapshot
+    assert first[0].snapshot_hash == expected.snapshot_hash
+
+    restarted = _service(monkeypatch, instance)
+    restarted._canonical_artifact_store = V16CanonicalArtifactStore(instance)
+    loaded = await restarted._load_canonical_artifact(canonical.trade_date)
+    assert loaded is not None
+    assert loaded[0].snapshot == expected.snapshot
+    assert loaded[0].scan_result.recommended == canonical.scan_result.recommended
+    assert loaded[1] == first[1]
+    await restarted._persist_canonical_artifact_barrier(canonical)
+    repeated = await restarted._load_canonical_artifact(canonical.trade_date)
+    assert repeated is not None
+    assert repeated[0].snapshot_hash == expected.snapshot_hash
+    assert repeated[1] == first[1]
+
+
 async def test_same_date_entry_commits_with_full_legs_and_date_scoped_delivery(repository):
     """Use real PostgreSQL terminal/seal clocks, including runs after 09:40/09:45."""
     from src.common.v20_feishu import seal_v20_payload

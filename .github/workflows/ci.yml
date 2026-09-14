@@ -22,7 +22,11 @@ jobs:
       - run: uv python install 3.11
       - run: uv sync --extra dev
       - name: Enforce the user's timer-button contract
-        run: uv run pytest -q tests/unit/web/test_selection_task_contract.py --tb=short
+        run: >-
+          uv run pytest -q
+          tests/unit/web/test_selection_task_contract.py
+          tests/unit/web/test_v22_canonical_artifact.py
+          --tb=short
 
   lint:
     name: Lint & Format Check

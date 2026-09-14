@@ -139,6 +139,9 @@ from src.web.v20_scan_pipeline import (
     V20PrewarmedScan,
 )
 from src.web.v20_v16_canonical_artifact import (
+    V22_SCORER_MODEL_SHA256,
+)
+from src.web.v20_v16_canonical_artifact import (
     encode as encode_v16_canonical_artifact,
 )
 from src.web.v20_v16_canonical_artifact import (
@@ -8072,10 +8075,7 @@ class V20Service:
             },
             "board_avg_gains": dict(sorted(result.step2_board_avg_gains.items())),
         }
-        if (
-            canonical.model_sha256
-            == "55b6c1eb6afe9b642893fcdad2d073cb8851e73914592ee7d95946e06da82525"
-        ):
+        if canonical.model_sha256 == V22_SCORER_MODEL_SHA256:
             from src.strategy.v22_slim.selection import market_projection
 
             snapshot["v22_market"] = market_projection(canonical.early_bars, canonical.trade_date)

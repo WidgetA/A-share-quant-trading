@@ -63,6 +63,8 @@ _SNAPSHOT_FIELDS = frozenset(
         "board_avg_gains",
     }
 )
+V22_SCORER_MODEL_SHA256 = "55b6c1eb6afe9b642893fcdad2d073cb8851e73914592ee7d95946e06da82525"
+_V22_SNAPSHOT_FIELDS = _SNAPSHOT_FIELDS | {"v22_market"}
 _STAGE_FIELDS = frozenset(
     {
         "step0_codes",
@@ -467,7 +469,9 @@ def _validate_legacy_recommendation(
 def _validate_snapshot(value: Mapping[str, Any], trade_date: date) -> None:
     if not isinstance(value, Mapping):
         raise V20SemanticConflict("V16 snapshot is not an object")
-    if set(value) != _SNAPSHOT_FIELDS:
+    is_v22 = value.get("scorer_model_sha256") == V22_SCORER_MODEL_SHA256
+    expected_fields = _V22_SNAPSHOT_FIELDS if is_v22 else _SNAPSHOT_FIELDS
+    if set(value) != expected_fields:
         raise V20SemanticConflict("V16 snapshot field set is invalid")
     if value["schema_version"] != V20_V16_SNAPSHOT_SCHEMA:
         raise V20SemanticConflict("V16 snapshot schema is unsupported")
@@ -593,6 +597,27 @@ def _validate_snapshot(value: Mapping[str, Any], trade_date: date) -> None:
         raise V20SemanticConflict("V16 snapshot history coverage differs from counts")
     _validate_stages(value["stages"])
     _validate_cross_field_semantics(value, seen_codes)
+    if is_v22:
+        _validate_v22_market(value["v22_market"], set(value["raw_evidence_codes"]))
+
+
+def _validate_v22_market(value: Any, raw_codes: set[str]) -> None:
+    """Keep the exact early close/amount input used by V22 breadth and H90."""
+    if not isinstance(value, Mapping) or len(value) < 1000:
+        raise V20SemanticConflict("V22 market projection has insufficient coverage")
+    for code, row in value.items():
+        _validate_code(code, "V22 market code")
+        if code not in raw_codes or not code.startswith(("00", "60")):
+            raise V20SemanticConflict("V22 market projection is outside its raw evidence")
+        if not isinstance(row, Mapping) or set(row) != {"close", "amount"}:
+            raise V20SemanticConflict("V22 market projection field set is invalid")
+        if (
+            not _number(row["close"])
+            or row["close"] <= 0
+            or not _number(row["amount"])
+            or row["amount"] < 0
+        ):
+            raise V20SemanticConflict("V22 market projection price or amount is invalid")
 
 
 def _validate_symbol(
