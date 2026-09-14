@@ -233,9 +233,13 @@ def test_full_reference_list_top3_output_no_new_exit_legs_and_deterministic_repl
     )
     assert "V22-slim" in message and "D0-N2" in message and "H90" in message
     if block:
-        assert "原始候选 10 只" in message and "合法无票" not in message
+        assert "今天不新开仓，保留现金；候选仅供观察。" in message
+        assert "计划买入" not in message and "合法无票" not in message
     else:
-        assert "推荐前3" in message and "600004" not in message
+        assert "计划买入前 3 只，其余仅供观察。" in message
+        assert "计划买入的每只股票占当天资金份: 33.33%" in message
+    assert "评分前10:" in message
+    assert all(f"600{rank:03d}" in message for rank in range(1, 11))
 
 
 @pytest.mark.asyncio
