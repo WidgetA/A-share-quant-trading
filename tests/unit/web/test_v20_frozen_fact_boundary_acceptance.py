@@ -106,7 +106,9 @@ def _seed_service(
     service._repository = repository
     service.config = SimpleNamespace(strategy_version="V20_BAD_E50_G_BASE_V1")
     service._scan_state = SimpleNamespace(realtime_client=client)
-    service._clock = lambda: datetime(2026, 9, 3, 22, 0, tzinfo=TZ)
+    # Receipt-frozen reconstruction is for completed historical dates.
+    # Current-date requests must fetch realtime even when an artifact exists.
+    service._clock = lambda: datetime(2026, 9, 4, 10, 0, tzinfo=TZ)
 
     boards = {"board": tuple((code, code) for code in universe)}
 
