@@ -6707,8 +6707,8 @@ class V20Service:
                 raise V20SemanticConflict("canonical V16 frozen raw-evidence universe is invalid")
         today = self._aware_now().astimezone(SHANGHAI).date()
         if trade_date == today:
-            seed = await self._current_early_evidence_seed(trade_date, evidence_universe)
-            return seed, universe, clean_boards
+            current_seed = await self._current_early_evidence_seed(trade_date, evidence_universe)
+            return current_seed, universe, clean_boards
         raw_loader = self._repository.list_raw_minute_bar_records
         raw_kwargs: dict[str, Any] = {
             "trade_date": trade_date,
@@ -6780,7 +6780,7 @@ class V20Service:
             for start in range(0, len(targets), HISTORICAL_SEED_BACKFILL_CHUNK):
                 chunk = targets[start : start + HISTORICAL_SEED_BACKFILL_CHUNK]
                 history = await historical_loader(chunk, trade_date)
-                payloads = []
+                payloads: list[dict[str, Any]] = []
                 for code in chunk:
                     if code not in history:
                         continue
