@@ -85,14 +85,13 @@ async def repository():
 async def test_v22_canonical_barrier_uses_production_codec_and_survives_restart(
     repository, monkeypatch, with_signal
 ):
-    from src.data.database.v16_canonical_artifact_store import V16CanonicalArtifactStore
     from tests.unit.web.test_v20_service import _service
     from tests.unit.web.test_v22_canonical_artifact import v22_canonical
 
     instance, _pool, _schema_name = repository
     canonical = v22_canonical(with_signal=with_signal)
     service = _service(monkeypatch, instance)
-    service._canonical_artifact_store = V16CanonicalArtifactStore(instance)
+    await service._initialize_canonical_artifact_boundary()
     # No custom store hydrator and no mocked raw/codec/write/readback methods.
     await service._persist_canonical_artifact_barrier(canonical)
     first = await service._load_canonical_artifact(canonical.trade_date)
@@ -102,7 +101,7 @@ async def test_v22_canonical_barrier_uses_production_codec_and_survives_restart(
     assert first[0].snapshot_hash == expected.snapshot_hash
 
     restarted = _service(monkeypatch, instance)
-    restarted._canonical_artifact_store = V16CanonicalArtifactStore(instance)
+    await restarted._initialize_canonical_artifact_boundary()
     loaded = await restarted._load_canonical_artifact(canonical.trade_date)
     assert loaded is not None
     assert loaded[0].snapshot == expected.snapshot
