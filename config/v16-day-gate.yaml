@@ -8,7 +8,8 @@ top_k: 10
 
 # Every scan attempt is written as a new, content-addressed JSON document.
 evidence_dir: data/v16_day_gate
-send_feishu: true
+# User instruction, 2026-09-14: keep research evidence without Feishu notices.
+send_feishu: false
 
 # Runtime accepts only a human-approval envelope, together with the canonical
 # SHA-256 of that complete envelope.  Raw Codex/Kimi responses and consensus
