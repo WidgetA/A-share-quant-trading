@@ -4808,10 +4808,9 @@ async def test_late_0939_replay_core_is_durable_idempotent_and_officially_read_o
     assert first.payload is not None
     assert "现在不开仓｜09:39复盘已过期" in str(first.payload["message"])
     assert "现在操作：不开仓，不补买，不追买" in str(first.payload["message"])
-    # The replay lane never pulls from the vendor; it recomputes once from
-    # durable raw facts through the shared canonical V16 contract.
+    # A current-date calculation refreshes realtime even with saved raw facts.
     assert client.calls == []
-    assert client.rt_min_daily_calls == []
+    assert client.rt_min_daily_calls == [(tuple(sorted(_LATE_REPLAY_CODES)), context.trade_date)]
     assert compute_calls == [context.trade_date]
     assert observed["early_volume"] == 1100.0
     assert observed["early_close"] == pytest.approx(10.09)
@@ -4854,7 +4853,7 @@ async def test_late_0939_replay_uses_snapshot_after_state_head_advances(
     assert repository.official_write_calls == 0
 
 
-async def test_late_0939_replay_can_recover_entirely_from_durable_raw_facts(
+async def test_late_0939_replay_refreshes_current_data_despite_durable_raw_facts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service, repository, client, compute_calls, _observed, context = _late_replay_service(
@@ -4867,7 +4866,7 @@ async def test_late_0939_replay_can_recover_entirely_from_durable_raw_facts(
 
     assert record.semantic["raw_fact_n"] == 110
     assert client.calls == []
-    assert client.rt_min_daily_calls == []
+    assert client.rt_min_daily_calls == [(tuple(sorted(_LATE_REPLAY_CODES)), context.trade_date)]
     assert compute_calls == [context.trade_date]
     assert repository.official_write_calls == 0
 
@@ -4889,7 +4888,7 @@ async def test_late_0939_replay_missing_nonterminal_early_bar_still_replays(
     assert record.semantic["replay_action"] == "ENTER"
     assert record.semantic["raw_fact_n"] == 100
     assert client.calls == []
-    assert client.rt_min_daily_calls == []
+    assert client.rt_min_daily_calls == [(tuple(sorted(_LATE_REPLAY_CODES)), context.trade_date)]
     assert compute_calls == [context.trade_date]
     assert len(repository.raw) == 100
     assert {label for _code, label in repository.raw} == {
@@ -5322,7 +5321,7 @@ async def test_current_day_seed_preserves_partial_rt_evidence_and_readback(
     assert set(seed) == {ready_code}
     assert client.rt_min_daily_calls == 1
     assert client.requested_codes == [tuple(sorted(universe))]
-    assert repository.list_calls == 2
+    assert repository.list_calls == 1
     assert repository.persist_calls
     assert set(universe) >= {ready_code}
 

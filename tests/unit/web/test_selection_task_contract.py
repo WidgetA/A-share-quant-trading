@@ -27,6 +27,74 @@ from tests.unit.web.test_v20_auto_manual_exact_parity_acceptance import (
 )
 
 
+@pytest.mark.parametrize("cached_n", [0, 2, 3])
+@pytest.mark.parametrize("current_n", [0, 2])
+@pytest.mark.parametrize("has_artifact", [False, True])
+async def test_current_selection_refreshes_whole_universe_despite_saved_rows(
+    monkeypatch, cached_n, current_n, has_artifact
+):
+    from src.data.clients.tushare_realtime import tushare_minute_bars_to_early_market_data
+    from tests.unit.web.test_v20_service import (
+        _ENRICHED_LABELS,
+        _HIST_TRADE_DATE,
+        _bar,
+        _bar_payload,
+        _historical_seed_service,
+        _SeedRepository,
+    )
+
+    codes = ("000001", "000002", "000003")
+    repository = _SeedRepository()
+    bars = {code: tuple(_bar(code, label) for label in _ENRICHED_LABELS) for code in codes}
+    for code in codes[:cached_n]:
+        await repository.record_minute_bars([_bar_payload(bar) for bar in bars[code]])
+    response = {
+        code: tushare_minute_bars_to_early_market_data(code, bars[code], _HIST_TRADE_DATE)
+        for code in codes[:current_n]
+    }
+    client = SimpleNamespace(
+        batch_get_early_market_data=AsyncMock(return_value=response),
+        batch_get_early_minute_history_for_date=AsyncMock(
+            side_effect=AssertionError("current request used historical API")
+        ),
+    )
+    service = _historical_seed_service(monkeypatch, repository, client, universe=codes)
+    service._clock = lambda: datetime(2026, 8, 31, 10, 57, tzinfo=TZ)
+    boundary = (
+        {
+            "exact_evidence_codes": codes,
+            "received_before": datetime(2026, 8, 31, 9, 40, tzinfo=TZ),
+            "allow_backfill": False,
+        }
+        if has_artifact
+        else {}
+    )
+
+    async def run():
+        if current_n:
+            seed, _, _ = await service._historical_early_evidence_seed(_HIST_TRADE_DATE, **boundary)
+            assert set(seed) == set(codes[:current_n]), (
+                "saved rows must not fill missing current data"
+            )
+        else:
+            with pytest.raises(service_module._NoCurrentSelectionData):
+                await service._historical_early_evidence_seed(_HIST_TRADE_DATE, **boundary)
+
+    await run()
+    client.batch_get_early_market_data.assert_awaited_once_with(list(codes), _HIST_TRADE_DATE)
+    # A contender in the same provider minute joins the same full acquisition.
+    await run()
+    assert client.batch_get_early_market_data.await_count == 1
+    service._clock = lambda: datetime(2026, 8, 31, 10, 58, tzinfo=TZ)
+    await run()
+    assert client.batch_get_early_market_data.await_count == 2
+    assert all(
+        call.args == (list(codes), _HIST_TRADE_DATE)
+        for call in client.batch_get_early_market_data.await_args_list
+    )
+    client.batch_get_early_minute_history_for_date.assert_not_awaited()
+
+
 @pytest.mark.parametrize("day", [date(2026, 9, 12), date(2026, 9, 14)])
 @pytest.mark.parametrize("profile", ["V20", "V22-slim"])
 async def test_empty_current_realtime_returns_no_tickets_for_both_triggers(

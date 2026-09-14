@@ -114,6 +114,47 @@ async def test_v22_canonical_barrier_uses_production_codec_and_survives_restart(
     assert repeated[1] == first[1]
 
 
+async def test_current_seed_in_postgres_requires_fresh_data_even_with_saved_rows(
+    repository, monkeypatch
+):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from src.data.clients.tushare_realtime import tushare_minute_bars_to_early_market_data
+    from src.web.v20_service import _bar_payload, _NoCurrentSelectionData
+    from tests.unit.web.test_v20_service import _historical_seed_service
+    from tests.unit.web.test_v22_canonical_artifact import v22_canonical
+
+    instance, _pool, _schema_name = repository
+    canonical = v22_canonical()
+    codes = ("000001", "600000", "603068")
+    await instance.record_minute_bars(
+        [_bar_payload(bar) for code in codes for bar in canonical.early_bars[code]]
+    )
+    revised = tuple(
+        replace(
+            bar, open_price=10.2, close_price=10.2, high_price=10.2, low_price=10.2, amount=1020.0
+        )
+        for bar in canonical.early_bars[codes[0]]
+    )
+    response = {
+        codes[0]: tushare_minute_bars_to_early_market_data(codes[0], revised, canonical.trade_date)
+    }
+    client = SimpleNamespace(batch_get_early_market_data=AsyncMock(return_value=response))
+    service = _historical_seed_service(monkeypatch, instance, client, universe=codes)
+    now = canonical.computed_at.replace(hour=10, minute=57)
+    service._clock = lambda: now
+    seed, _, _ = await service._historical_early_evidence_seed(canonical.trade_date)
+    assert set(seed) == {codes[0]}
+    assert seed[codes[0]].early_bars[-1].close_price == 10.2
+    client.batch_get_early_market_data.assert_awaited_once_with(list(codes), canonical.trade_date)
+    client.batch_get_early_market_data.return_value = {}
+    service._clock = lambda: now + timedelta(minutes=1)
+    with pytest.raises(_NoCurrentSelectionData):
+        await service._historical_early_evidence_seed(canonical.trade_date)
+    assert client.batch_get_early_market_data.await_count == 2
+
+
 async def test_same_date_entry_commits_with_full_legs_and_date_scoped_delivery(repository):
     """Use real PostgreSQL terminal/seal clocks, including runs after 09:40/09:45."""
     from src.common.v20_feishu import seal_v20_payload
