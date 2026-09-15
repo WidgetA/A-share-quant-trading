@@ -4329,6 +4329,9 @@ class _LateReplayRepository(_ManualTriggerRepository):
         self.raw: dict[tuple[str, str], Any] = {}
         self.official_write_calls = 0
 
+    async def list_active_legs(self, *_args, **_kwargs):
+        return []
+
     async def load_state(self, _lineage_id: str) -> StateRecord:
         return self.state
 
