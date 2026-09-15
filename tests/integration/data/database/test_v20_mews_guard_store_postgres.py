@@ -748,6 +748,69 @@ async def test_postgres_d2_no_candidate_fallback_survives_repository_restart(
     assert await _selection_row(pool, schema, "leg-d2-fallback") == before
 
 
+@pytest.mark.parametrize("has_intent", [False, True])
+async def test_postgres_midnight_fallback_recovers_after_restart_unless_exit_formed(
+    guard_store: tuple[V20MewsGuardStore, V20Repository, asyncpg.Pool, str],
+    has_intent: bool,
+) -> None:
+    store, _repository, pool, schema = guard_store
+    leg_id = "leg-midnight-fallback"
+    await _insert_manual_leg(pool, schema, leg_id, d1=D1)
+    midnight = D2_ON_TIME.replace(hour=0, minute=0)
+    async with pool.acquire() as connection:
+        await connection.execute(
+            f"""
+            INSERT INTO {schema}.leg_mews_selection
+                (model_leg_id,snapshot_id,fast_state,cutoff_ts,selection_reason,selected_at)
+            VALUES ($1,NULL,NULL,$2,'MEWS_UNAVAILABLE_FALLBACK_12',$3)
+            """,
+            leg_id,
+            D2_CUTOFF,
+            midnight,
+        )
+    if has_intent:
+        await _insert_exit_intent(pool, schema, leg_id)
+    before = await _selection_row(pool, schema, leg_id)
+
+    restart_repository = V20Repository(_config(schema), shared_pool=pool)
+    await restart_repository.connect(migrate=True)
+    try:
+        restart_store = V20MewsGuardStore(restart_repository)
+        records = await asyncio.gather(
+            *(
+                restart_store.select_freeze_and_load(
+                    leg_id,
+                    d1=D1,
+                    cutoff=D2_CUTOFF,
+                    late_source_trade_date=D1,
+                    late_availability_date=D2,
+                    evaluation_date=D2,
+                )
+                for _ in range(3)
+            )
+        )
+        after = await _selection_row(pool, schema, leg_id)
+        assert records[0] == records[1] == records[2]
+        assert records[0].snapshot_id == (None if has_intent else "d2-current-day")
+        assert records[0].fast_state == (None if has_intent else "DANGER")
+        if has_intent:
+            assert after == before
+        else:
+            assert after["selected_at"] > midnight
+            assert after["snapshot_id"] == "d2-current-day"
+        await restart_store.select_freeze_and_load(
+            leg_id,
+            d1=D1,
+            cutoff=D2_CUTOFF,
+            late_source_trade_date=D1,
+            late_availability_date=D2,
+            evaluation_date=D2,
+        )
+        assert await _selection_row(pool, schema, leg_id) == after
+    finally:
+        await restart_repository.close()
+
+
 async def test_postgres_rejects_illegal_existing_freeze_without_mutation(
     guard_store: tuple[V20MewsGuardStore, V20Repository, asyncpg.Pool, str],
 ) -> None:

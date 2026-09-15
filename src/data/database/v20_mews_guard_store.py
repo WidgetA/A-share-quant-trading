@@ -420,6 +420,7 @@ class V20MewsGuardStore:
         late_availability_date: date | None = None,
         evaluation_date: date | None = None,
     ) -> SelectedMewsRecord:
+        provisional_selection: SelectedMewsRecord | None = None
         if not isinstance(model_leg_id, str) or not model_leg_id:
             raise ValueError("model_leg_id is invalid")
         if type(d1) is not date:
@@ -556,18 +557,24 @@ class V20MewsGuardStore:
                             evaluation_date=evaluation_date,
                         )
                     if existing_cutoff == cutoff:
-                        return self._record_from_selection(
+                        current_selection = self._record_from_selection(
                             existing,
                             d1=d1,
                             cutoff=cutoff,
                             late_source_trade_date=late_source_trade_date,
                             evaluation_date=evaluation_date,
                         )
-                    existing_cutoff_day = existing_cutoff.astimezone(_SHANGHAI_TZ).date()
-                    if existing_cutoff_day != d1:
-                        raise V20SemanticConflict(
-                            "MEWS selection was already frozen with an invalid cutoff"
-                        )
+                        if current_selection.snapshot_id is not None or intent is not None:
+                            return current_selection
+                        provisional_selection = current_selection
+                        # NULL means no risk evidence was available. It may be
+                        # replaced by a valid D2 receipt until an exit is formed.
+                    else:
+                        existing_cutoff_day = existing_cutoff.astimezone(_SHANGHAI_TZ).date()
+                        if existing_cutoff_day != d1:
+                            raise V20SemanticConflict(
+                                "MEWS selection was already frozen with an invalid cutoff"
+                            )
                     if intent is not None:
                         return self._record_from_selection(
                             existing,
@@ -584,6 +591,9 @@ class V20MewsGuardStore:
                     late_availability_date,
                 )
                 if row is None:
+                    if provisional_selection is not None:
+                        # Repeated misses preserve the original row and timestamp.
+                        return provisional_selection
                     snapshot_id = None
                     fast_state = None
                     reason = _FALLBACK_REASON

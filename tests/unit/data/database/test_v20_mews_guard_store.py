@@ -841,6 +841,79 @@ async def test_load_frozen_returns_current_d2_fallback_after_restart() -> None:
     assert not any("INSERT INTO" in call[1] or "UPDATE v20" in call[1] for call in connection.calls)
 
 
+@pytest.mark.parametrize("has_intent", [False, True])
+async def test_d2_fallback_can_recover_only_before_exit_intent(has_intent: bool) -> None:
+    existing = {
+        "model_leg_id": "leg-1",
+        "cutoff_ts": D2_CUTOFF,
+        "selection_reason": "MEWS_UNAVAILABLE_FALLBACK_12",
+        "selected_at": D2_ON_TIME.replace(hour=0, minute=0),
+        "selected_snapshot_id": None,
+        "selected_fast_state": None,
+        **_null_snapshot_row(),
+    }
+    payload = _payload(
+        source_trade_date=D1,
+        generated_at=D2_ON_TIME,
+        availability_date=D2,
+    )
+    connection = _FakeConnection(
+        leg={"d1": D1, "d2": D2},
+        existing=existing,
+        intent={"exit_intent_id": "intent-1"} if has_intent else None,
+        candidate=_row(
+            source_trade_date=D1,
+            generated_at=D2_ON_TIME,
+            sealed_at=D2_ON_TIME + timedelta(minutes=1),
+            payload=payload,
+        ),
+    )
+    record = await V20MewsGuardStore(_repository(connection)).select_freeze_and_load(
+        "leg-1",
+        d1=D1,
+        cutoff=D2_CUTOFF,
+        late_source_trade_date=D1,
+        late_availability_date=D2,
+        evaluation_date=D2,
+    )
+    updates = [call for call in connection.calls if "UPDATE v20.leg_mews_selection" in call[1]]
+    assert record.snapshot_id == (None if has_intent else payload["snapshot_id"])
+    assert record.fast_state == (None if has_intent else "DANGER")
+    assert len(updates) == (0 if has_intent else 1)
+
+
+async def test_d2_fallback_recovery_rejects_unsealed_candidate() -> None:
+    existing = {
+        "model_leg_id": "leg-1",
+        "cutoff_ts": D2_CUTOFF,
+        "selection_reason": "MEWS_UNAVAILABLE_FALLBACK_12",
+        "selected_at": D2_ON_TIME,
+        "selected_snapshot_id": None,
+        "selected_fast_state": None,
+        **_null_snapshot_row(),
+    }
+    connection = _FakeConnection(
+        leg={"d1": D1, "d2": D2},
+        existing=existing,
+        candidate=_row(
+            source_trade_date=D1,
+            generated_at=D2_ON_TIME,
+            sealed_at=None,
+            payload=_payload(source_trade_date=D1, generated_at=D2_ON_TIME, availability_date=D2),
+        ),
+    )
+    with pytest.raises(V20SemanticConflict, match="NULL"):
+        await V20MewsGuardStore(_repository(connection)).select_freeze_and_load(
+            "leg-1",
+            d1=D1,
+            cutoff=D2_CUTOFF,
+            late_source_trade_date=D1,
+            late_availability_date=D2,
+            evaluation_date=D2,
+        )
+    assert not any("UPDATE v20.leg_mews_selection" in call[1] for call in connection.calls)
+
+
 async def test_load_frozen_d2_rejects_source_older_than_model_leg_d1() -> None:
     connection = _FakeConnection(leg={"d1": D1, "d2": D2})
     store = V20MewsGuardStore(_repository(connection))

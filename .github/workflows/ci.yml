@@ -26,6 +26,8 @@ jobs:
           uv run pytest -q
           tests/unit/web/test_selection_task_contract.py
           tests/unit/web/test_v22_canonical_artifact.py
+          tests/unit/web/test_v20_mews_guard_service_acceptance.py
+          tests/unit/data/database/test_v20_mews_guard_store.py
           --tb=short
 
   lint:

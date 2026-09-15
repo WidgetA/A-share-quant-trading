@@ -91,6 +91,9 @@ class _Row:
     def __getitem__(self, key: str) -> Any:
         return self.values[key]
 
+    def keys(self) -> Any:
+        return self.values.keys()
+
 
 def _payload(
     *,
@@ -153,6 +156,7 @@ def _fallback_values() -> dict[str, None]:
     return {
         field: None
         for field in (
+            "snapshot_id",
             "source_trade_date",
             "generated_at",
             "received_at",
@@ -342,6 +346,7 @@ async def _evaluate_exit(
     leg: ActiveModelLeg | None = None,
     calendar: tuple[date, ...] = CALENDAR,
     calendar_error: bool = False,
+    now: datetime = T_D2_0945,
 ) -> list[str]:
     alerts: list[str] = []
 
@@ -367,13 +372,93 @@ async def _evaluate_exit(
         )
     await service._evaluate_one_exit(
         leg or _active_leg(),
-        T_D2_0945,
+        now,
         detection_calendar_status="CONFIRMED_TRADING",
         detection_is_trading_day=True,
         next_trade_date=NEXT_DAY,
         calendar=calendar,
     )
     return alerts
+
+
+@pytest.mark.parametrize("wall", [time(0), time(8, 30), time(9, 9, 59)])
+async def test_exit_before_publication_does_not_fetch_freeze_or_alarm(
+    monkeypatch: pytest.MonkeyPatch,
+    wall: time,
+) -> None:
+    connection = _StrictPGConnection()
+    source = _FailingMewsSource()
+    service, _repository = _make_service(monkeypatch, connection, source)
+    now = datetime.combine(D2, wall, tzinfo=TZ)
+    service._clock = lambda: now
+
+    alerts = await _evaluate_exit(monkeypatch, service, now=now)
+
+    assert source.calls == 0
+    assert connection.selections == {}
+    assert alerts == []
+
+
+async def test_exit_helper_respects_actual_publication_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = _StrictPGConnection()
+    source = _FailingMewsSource()
+    service, _repository = _make_service(monkeypatch, connection, source)
+    midnight = datetime.combine(D2, time(0), tzinfo=TZ)
+
+    assert not await service._ensure_mews_for_exit_date(
+        D2,
+        source_trade_date=D1,
+        now=midnight,
+    )
+    assert source.calls == 0
+
+
+async def test_missing_exit_mews_before_cutoff_does_not_emit_stock_fallback_alarm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = _StrictPGConnection()
+    source = _FailingMewsSource()
+    service, _repository = _make_service(monkeypatch, connection, source)
+
+    alerts = await _evaluate_exit(monkeypatch, service, now=T_D2_0910)
+
+    assert source.calls == 1
+    assert alerts == ["MEWS_CALCULATION_FAILED"]
+
+
+async def test_exit_replaces_early_fallback_after_scheduled_mews_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = _StrictPGConnection()
+    source = _FailingMewsSource()
+    service, _repository = _make_service(monkeypatch, connection, source)
+    await _evaluate_exit(monkeypatch, service)
+    # Reproduce the persisted selection left by the reported midnight failure.
+    connection.selections["leg-strict"]["selected_at"] = datetime.combine(
+        D2,
+        time(0),
+        tzinfo=TZ,
+    )
+    restarted, repository = _make_service(monkeypatch, connection, source)
+    monkeypatch.setattr(restarted, "_load_trade_calendar", _fixed_calendar(CALENDAR))
+    payload = _payload(source_trade_date=D1, availability_date=D2)
+    payload["generated_at"] = T_D2_0910.isoformat()
+    payload["fast_state"] = "DANGER"
+
+    class RecoveredSource:
+        async def fetch_snapshot(self, **_kwargs: Any) -> dict[str, Any]:
+            return payload
+
+    restarted._mews_source = RecoveredSource()
+    assert await restarted._refresh_mews_cache_once(T_D2_0910, CALENDAR)
+    alerts = await _evaluate_exit(monkeypatch, restarted)
+
+    selection = connection.selections["leg-strict"]
+    assert selection["selected_snapshot_id"] == repository.recorded[0]["snapshot_id"]
+    assert selection["selected_fast_state"] == "DANGER"
+    assert alerts == []
 
 
 def _snapshot_queries(
@@ -431,6 +516,7 @@ async def test_failed_calculation_persists_fallback_and_restart_reads_it(
     assert [query[1] for query in exact_queries] == [
         (D1, D2),
         (D1, D2),
+        (D1, D2),  # The next scan checks for newly sealed recovery evidence.
     ]
     assert len(freeze_queries) == 1
 
