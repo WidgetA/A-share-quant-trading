@@ -1815,6 +1815,10 @@ def migration_sql(schema: str = "v20") -> str:
         .read_text(encoding="utf-8")
         .replace("v20.", f"{schema}.")
         + "\n"
+        + (_PROJECT_ROOT / "migrations/v20/006_legacy_position_sync.sql")
+        .read_text(encoding="utf-8")
+        .replace("v20.", f"{schema}.")
+        + "\n"
     )
 
 
@@ -3934,6 +3938,12 @@ class V20Repository:
                         WHERE seal_status='SEALED'
                           AND route_id=$1 AND official_stream_id=$2 AND lineage_id=$3
                           AND available_at <= clock_timestamp()
+                          AND NOT EXISTS (
+                              SELECT 1 FROM {self.schema}.model_legs AS sold
+                              WHERE sold.model_leg_id=outbox_events.semantic_json->>'model_leg_id'
+                                AND outbox_events.event_type IN ('EXIT_SIGNAL','EXIT_REMINDER')
+                                AND sold.user_position_status IN ('CLOSED','NOT_BOUGHT')
+                          )
                           AND (
                               delivery_status='PENDING'
                               OR (
@@ -4033,7 +4043,7 @@ class V20Repository:
         lineage_id: str,
         action_reserve_seconds: float = 2.0,
         relay_enforced: bool = False,
-    ) -> DeliveryAttempt:
+    ) -> DeliveryAttempt | None:
         """Atomically cross the outward side-effect boundary before HTTP I/O."""
 
         _require_outbox_scope(route_id, official_stream_id, lineage_id)
@@ -4045,7 +4055,8 @@ class V20Repository:
             async with connection.transaction():
                 row = await connection.fetchrow(
                     f"""
-                    SELECT attempt_count,action_expiry_ts,clock_timestamp() AS db_now
+                    SELECT attempt_count,action_expiry_ts,clock_timestamp() AS db_now,
+                           event_type,semantic_json
                     FROM {self.schema}.outbox_events
                     WHERE event_id=$1 AND delivery_status='LEASED' AND lease_owner=$2
                       AND route_id=$3 AND official_stream_id=$4 AND lineage_id=$5
@@ -4059,6 +4070,23 @@ class V20Repository:
                 )
                 if row is None:
                     raise V20StateConflict("outbox dispatch lease is missing or not owned")
+
+                if row.get("event_type") in ("EXIT_SIGNAL", "EXIT_REMINDER"):
+                    semantic = _json_value(row["semantic_json"])
+                    # Lock the same position as corrections before crossing the send boundary.
+                    status = await connection.fetchval(
+                        f"SELECT user_position_status FROM {self.schema}.model_legs "
+                        "WHERE model_leg_id=$1 FOR UPDATE",
+                        semantic.get("model_leg_id"),
+                    )
+                    if status in ("CLOSED", "NOT_BOUGHT"):
+                        await connection.execute(
+                            f"UPDATE {self.schema}.outbox_events SET delivery_status='PENDING',"
+                            "lease_owner=NULL,lease_until=NULL,last_error='USER_POSITION_CLOSED' "
+                            "WHERE event_id=$1",
+                            event_id,
+                        )
+                        return None
 
                 action_expiry = row["action_expiry_ts"]
                 if action_expiry is None:
@@ -4860,6 +4888,7 @@ class V20Repository:
                 LEFT JOIN {self.schema}.mews_snapshots ms ON ms.snapshot_id=s.snapshot_id
                 LEFT JOIN {self.schema}.exit_intents x USING (model_leg_id)
                 WHERE l.d1 <= $1 AND x.exit_intent_id IS NULL
+                  AND l.user_position_status NOT IN ('CLOSED','NOT_BOUGHT')
                   AND b.evaluation_only=FALSE AND source.seal_status='SEALED'
                   AND b.official_stream_id=$2 AND b.lineage_id=$3
                   AND source.official_stream_id=$2 AND source.lineage_id=$3
@@ -5597,6 +5626,7 @@ class V20Repository:
                           WHERE ack.original_exit_event_id=intent.event_id
                             AND ack.ack_ts <= $2 AND ack.receipt_sealed_at <= $2
                       )
+                      AND leg.user_position_status NOT IN ('CLOSED','NOT_BOUGHT')
                       AND NOT EXISTS (
                           SELECT 1 FROM {self.schema}.exit_reminders AS reminder
                           WHERE reminder.exit_intent_id=intent.exit_intent_id

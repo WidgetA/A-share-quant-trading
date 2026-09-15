@@ -46,6 +46,9 @@
 
 接口沿现有 `/api/v20` 路由，使用 `X-V20-API-Key`（服务端 V20_INGEST_API_KEY）：
 
+旧 V20 推荐的实际卖出状态使用独立的[旧持仓同步接口](legacy-position-sync.md)，
+同步后新生成的每日卖出清单与后续提醒均过滤已卖完记录。
+
 ```http
 GET /api/v20/v22-positions
 X-V20-API-Key: <配置的密钥>

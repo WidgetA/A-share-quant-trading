@@ -378,6 +378,8 @@ def test_router_exposes_only_status_evidence_and_manual_trigger_endpoints() -> N
         ("/api/v20/trigger-scan", frozenset({"POST"})),
         ("/api/v20/manual-monitor", frozenset({"POST"})),
         ("/api/v20/v22-positions", frozenset({"GET"})),
+        ("/api/v20/legacy-positions", frozenset({"GET"})),
+        ("/api/v20/legacy-positions/{position_id}/calibrate", frozenset({"POST"})),
         ("/api/v20/v22-positions/{position_id}/calibrate", frozenset({"POST"})),
     }
     assert not any(

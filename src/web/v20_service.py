@@ -2153,6 +2153,23 @@ class V20Service:
         self._require_running()
         return await self._v22_monitor().store.list()
 
+    async def list_legacy_positions(self) -> Any:
+        from src.data.database.v20_positions import LegacyPositionStore
+
+        self._require_running()
+        return await LegacyPositionStore(self._repository, self.config).list()
+
+    async def calibrate_legacy_position(
+        self, position_id: str, request_id: str, payload: Mapping[str, Any]
+    ) -> Any:
+        from src.data.database.v20_positions import LegacyPositionStore
+
+        self._require_running()
+        await self._repository.assert_runtime_leader()
+        return await LegacyPositionStore(self._repository, self.config).calibrate(
+            position_id, request_id, dict(payload)
+        )
+
     async def calibrate_v22_position(
         self, position_id: str, request_id: str, payload: Mapping[str, Any]
     ) -> Any:

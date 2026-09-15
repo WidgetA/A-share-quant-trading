@@ -53,6 +53,8 @@ def test_dedicated_host_exposes_only_selection_evidence_and_holding_alert_routes
         ("/api/v20/trigger-scan", frozenset({"POST"})),
         ("/api/v20/manual-monitor", frozenset({"POST"})),
         ("/api/v20/v22-positions", frozenset({"GET"})),
+        ("/api/v20/legacy-positions", frozenset({"GET"})),
+        ("/api/v20/legacy-positions/{position_id}/calibrate", frozenset({"POST"})),
         ("/api/v20/v22-positions/{position_id}/calibrate", frozenset({"POST"})),
     }
 

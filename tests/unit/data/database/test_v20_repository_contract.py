@@ -1088,6 +1088,8 @@ def test_runtime_migration_is_mechanically_identical_to_all_standalone_migration
         + "\n"
         + standalone_005
         + "\n"
+        + (root / "migrations/v20/006_legacy_position_sync.sql").read_text(encoding="utf-8")
+        + "\n"
     )
     assert "CONSTRAINT ck_rolling7_market_health_d0_references_positive" in sql
     assert "CONSTRAINT ck_rolling7_market_health_d2_closes_positive" in sql
