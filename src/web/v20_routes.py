@@ -64,6 +64,12 @@ class V20RouteService(Protocol):
 
     async def list_v22_positions(self) -> Any: ...
 
+    async def list_legacy_positions(self) -> Any: ...
+
+    async def calibrate_legacy_position(
+        self, position_id: str, request_id: str, payload: Mapping[str, Any]
+    ) -> Any: ...
+
     async def calibrate_v22_position(
         self, position_id: str, request_id: str, payload: Mapping[str, Any]
     ) -> Any: ...
@@ -131,6 +137,25 @@ class V22CalibrationRequest(BaseModel):
         changes = self.model_fields_set - {"expected_revision"}
         if not changes or any(getattr(self, field) is None for field in changes):
             raise ValueError("provide at least one non-null holding correction")
+        return self
+
+
+class LegacyCalibrationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int = Field(ge=0, strict=True)
+    quantity: int | None = Field(default=None, ge=0, strict=True)
+    status: Literal["MONITORING", "NOT_BOUGHT", "CLOSED"] | None = None
+
+    @model_validator(mode="after")
+    def require_consistent_change(self) -> LegacyCalibrationRequest:
+        changes = self.model_fields_set - {"expected_revision"}
+        if not changes or any(getattr(self, field) is None for field in changes):
+            raise ValueError("provide at least one non-null holding correction")
+        if self.status in ("CLOSED", "NOT_BOUGHT") and self.quantity not in (None, 0):
+            raise ValueError("closed or unbought holdings must have zero remaining quantity")
+        if self.status == "MONITORING" and self.quantity == 0:
+            raise ValueError("monitoring holdings cannot have zero remaining quantity")
         return self
 
 
@@ -485,6 +510,29 @@ def create_v20_router() -> APIRouter:
     @router.get("/v22-positions", dependencies=[Depends(_require_ingest_api_key)])
     async def v22_positions(request: Request) -> Any:
         return await _call_service(_get_service(request).list_v22_positions)
+
+    @router.get("/legacy-positions", dependencies=[Depends(_require_ingest_api_key)])
+    async def legacy_positions(request: Request) -> Any:
+        return await _call_service(_get_service(request).list_legacy_positions)
+
+    @router.post(
+        "/legacy-positions/{position_id}/calibrate",
+        dependencies=[Depends(_require_ingest_api_key)],
+    )
+    async def calibrate_legacy_position(
+        request: Request,
+        position_id: str,
+        body: LegacyCalibrationRequest,
+        idempotency_key: str = Header(alias="Idempotency-Key"),
+    ) -> Any:
+        if _MANUAL_REQUEST_ID.fullmatch(idempotency_key) is None:
+            raise HTTPException(status_code=400, detail="invalid Idempotency-Key")
+        service = _get_service(request)
+        return await _call_service(
+            lambda: service.calibrate_legacy_position(
+                position_id, idempotency_key, body.model_dump(exclude_unset=True)
+            )
+        )
 
     @router.post(
         "/v22-positions/{position_id}/calibrate", dependencies=[Depends(_require_ingest_api_key)]

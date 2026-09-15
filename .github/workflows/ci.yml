@@ -25,6 +25,7 @@ jobs:
         run: >-
           uv run pytest -q
           tests/unit/web/test_selection_task_contract.py
+          tests/unit/web/test_legacy_position_sync.py
           tests/unit/web/test_v22_canonical_artifact.py
           --tb=short
 
@@ -132,6 +133,7 @@ jobs:
           tests/integration/data/database/test_v20_mews_receipt_guard_postgres.py
           tests/integration/data/database/test_v20_mews_guard_store_postgres.py
           tests/integration/data/database/test_v20_outbox_postgres.py
+          tests/integration/data/database/test_legacy_position_sync_postgres.py
           tests/integration/data/database/test_v20_state_semantics_postgres.py
           tests/integration/common/test_v20_feishu_postgres.py
           --tb=short

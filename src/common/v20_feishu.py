@@ -2205,6 +2205,8 @@ class V20OutboxPublisher:
                 ),
                 relay_enforced=getattr(route, "transport", "v20_relay") == "v20_relay",
             )
+            if attempt is None:
+                continue  # User closed the holding after this event was leased.
             send_error: str | None
             send_started_monotonic = asyncio.get_running_loop().time()
             legacy_transport = getattr(route, "transport", "v20_relay") == "legacy_send"
