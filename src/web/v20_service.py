@@ -3980,10 +3980,12 @@ class V20Service:
         source_trade_date: date,
         now: datetime,
     ) -> bool:
-        """Calculate the exact daily D2 value without using process time."""
+        """Calculate the exact daily D2 value once its publication window opens."""
 
         self._require_running()
         target = _local(target_date, MEWS_PUBLISH_TIME)
+        if self._aware_now(now) < target:
+            return False
         task = await self._mews_singleflight_join(
             target,
             stage="D2_EXIT",
@@ -9377,7 +9379,8 @@ class V20Service:
             reference_entry_price=record.reference_price,
         )
         selected: SelectedMewsRecord | None = None
-        if now.date() >= record.d2 and record.exit_intent_id is None:
+        mews_due = now >= _local(record.d2, MEWS_PUBLISH_TIME)
+        if mews_due and record.exit_intent_id is None:
             try:
                 cutoff = _local(record.d2, self.config.clock.mews_cutoff_d1)
                 late_source_trade_date = record.d1
@@ -9389,6 +9392,24 @@ class V20Service:
                         late_source_trade_date=late_source_trade_date,
                         evaluation_date=record.d2,
                     )
+                    if selected is not None and selected.snapshot_id is None:
+                        # A failed early attempt is provisional until an exit
+                        # intent exists. The scheduler owns raw-data retries;
+                        # each stock only checks for newly sealed evidence.
+                        recovered_id = await self._mews_guard_store.find_eligible_snapshot(
+                            source_trade_date=late_source_trade_date,
+                            cutoff=cutoff,
+                            availability_date=record.d2,
+                        )
+                        if recovered_id is not None:
+                            selected = await self._mews_guard_store.select_freeze_and_load(
+                                record.model_leg_id,
+                                d1=record.d1,
+                                cutoff=cutoff,
+                                late_source_trade_date=late_source_trade_date,
+                                late_availability_date=record.d2,
+                                evaluation_date=record.d2,
+                            )
                     if selected is None:
                         existing_snapshot_id = await self._mews_guard_store.find_eligible_snapshot(
                             source_trade_date=late_source_trade_date,
@@ -9522,11 +9543,19 @@ class V20Service:
             d1_window_complete=d1_complete,
             d2_pre1457_window_complete=d2_complete,
         )
-        if now.date() >= record.d2 and (selected is None or selected.snapshot_id is None):
+        if (
+            now >= _local(record.d2, self.config.clock.mews_cutoff_d1)
+            and record.exit_intent_id is None
+            and (selected is None or selected.snapshot_id is None)
+        ):
             await self._safe_alert(
                 code="MEWS_UNAVAILABLE_FALLBACK_12",
                 entity_id=record.model_leg_id,
-                message=f"{record.code} 的D2阈值使用常驻-12%，未取得合格MEWS快照",
+                message=(
+                    f"股票 {record.code}（推荐日期 {record.signal_date.isoformat()}）"
+                    "尚未取得合格市场风险数据，买入后第2个交易日暂用12%止损线；"
+                    "数据恢复后重新核定，已形成的卖出信号保持不变"
+                ),
                 now=now,
             )
         intent = evaluation.intent
