@@ -43,3 +43,12 @@ Content-Type: application/json
 同时验证已排队和已领取的退出消息、后续提醒在关闭后不再发送，也不伪造 SENT。
 CI 的 Selection Task Contract 与 PostgreSQL Integration Tests 均纳入这些检查，
 镜像发布依赖两项通过。上线后须核对部署提交、10 条实际校准回读，并按完整任务合同验收。
+
+### 当天已有结果后重新运行
+
+首次上线验收中，10 条关闭状态已经落库，但完整任务重跑仍从早盘结果读取
+`scheduled_exits_today`，新保存消息继续带出旧卖出清单，因此该次完整任务验收不通过。
+新增 `test_new_full_task_refreshes_sold_list_when_today_already_has_a_result` 先在
+`64d74f3` 上失败：预期新消息卖出清单为空，实际仍包含已经关闭的推荐。
+随后修正共用计算入口：每次新任务读取当前剩余持仓，策略每日初始状态仍按原合同使用。
+检查覆盖先保存早盘结果、再同步卖出、新请求完整执行、保存及渲染新消息，且每日状态不重复推进。

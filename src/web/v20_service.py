@@ -7824,14 +7824,15 @@ class V20Service:
             terminal_status=status,
             **({"independent_reference": True} if cross_version_check else {}),
         )
+        # Holdings can be corrected after the day's first decision. Every new
+        # task reads today's remaining positions; only strategy prestate stays frozen.
+        scheduled_source = await self._scheduled_exits_today(trade_date)
         if status is not None and not legacy_terminal_fresh_theoretical and not cross_version_check:
-            scheduled_source = status.semantic.get("scheduled_exits_today") or ()
             completed_health, completed_rolling, maturity_gaps = (
                 self._policy_inputs_from_terminal_status(status)
             )
             calculation_state = self._state_before_from_terminal_status(status)
         else:
-            scheduled_source = await self._scheduled_exits_today(trade_date)
             completed_health, completed_rolling, maturity_gaps = await self._policy_inputs(
                 trade_date
             )
