@@ -523,6 +523,10 @@ class TradeNoteStore:
         skipped = 0
         rejected: list[tuple[str, dict]] = []
         for o in orders:
+            if str(o.get("source", "")).startswith("qmt"):
+                # This legacy journal is shared by stock code, not by broker/account.
+                # Keep the QMT evidence in its own channel ledger instead of mixing accounts.
+                continue
             status_raw = str(o.get("status", ""))
             order_id = o.get("order_id")
             code = o.get("code") or ""

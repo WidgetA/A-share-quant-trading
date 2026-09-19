@@ -533,10 +533,13 @@
         <!-- Broker Connection Status -->
         <div class="status-card" id="brokerCard">
             <div class="status-card-header">
-                <h3>Broker 连接</h3>
+                <h3>交易连接</h3>
                 <span class="status-indicator" id="brokerIndicator">--</span>
             </div>
             <div class="status-card-body">
+                {% include "trading_channel_control.html" %}
+                <a href="/settings">配置交易通道</a>
+                <p id="channelBatchHint" style="font-size:0.8rem;color:#666;"></p>
                 <div class="status-card-row">
                     <span class="status-card-label">余额</span>
                     <span class="status-card-value" id="brokerCash">--</span>
@@ -884,6 +887,7 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="/static/trading-channel.js"></script>
 <script>
 const TODAY = '{{ today }}';
 
@@ -1065,11 +1069,17 @@ async function loadHoldings() {
         ]);
         const hData = await hResp.json();
         const oData = oResp.ok ? await oResp.json() : {orders: []};
+        if (hData.error) throw new Error(hData.error);
+        if (window.tradingChannel && hData.channel && window.tradingChannel.channel
+                && hData.channel !== window.tradingChannel.channel) {
+            throw new Error('交易通道已改变，请刷新页面');
+        }
         renderOverviewHoldings(hData.holdings || []);
         // Build map: stock_code → pending SELL order (most recent wins)
         const pendingSells = {};
         for (const o of (oData.orders || [])) {
             if (o.side !== 'SELL') continue;
+            if (o.cancel_id === null) continue;
             if (!_PENDING_STATUSES.has(o.status)) continue;
             const bareCode = String(o.code).split('.')[0];
             pendingSells[bareCode] = o;
@@ -1077,7 +1087,7 @@ async function loadHoldings() {
         renderHoldings(hData.holdings || [], pendingSells);
     } catch (e) {
         document.getElementById('holdingsContainer').innerHTML =
-            '<div class="empty-state">加载持仓失败</div>';
+            '<div class="empty-state">' + esc(e.message || '当前持仓不可用') + '</div>';
     }
 }
 
@@ -1103,7 +1113,7 @@ function renderHoldings(holdings, pendingSells) {
         let actionCell;
         if (pending) {
             const statusLabel = pending.status === 'PARTIALLY_FILLED' ? '部成' : '挂单中';
-            actionCell = '<button class="btn-sm btn-cancel" data-order-id="' + pending.order_id +
+            actionCell = '<button class="btn-sm btn-cancel" data-order-id="' + esc(String(pending.cancel_id || pending.order_id)) +
                 '">撤单</button>' +
                 '<span class="order-status">' + statusLabel + ' ' + pending.qty + '股</span>';
         } else {
@@ -1137,7 +1147,7 @@ function renderHoldings(holdings, pendingSells) {
     });
     el.querySelectorAll('.btn-cancel').forEach(function(btn) {
         btn.addEventListener('click', function() {
-            doCancelHoldingOrder(parseInt(btn.dataset.orderId), btn);
+            doCancelHoldingOrder(btn.dataset.orderId, btn);
         });
     });
 }
@@ -1152,7 +1162,7 @@ async function doSell(code, name, quantity, btn, label) {
         const resp = await tradingFetch('/api/trading/sell', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ stock_code: code, stock_name: name, quantity: quantity })
+            body: JSON.stringify(await channelOrderPayload({stock_code: code, stock_name: name, quantity}, 'sell-' + code))
         });
         if (!resp.ok) {
             const errText = await resp.text();
@@ -1165,7 +1175,8 @@ async function doSell(code, name, quantity, btn, label) {
         }
         const data = await resp.json();
         if (data.success) {
-            showToast(code + ' 卖出单已下达 (status=' + (data.status || '?') + ')', 'success');
+            showToast(code + ' 卖出：' + tradeStateLabel(data.status), data.status === 'UNKNOWN' ? 'error' : 'success');
+            if (data.status !== 'UNKNOWN') completeChannelRequest('sell-' + code);
             // Immediately repaint — pending order will surface a 撤单 button.
             loadHoldings();
             loadTodayOrders();
@@ -1355,12 +1366,13 @@ async function doBuy(code, name, price, rowId, btn) {
         const resp = await tradingFetch('/api/trading/buy', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ stock_code: code, stock_name: name, quantity: quantity, price: price })
+            body: JSON.stringify(await channelOrderPayload({stock_code: code, stock_name: name, quantity, price}, 'buy-' + code))
         });
         const data = await resp.json();
         if (data.success) {
-            showToast(code + ' 买入 ' + (quantity / 100) + '手 信号已推送', 'success');
-            btn.textContent = '已推送';
+            showToast(code + ' 买入 ' + quantity + '股：' + tradeStateLabel(data.status), data.status === 'UNKNOWN' ? 'error' : 'success');
+            btn.textContent = tradeStateLabel(data.status);
+            if (data.status !== 'UNKNOWN') completeChannelRequest('buy-' + code);
             setTimeout(loadHoldings, 2000);
         } else {
             showToast('买入失败: ' + (data.detail || '未知错误'), 'error');
@@ -1392,7 +1404,10 @@ async function submitManualBuyAll() {
     if (amount <= 0) { showToast('请填写每只金额', 'error'); return; }
     if (valid.length === 0) { showToast('没有可下单的行（代码+单价都需填写）', 'error'); return; }
 
-    if (!confirm(`将批量买入 ${valid.length} 只股票（每只预算 ${amount} 元，市价 5 档转撤+残单挂限价）\n确认下单？`)) return;
+    await window.channelLoaded;
+    const mode = window.tradingChannel.backend === 'qmt'
+        ? '每只提交一次市价单，未成交余量撤销' : '市价 5 档转撤+残单挂限价';
+    if (!confirm(`将批量买入 ${valid.length} 只股票（每只预算 ${amount} 元，${mode}）\n确认下单？`)) return;
 
     const btn = document.getElementById('btnManualBuyAll');
     const logEl = document.getElementById('manualBuyLog');
@@ -1404,7 +1419,7 @@ async function submitManualBuyAll() {
         const resp = await tradingFetch('/api/trading/buy-batch-by-amount', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({amount, orders: valid}),
+            body: JSON.stringify(await channelOrderPayload({amount, orders: valid}, 'batch-buy')),
         });
         const data = await resp.json();
         if (!resp.ok) {
@@ -1415,6 +1430,18 @@ async function submitManualBuyAll() {
         }
         logEl.textContent = '';
         const results = data.results || [];
+        if (data.backend === 'qmt') {
+            for (const r of results) {
+                logEl.textContent += `${r.code} ${tradeStateLabel(r.status)} | 委托 ${r.quantity} 股，已确认成交 ${r.filled_quantity ?? '--'} 股` +
+                    (r.error ? `：${r.error}` : '') + '\n';
+            }
+            if (results.every(r => !['UNKNOWN', 'UNCONFIRMED'].includes(r.status))) completeChannelRequest('batch-buy');
+            showToast('已更新各股票委托状态，请查看成交结果', 'success');
+            loadTodayOrders();
+            loadHoldings();
+            return;
+        }
+        completeChannelRequest('batch-buy');
         for (const r of results) {
             const tag = (r.status === 'filled') ? '✓'
                 : (r.status === 'rejected' || r.status === 'unfilled' || r.status === 'timeout') ? '✗' : '~';
@@ -1481,11 +1508,14 @@ async function loadTodayOrders() {
     try {
         const resp = await tradingFetch('/api/trading/orders');
         const data = await resp.json();
+        if (!resp.ok || data.error) throw new Error(data.error || '当前委托不可用');
         renderTodayOrders(data.orders || []);
-    } catch (e) { /* ignore */ }
+    } catch (e) {
+        document.getElementById('pendingSignalsContainer').textContent = e.message;
+    }
 }
 
-const _CANCELLABLE = new Set(['NEW', 'PENDING_NEW', 'ACCEPTED', 'PARTIALLY_FILLED']);
+const _CANCELLABLE = new Set(['NEW', 'PENDING_NEW', 'PENDING', 'ACCEPTED', 'PARTIALLY_FILLED']);
 
 function renderTodayOrders(orders) {
     const el = document.getElementById('pendingSignalsContainer');
@@ -1508,30 +1538,33 @@ function renderTodayOrders(orders) {
         const fillPx = Number(o.avg_traded_price) || 0;
         const orderPxStr = orderPx > 0 ? orderPx.toFixed(2) : '市价';
         const fillPxStr = fillPx > 0 ? fillPx.toFixed(2) : '--';
-        const canCancel = _CANCELLABLE.has(o.status);
+        const canCancel = _CANCELLABLE.has(o.status) && o.cancel_id !== null;
         html += '<tr>' +
             '<td class="' + dirClass + '">' + dir + '</td>' +
             '<td class="code">' + esc(o.code) + '</td>' +
             '<td>' + o.qty + '</td>' +
             '<td class="price">' + orderPxStr + '</td>' +
             '<td class="price">' + fillPxStr + '</td>' +
-            '<td>' + esc(o.status) + '</td>' +
+            '<td>' + esc(tradeStateLabel(o.status)) + '</td>' +
             '<td>' + (canCancel
-                ? '<button class="btn-sm btn-sell" onclick="cancelOrder(' + o.order_id + ')">撤单</button>'
+                ? '<button class="btn-sm btn-sell" data-cancel-id="' + esc(String(o.cancel_id || o.order_id)) + '">撤单</button>'
                 : '--') + '</td>' +
             '</tr>';
     }
     html += '</tbody></table>';
     el.innerHTML = html;
+    el.querySelectorAll('[data-cancel-id]').forEach(btn => {
+        btn.addEventListener('click', () => cancelOrder(btn.dataset.cancelId));
+    });
 }
 
 async function cancelOrder(orderId) {
     if (!confirm('确认撤单？')) return;
     try {
-        const resp = await tradingFetch('/api/trading/orders/' + orderId, {method: 'DELETE'});
+        const resp = await tradingFetch('/api/trading/orders/' + encodeURIComponent(orderId), {method: 'DELETE'});
         const data = await resp.json();
         if (data.success) {
-            showToast('撤单已提交', 'success');
+            showToast('撤单：' + tradeStateLabel(data.result && data.result.status), 'success');
             loadTodayOrders();
         } else {
             showToast('撤单失败: ' + (data.detail || '未知'), 'error');

@@ -379,9 +379,9 @@ def create_ml_router() -> APIRouter:
                                 broker_alert_ts = now_ts
                                 await _notify_feishu_error(
                                     "Broker未就绪",
-                                    f"xtquant-trade-server /readyz 检查失败\n"
+                                    f"当前交易通道就绪检查失败\n"
                                     f"时间: {now_bj.strftime('%H:%M:%S')}\n"
-                                    f"请检查Windows服务器上的xtquant-trade-server是否正常运行",
+                                    f"请检查 Web 所选交易通道是否正常运行并开放交易",
                                 )
                         else:
                             broker_alert_ts = 0  # reset so next disconnect alerts immediately
@@ -411,7 +411,7 @@ def create_ml_router() -> APIRouter:
         available_cash = getattr(app_state, "available_cash", 0)
         last_error = getattr(app_state, "broker_last_error", None)
         return {
-            "broker_configured": broker is not None,
+            "broker_configured": broker is not None and bool(getattr(broker, "route", True)),
             "broker_healthy": broker is not None and not last_error,
             "holdings_count": len(broker_positions),
             "available_cash": available_cash,

@@ -6,6 +6,30 @@
 <div class="settings-page">
     <h2>Settings</h2>
 
+    <section class="settings-section">
+        <div class="settings-card">
+            <h3>交易通道</h3>
+            {% include "trading_channel_control.html" %}
+            <p class="settings-desc">选择后，持仓、资金和新委托使用所选通道。原委托仍归原通道。</p>
+            <h3>QMT 连接</h3>
+            <div class="form-group"><label for="qmt_url">HTTPS 地址</label>
+                <input id="qmt_url" class="token-input" placeholder="https://qmt.example:18443"></div>
+            <div class="form-group"><label for="qmt_instance_id">实例 ID</label>
+                <input id="qmt_instance_id" class="token-input" autocomplete="off"></div>
+            <div class="form-group"><label for="qmt_key_id">密钥标识</label>
+                <input id="qmt_key_id" class="token-input" autocomplete="off"></div>
+            <div class="form-group"><label for="qmt_secret">签名密钥</label>
+                <input id="qmt_secret" type="password" class="token-input" autocomplete="new-password"></div>
+            <div class="form-group"><label for="qmt_ca_file">CA 证书文件路径（Web 服务端）</label>
+                <input id="qmt_ca_file" class="token-input" placeholder="系统信任的证书可留空"></div>
+            <div class="token-actions">
+                <button class="btn btn-secondary" onclick="saveQmtChannel(true)">测试连接</button>
+                <button class="btn btn-primary" onclick="saveQmtChannel(false)">保存 QMT 配置</button>
+            </div>
+            <p id="qmtConfigMessage" role="status"></p>
+        </div>
+    </section>
+
     <!-- Tushare Pro Token Section -->
     <section class="settings-section">
         <div class="settings-card">
@@ -211,7 +235,7 @@
     <!-- xtquant Broker Section -->
     <section class="settings-section">
         <div class="settings-card">
-            <h3>Broker 服务器 (xtquant-trade-server)</h3>
+            <h3>miniQMT 连接 (xtquant-trade-server)</h3>
             <p class="settings-desc">Windows 服务器上运行的 xtquant-trade-server，负责实际下单。填写内网 IP 和端口（如 <code>http://192.168.1.10:8001</code>）。</p>
 
             <div class="token-status" id="xtquantStatus">
@@ -757,4 +781,5 @@ loadLambdaKlineTokenStatus();
 loadBltcyKeyStatus();
 loadAssistantStatus();
 </script>
+<script src="/static/trading-channel.js"></script>
 {% endblock %}

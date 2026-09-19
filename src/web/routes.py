@@ -64,6 +64,8 @@ async def _append_trade_note_event(
     GreptimeDB is down or the table is missing, we just log and move on.
     Strips .SZ/.SH suffix so notes are keyed by bare 6-digit code.
     """
+    if getattr(getattr(request.app.state, "broker", None), "backend", "miniqmt") == "qmt":
+        return  # QMT has its own durable order ledger; legacy notes are not account-scoped.
     if order_id is None:
         logger.debug("trade-notes hook: no order_id, skipping note for %s", code)
         return
@@ -104,6 +106,8 @@ async def _import_batch_orders_into_notes(request: Request, codes: set[str]) -> 
     try:
         storage = getattr(request.app.state, "storage", None)
         broker = getattr(request.app.state, "broker", None)
+        if getattr(broker, "backend", "miniqmt") == "qmt":
+            return
         if storage is None or broker is None:
             logger.debug("trade-notes batch hook: storage/broker unavailable, skipping")
             return
@@ -2196,6 +2200,9 @@ async def _run_intraday_monitor(state: dict) -> None:
 def create_settings_router() -> APIRouter:
     """Create router for settings page (API key management)."""
     router = APIRouter(tags=["settings"])
+    from src.web.broker_channel_routes import create_broker_channel_router
+
+    router.include_router(create_broker_channel_router())
 
     @router.get("/settings", response_class=HTMLResponse)
     async def settings_page(request: Request):
@@ -2695,6 +2702,21 @@ def create_settings_router() -> APIRouter:
 
         set_xtquant_server_url(url)
         set_xtquant_api_key(key)
+
+        from src.trading.broker_switch import BrokerSwitch
+
+        broker = getattr(request.app.state, "broker", None)
+        if isinstance(broker, BrokerSwitch):
+            broker.import_legacy_config()
+            if broker.backend == "qmt":
+                return {"success": True, "message": "miniQMT 配置已保存，当前仍使用 QMT"}
+            try:
+                await broker.select("miniqmt")
+            except Exception:
+                return {"success": False, "message": "miniQMT 配置已保存，连接失败，保留当前通道"}
+            from src.web.broker_channel_routes import clear_broker_cache
+
+            clear_broker_cache(request.app)
 
         init_broker = getattr(request.app.state, "init_broker", None)
         if init_broker is None:
@@ -3356,7 +3378,12 @@ def create_trading_router() -> APIRouter:
             avg_price = pos.get("avg_price")
             if avg_price is not None and float(avg_price) <= 0:
                 avg_price = None
-            if avg_price is None and not is_repo:
+            if (
+                avg_price is None
+                and not is_repo
+                and getattr(getattr(request.app.state, "broker", None), "backend", "miniqmt")
+                != "qmt"
+            ):
                 avg_price = await _cost_from_notes(pos["code"].split(".")[0], volume)
             market_value = pos.get("market_value")
             last_price = pos.get("last_price")
@@ -3381,7 +3408,11 @@ def create_trading_router() -> APIRouter:
                     "pnl_pct": pnl_pct,
                 }
             )
-        return {"holdings": holdings}
+        return {
+            "holdings": holdings,
+            "error": getattr(request.app.state, "broker_last_error", None),
+            "channel": getattr(getattr(request.app.state, "broker", None), "route", None),
+        }
 
     @router.get("/api/trading/equity-curve")
     async def get_equity_curve(request: Request, days: int = 365) -> dict:
@@ -3406,6 +3437,8 @@ def create_trading_router() -> APIRouter:
         from src.trading.equity_snapshot import EquitySnapshotStore, compute_weekly_returns
 
         account_id = getattr(request.app.state, "broker_account_id", None)
+        if not account_id:
+            raise HTTPException(status_code=503, detail="当前账户数据不可用")
         try:
             snapshots = await EquitySnapshotStore(storage).list_snapshots(
                 account_id=account_id, days=days
@@ -3443,7 +3476,11 @@ def create_trading_router() -> APIRouter:
             snapshots[0]["date"] if snapshots else (anchor_date or today),
             LEDGER_COMPLETE_SINCE,
         )
-        if anchor_date is not None and anchor_date > window_start:
+        if (
+            anchor_date is not None
+            and anchor_date > window_start
+            and getattr(getattr(request.app.state, "broker", None), "backend", "miniqmt") != "qmt"
+        ):
             positions_now = {
                 pos["code"].split(".")[0]: int(pos.get("volume", 0))
                 for pos in getattr(request.app.state, "broker_positions", [])
@@ -3516,7 +3553,7 @@ def create_trading_router() -> APIRouter:
                 "market_value": float(
                     getattr(request.app.state, "broker_market_value", 0.0) or 0.0
                 ),
-                "frozen_cash": float(getattr(request.app.state, "broker_frozen_cash", 0.0) or 0.0),
+                "frozen_cash": getattr(request.app.state, "broker_frozen_cash", 0.0),
                 "prev_close_asset": prev_close_asset,
                 "today_pnl": today_pnl,
                 "today_pnl_pct": today_pnl_pct,
@@ -3741,7 +3778,9 @@ def create_trading_router() -> APIRouter:
         body = await request.json()
         stock_code = body.get("stock_code", "")
         stock_name = body.get("stock_name", "")
-        quantity = int(body.get("quantity", 0))
+        quantity = body.get("quantity", 0)
+        if type(quantity) is not int:
+            raise HTTPException(status_code=400, detail="quantity 必须为整数股数")
         price = body.get("price")
 
         if not stock_code or quantity <= 0 or quantity % 100 != 0:
@@ -3752,6 +3791,12 @@ def create_trading_router() -> APIRouter:
             raise HTTPException(status_code=503, detail="Broker 未配置，请设置 XTQUANT_SERVER_URL")
 
         try:
+            extra = {}
+            if hasattr(broker, "route"):
+                extra = {
+                    "request_id": body.get("request_id"),
+                    "expected_channel": body.get("channel"),
+                }
             result = await broker.place_order(
                 code=stock_code,
                 side="BUY",
@@ -3759,6 +3804,7 @@ def create_trading_router() -> APIRouter:
                 price_type="LIMIT" if price else "MARKET",
                 price=float(price) if price else None,
                 remark=f"Dashboard买入 {stock_name}".strip(),
+                **extra,
             )
         except BrokerError as e:
             raise HTTPException(status_code=400, detail=f"Broker拒单: {e.message}")
@@ -3768,11 +3814,15 @@ def create_trading_router() -> APIRouter:
         # NOTE-001: append broker event to trade_notes (best-effort, never block return)
         await _append_trade_note_event(
             request,
-            order_id=result.order_id,
+            order_id=(
+                result.order_id
+                if result.status == "FILLED" and getattr(result, "backend", "miniqmt") == "miniqmt"
+                else None
+            ),
             code=stock_code,
             side="buy",
-            qty=quantity,
-            price=float(price) if price else None,
+            qty=getattr(result, "traded_qty", quantity) or 0,
+            price=getattr(result, "avg_traded_price", None),
         )
         from src.web.app import schedule_broker_post_order_refresh
 
@@ -3820,7 +3870,13 @@ def create_trading_router() -> APIRouter:
             raise HTTPException(status_code=503, detail="Broker 未配置，请设置 XTQUANT_SERVER_URL")
 
         try:
-            data = await broker.place_batch_by_amount(orders=legs, side="BUY")
+            extra = {}
+            if hasattr(broker, "route"):
+                extra = {
+                    "request_id": body.get("request_id"),
+                    "expected_channel": body.get("channel"),
+                }
+            data = await broker.place_batch_by_amount(orders=legs, side="BUY", **extra)
         except BrokerError as e:
             raise HTTPException(status_code=400, detail=f"Broker拒单: {e.message}")
 
@@ -3845,7 +3901,9 @@ def create_trading_router() -> APIRouter:
         body = await request.json()
         stock_code = body.get("stock_code", "")
         stock_name = body.get("stock_name", "")
-        quantity = int(body.get("quantity", 0))
+        quantity = body.get("quantity", 0)
+        if type(quantity) is not int:
+            raise HTTPException(status_code=400, detail="quantity 必须为整数股数")
 
         if not stock_code or quantity <= 0 or quantity % 100 != 0:
             raise HTTPException(status_code=400, detail="stock_code 或 quantity 无效")
@@ -3855,12 +3913,19 @@ def create_trading_router() -> APIRouter:
             raise HTTPException(status_code=503, detail="Broker 未配置，请设置 XTQUANT_SERVER_URL")
 
         try:
+            extra = {}
+            if hasattr(broker, "route"):
+                extra = {
+                    "request_id": body.get("request_id"),
+                    "expected_channel": body.get("channel"),
+                }
             result = await broker.place_order(
                 code=stock_code,
                 side="SELL",
                 qty=quantity,
                 price_type="MARKET",
                 remark=f"Dashboard卖出 {stock_name}".strip(),
+                **extra,
             )
         except BrokerError as e:
             raise HTTPException(status_code=400, detail=f"Broker拒单: {e.message}")
@@ -3870,11 +3935,15 @@ def create_trading_router() -> APIRouter:
         # NOTE-001: append broker event to trade_notes (best-effort)
         await _append_trade_note_event(
             request,
-            order_id=result.order_id,
+            order_id=(
+                result.order_id
+                if result.status == "FILLED" and getattr(result, "backend", "miniqmt") == "miniqmt"
+                else None
+            ),
             code=stock_code,
             side="sell",
-            qty=quantity,
-            price=None,
+            qty=getattr(result, "traded_qty", quantity) or 0,
+            price=getattr(result, "avg_traded_price", None),
         )
         from src.web.app import schedule_broker_post_order_refresh
 
@@ -3888,7 +3957,7 @@ def create_trading_router() -> APIRouter:
         }
 
     @router.delete("/api/trading/orders/{order_id}")
-    async def cancel_order(request: Request, order_id: int) -> dict:
+    async def cancel_order(request: Request, order_id: str) -> dict:
         """Cancel an open order by broker order_id."""
         from src.trading.broker_client import BrokerClient, BrokerError
 

@@ -26,8 +26,8 @@ class Position:
     code: str
     volume: int
     can_use_volume: int
-    frozen_volume: int
-    avg_price: float
+    frozen_volume: int | None
+    avg_price: float | None
     market_value: float
     last_price: float | None = None
 
@@ -36,31 +36,33 @@ class Position:
 class AccountInfo:
     account_id: str
     cash: float
-    frozen_cash: float
+    frozen_cash: float | None
     market_value: float
     total_asset: float
 
 
 @dataclass
 class OrderRecord:
-    order_id: int | None
+    order_id: int | str | None
     seq: int | None
     code: str
     side: str
     price: float
     qty: int
-    traded_qty: int
-    avg_traded_price: float
+    traded_qty: int | None
+    avg_traded_price: float | None
     status: str
+    backend: str = "miniqmt"
 
 
 class BrokerError(Exception):
     """Business error from xtquant-trade-server (envelope code != 0)."""
 
-    def __init__(self, code: int, message: str) -> None:
+    def __init__(self, code: int | str, message: str) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        self.http_status = 0
 
 
 class BrokerClient:

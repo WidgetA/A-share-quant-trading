@@ -12,6 +12,10 @@ def create_broker_order_cache_router() -> APIRouter:
     @router.get("/api/trading/orders")
     async def get_orders(request: Request) -> dict:
         orders = getattr(request.app.state, "broker_orders", [])
-        return {"orders": orders}
+        return {
+            "orders": orders,
+            "error": getattr(request.app.state, "broker_orders_last_error", None),
+            "channel": getattr(getattr(request.app.state, "broker", None), "route", None),
+        }
 
     return router

@@ -147,10 +147,13 @@ async def _broker_fetch_once(app: FastAPI) -> str | None:
     broker: BrokerClient | None = getattr(app.state, "broker", None)
     if broker is None:
         return "broker not initialized"
+    revision = getattr(broker, "revision", None)
 
     readiness_error = getattr(broker, "readiness_error", None)
     if readiness_error is not None:
         ready_err = await readiness_error()
+        if revision != getattr(broker, "revision", None):
+            return None
         if ready_err:
             app.state.broker_positions = []
             app.state.available_cash = 0.0
@@ -162,9 +165,15 @@ async def _broker_fetch_once(app: FastAPI) -> str | None:
             return f"broker not ready: {ready_err}"
 
     try:
-        positions = await broker.get_positions()
-        account = await broker.get_account()
+        snapshot_reader = getattr(broker, "get_account_and_positions", None)
+        if snapshot_reader:
+            positions, account = await snapshot_reader()
+        else:
+            positions = await broker.get_positions()
+            account = await broker.get_account()
     except Exception as e:
+        if revision != getattr(broker, "revision", None):
+            return None
         app.state.broker_positions = []
         app.state.available_cash = 0.0
         app.state.broker_total_asset = 0.0
@@ -173,6 +182,8 @@ async def _broker_fetch_once(app: FastAPI) -> str | None:
         app.state.broker_account_id = None
         app.state.broker_positions_updated_at = None
         return f"{type(e).__name__}: {e}"
+    if revision != getattr(broker, "revision", None):
+        return None
     app.state.broker_positions = [
         {
             "code": p.code,
@@ -280,10 +291,13 @@ async def _broker_fetch_orders_once(app: FastAPI) -> str | None:
     broker: BrokerClient | None = getattr(app.state, "broker", None)
     if broker is None:
         return "broker not initialized"
+    revision = getattr(broker, "revision", None)
 
     readiness_error = getattr(broker, "readiness_error", None)
     if readiness_error is not None:
         ready_err = await readiness_error()
+        if revision != getattr(broker, "revision", None):
+            return None
         if ready_err:
             app.state.broker_orders = []
             app.state.broker_filled_orders_fingerprint = ()
@@ -292,10 +306,14 @@ async def _broker_fetch_orders_once(app: FastAPI) -> str | None:
     try:
         orders = await broker.get_orders()
     except Exception as e:
+        if revision != getattr(broker, "revision", None):
+            return None
         app.state.broker_orders = []
         app.state.broker_filled_orders_fingerprint = ()
         return f"{type(e).__name__}: {e}"
 
+    if revision != getattr(broker, "revision", None):
+        return None
     app.state.broker_orders = orders
 
     filled_fingerprint = _filled_order_fingerprint(orders)
@@ -311,7 +329,8 @@ async def _broker_fetch_orders_once(app: FastAPI) -> str | None:
     try:
         from src.notes.note_store import TradeNoteStore
 
-        written, skipped = await TradeNoteStore(storage).import_filled_orders_from_list(orders)
+        importable = [o for o in orders if not str(o.get("source", "")).startswith("qmt")]
+        written, skipped = await TradeNoteStore(storage).import_filled_orders_from_list(importable)
         if written:
             logger.info(
                 "Broker order sync imported filled orders into trade_notes: written=%d skipped=%d",
@@ -362,26 +381,17 @@ async def _init_broker(app: FastAPI) -> tuple[bool, str]:
     """
     import asyncio
 
-    from src.common.config import get_xtquant_api_key, get_xtquant_server_url
+    from src.trading.broker_switch import BrokerSwitch
 
-    old: BrokerClient | None = getattr(app.state, "broker", None)
-    if old is not None:
-        app.state.broker = None
-        try:
-            await old.stop()
-        except Exception as e:
-            logger.warning(f"Failed to stop old BrokerClient: {e}")
-
+    broker = getattr(app.state, "broker", None)
+    if not isinstance(broker, BrokerSwitch):
+        broker = BrokerSwitch()
+        app.state.broker = broker
     try:
-        url = get_xtquant_server_url()
-        key = get_xtquant_api_key()
-    except ValueError as e:
-        app.state.broker_last_error = f"配置缺失: {e}"
-        return False, f"配置缺失: {e}"
-
-    broker = BrokerClient(url, key)
-    try:
-        await broker.start()
+        if not broker.route:
+            await broker.start()
+        elif not broker._clients:
+            await broker.start()
     except Exception as e:
         app.state.broker_last_error = f"启动 BrokerClient 失败: {e}"
         return False, f"启动 BrokerClient 失败: {e}"
@@ -413,10 +423,10 @@ async def _init_broker(app: FastAPI) -> tuple[bool, str]:
     order_poll_task = getattr(app.state, "_broker_order_poll_task", None)
     if order_poll_task is None or order_poll_task.done():
         app.state._broker_order_poll_task = asyncio.create_task(_broker_order_poll_loop(app))
-    logger.info(f"BrokerClient (re)initialized: {url} (warmup_err={err})")
+    logger.info("Broker channel initialized: %s (warmup_err=%s)", broker.backend, err)
     if err:
         return False, f"已配置但无法获取数据: {err}"
-    return True, url
+    return True, broker.backend
 
 
 async def _broker_position_poll_loop(app: FastAPI) -> None:

@@ -1,0 +1,11 @@
+<div style="display:flex;gap:0.6rem;align-items:center;flex-wrap:wrap;margin:0.7rem 0;">
+    <label for="tradingChannelSelect">交易通道</label>
+    <select id="tradingChannelSelect" aria-label="交易通道"
+            style="padding:0.55rem;border:1px solid #ccc;border-radius:6px;font-size:0.9rem;">
+        <option value="miniqmt">miniQMT</option>
+        <option value="qmt">QMT</option>
+    </select>
+    <button type="button" id="tradingChannelApply" class="btn btn-secondary"
+            onclick="switchTradingChannel()">切换</button>
+    <span id="tradingChannelCurrent" role="status">正在读取交易通道…</span>
+</div>
