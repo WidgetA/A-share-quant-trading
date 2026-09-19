@@ -14,8 +14,10 @@
 
 - miniQMT 沿用设置页原有 URL 和 API Key。
 - QMT 填写 `client.secret` 中的 HTTPS 源地址、实例 ID、密钥标识、签名密钥，
-  以及 CA 证书在 **Web 服务端** 的路径。容器部署需挂载证书并填写容器路径。
-  使用系统信任的证书时 CA 路径留空；TLS 和主机名验证始终开启。
+  通过文件选择框上传电脑上的 CA 证书，不需要填写路径或手动挂载证书。
+  支持 PEM/DER 格式的 `.pem`、`.crt`、`.cer` 公钥证书，最大 64 KB，不接收私钥。
+  测试或保存时自动上传；不选择新文件则保留原证书。可明确勾选“使用系统信任证书”
+  并保存，恢复系统证书。TLS 和主机名验证始终开启。
 - “测试连接”只查询账户及交易状态，不启用交易。只读实例可查询资金与持仓，
   下单仍受代理原有授权及政策约束。保存 QMT 配置后，点击“切换”使它生效。
 - 密钥不会从状态接口返回，也不会预填到浏览器。填写新密钥后保存，输入框清空；
@@ -23,6 +25,9 @@
 
 Web 配置和原请求存放于 `data/trading-channels.sqlite3`，包含连接凭据。
 该文件位于 Git 忽略的数据目录；部署必须持久挂载 `data`，限制文件访问并按凭据管理备份。
+上传的 CA 保存在 `data/qmt-certificates/`，与配置一起持久化。文件名由证书内容生成，
+不使用上传文件名；更换证书不会覆盖原通道的证书。已有配置中的旧证书路径继续可用，
+页面仅显示是否已保存证书，不返回服务器路径。
 历史连接配置用于原订单查询和撤单，不因切换清除。当前 Web 部署使用单应用进程；
 不得增加多个独立实例并让它们共享同一交易入口而不设计配置同步及统一存储。
 
@@ -35,9 +40,12 @@ Web 配置和原请求存放于 `data/trading-channels.sqlite3`，包含连接�
 | GET | `/api/settings/trading-channel` | 当前通道、通道标识及不含密钥的配置 |
 | POST | `/api/settings/trading-channel` | `{"backend":"miniqmt"}` 或 `{"backend":"qmt"}` |
 | POST | `/api/settings/trading-channel/qmt` | 保存 QMT 配置 |
+| POST | `/api/settings/trading-channel/qmt/ca` | multipart 字段 `file` 上传 CA，返回证书标识 |
 | POST | `/api/settings/trading-channel/qmt/test` | 仅通过签名 GET 测试 QMT |
 
-QMT 配置正文：`url`、`instance_id`、`key_id`、`secret`、可空的 `ca_file`。
+QMT 配置正文：`url`、`instance_id`、`key_id`、`secret`；上传新证书后附加
+`ca_certificate_id`。省略证书标识保留原证书；`use_system_ca=true` 明确改用系统证书。
+保存和测试均使用上传证书；测试不会更改已保存配置或当前交易通道。
 现有买入、卖出、批量买入路径保持，浏览器附加 `request_id` 和 `channel`。
 同一次请求的网络重试保留这两项及原内容；新的明确操作使用新编号。
 QMT 请求缺少编号会被拒绝。未升级的 miniQMT 调用方仍可按旧格式调用。
@@ -81,7 +89,7 @@ QMT 账户快照里的其他来源委托可查看，不冒充本 Web 订单，�
 `uv run python scripts/verify_trading_channel_ui.py` 在拦截全部 HTTP 的浏览器中验证
 实际设置页与首页、切换后刷新、密码不回填、买入请求、重试编号、桌面与窄屏布局。
 
-本次本地结果：完整 `tests/unit` 共 497 项通过（其中交易、Web、笔记相关共 164 项）；
+通道开关首次发布的本地结果：完整 `tests/unit` 共 497 项通过；
 全仓库 Ruff 检查及格式检查、JavaScript 语法检查、浏览器离线验证及 `git diff --check`
 通过。页面截图位于忽略目录 `data/channel-ui/`。
 
@@ -93,3 +101,9 @@ QMT 账户快照里的其他来源委托可查看，不冒充本 Web 订单，�
 
 本地检查不代表远端 CI、部署或实盘验收。本次发布不启用代理或发送真实订单；
 QMT 实盘可用性需按目标实例当前状态及明确授权范围另行验证。
+
+2026-09-19 用户指出证书应通过 Web 上传。新增回归检查先在原代码得到上传接口 404，
+随后改为文件上传，并检查 PEM/DER、无效/过大文件、私钥拒收、授权、保存后保留、
+更换证书、系统信任恢复及测试连接不修改已保存配置。浏览器检查覆盖选择本地文件、
+multipart 上传、测试与保存的证书标识传递、成功后清空选择以及桌面/窄屏布局。
+修正后完整单元测试共 508 项通过，Ruff、类型检查及浏览器检查通过。

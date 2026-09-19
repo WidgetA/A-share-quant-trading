@@ -2,12 +2,17 @@
 
 import asyncio
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel, SecretStr
 
 from src.trading.broker_client import BrokerError
 from src.trading.broker_switch import BrokerSwitch
 from src.trading.channel_store import default_store
+from src.trading.qmt_certificates import (
+    MAX_CERTIFICATE_BYTES,
+    certificate_path,
+    save_certificate,
+)
 from src.trading.qmt_http_client import QmtHttpClient, validate_qmt_config
 
 
@@ -17,6 +22,8 @@ class QmtSettings(BaseModel):
     key_id: str
     secret: SecretStr = SecretStr("")
     ca_file: str | None = None
+    ca_certificate_id: str | None = None
+    use_system_ca: bool = False
 
 
 class ChannelSelection(BaseModel):
@@ -48,14 +55,21 @@ def create_broker_channel_router():
 
     def config(body):
         store = default_store()
-        spec = body.model_dump()
+        spec = body.model_dump(exclude={"ca_certificate_id", "use_system_ca"})
         spec["secret"] = body.secret.get_secret_value()
-        if not spec["secret"]:
-            route = store.preference("qmt")
-            if route:
-                previous = store.profile(route)
-                if all(previous[k] == spec[k] for k in ("url", "instance_id", "key_id")):
-                    spec["secret"] = previous["secret"]
+        route = store.preference("qmt")
+        previous = store.profile(route) if route else {}
+        if body.ca_file:
+            raise BrokerError("INVALID_CERTIFICATE", "请上传 CA 证书文件，不再需要填写服务端路径")
+        if body.use_system_ca and body.ca_certificate_id:
+            raise BrokerError("INVALID_CERTIFICATE", "请选择上传证书或使用系统证书")
+        if body.ca_certificate_id:
+            spec["ca_file"] = certificate_path(store.path.parent, body.ca_certificate_id)
+        elif not body.use_system_ca:
+            spec["ca_file"] = previous.get("ca_file")
+        if not spec["secret"] and previous:
+            if all(previous[k] == spec[k] for k in ("url", "instance_id", "key_id")):
+                spec["secret"] = previous["secret"]
         return validate_qmt_config(spec)
 
     @router.get("/api/settings/trading-channel")
@@ -66,7 +80,11 @@ def create_broker_channel_router():
         for backend in ("miniqmt", "qmt"):
             route = store.preference(backend)
             spec = store.profile(route) if route else {}
-            profiles[backend] = {k: v for k, v in spec.items() if k not in ("secret", "api_key")}
+            profiles[backend] = {
+                k: v for k, v in spec.items() if k not in ("secret", "api_key", "ca_file")
+            }
+            if backend == "qmt":
+                profiles[backend]["ca_configured"] = bool(spec.get("ca_file"))
             profiles[backend]["configured"] = bool(route)
         return {
             "backend": active.backend if isinstance(active, BrokerSwitch) else store.backend,
@@ -75,6 +93,19 @@ def create_broker_channel_router():
             else store.preference("active_route", ""),
             "profiles": profiles,
         }
+
+    @router.post("/api/settings/trading-channel/qmt/ca")
+    async def upload_ca(file: UploadFile = File(...)):
+        try:
+            contents = await file.read(MAX_CERTIFICATE_BYTES + 1)
+            if len(contents) > MAX_CERTIFICATE_BYTES:
+                raise HTTPException(413, "CA 证书文件不能超过 64 KB")
+            certificate_id = save_certificate(default_store().path.parent, contents)
+            return {"success": True, "certificate_id": certificate_id}
+        except BrokerError as exc:
+            raise HTTPException(400, exc.message) from None
+        finally:
+            await file.close()
 
     @router.post("/api/settings/trading-channel/qmt")
     async def save_qmt(body: QmtSettings):
@@ -85,7 +116,11 @@ def create_broker_channel_router():
             await client.start()
             await client.stop()
             default_store().save_profile(spec)
-            return {"success": True, "message": "QMT 配置已保存，选择 QMT 后生效"}
+            return {
+                "success": True,
+                "ca_configured": bool(spec["ca_file"]),
+                "message": "QMT 配置已保存，选择 QMT 后生效",
+            }
         except BrokerError as exc:
             raise HTTPException(400, exc.message) from None
 

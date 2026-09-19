@@ -21,7 +21,7 @@ context = {
     for key in ("broker_status", "scheduler", "model_scheduler", "daily_scan", "pre_market_report")
 }
 context.update(today="2026-09-19", recommendations_enabled=False)
-state = {"backend": "miniqmt", "requests": []}
+state = {"backend": "miniqmt", "requests": [], "ca_configured": False, "uploads": []}
 
 
 def intercept(route):
@@ -58,13 +58,27 @@ def intercept(route):
                         "url": "https://qmt.example:18443",
                         "instance_id": "demo",
                         "key_id": "ingress",
-                        "ca_file": "",
+                        "ca_configured": state["ca_configured"],
                     },
                 },
             }
+    elif path == "/api/settings/trading-channel/qmt/ca":
+        assert "multipart/form-data; boundary=" in req.headers["content-type"]
+        assert b"offline CA certificate bytes" in req.post_data_buffer
+        state["uploads"].append(req.post_data_buffer)
+        payload = {"success": True, "certificate_id": "a" * 64}
+    elif path == "/api/settings/trading-channel/qmt/test":
+        assert req.post_data_json["ca_certificate_id"] == "a" * 64
+        assert state["ca_configured"] is False
+        payload = {"success": True, "message": "QMT 已连接，当前未开放交易"}
     elif path == "/api/settings/trading-channel/qmt":
         state["requests"].append(req.post_data_json)
-        payload = {"success": True, "message": "QMT 配置已保存，选择 QMT 后生效"}
+        state["ca_configured"] = bool(req.post_data_json.get("ca_certificate_id"))
+        payload = {
+            "success": True,
+            "message": "QMT 配置已保存，选择 QMT 后生效",
+            "ca_configured": state["ca_configured"],
+        }
     elif path == "/api/stock/status":
         payload = {
             "broker_configured": True,
@@ -98,17 +112,34 @@ with sync_playwright() as playwright:
     )
     assert page.locator("#qmt_secret").input_value() == ""
     page.locator("#qmt_secret").fill("offline-demo-secret")
+    assert page.locator("#qmt_ca_file").get_attribute("type") == "file"
+    page.locator("#qmt_ca_file").set_input_files(
+        {
+            "name": "ca.pem",
+            "mimeType": "application/x-pem-file",
+            "buffer": b"offline CA certificate bytes",
+        }
+    )
+    page.locator("#qmtTestBtn").click()
+    page.wait_for_function(
+        "document.getElementById('qmtConfigMessage').textContent.includes('已连接')"
+    )
     page.get_by_role("button", name="保存 QMT 配置").click()
     page.wait_for_function(
         "document.getElementById('qmtConfigMessage').textContent.includes('已保存')"
     )
     assert page.locator("#qmt_secret").input_value() == ""
+    assert page.locator("#qmt_ca_file").input_value() == ""
+    assert "已保存 CA 证书" in page.locator("#qmtCertificateStatus").inner_text()
+    assert state["requests"][-1]["ca_certificate_id"] == "a" * 64
+    assert len(state["uploads"]) == 2
     page.locator("#tradingChannelSelect").select_option("qmt")
     page.locator("#tradingChannelApply").click()
     page.wait_for_function(
         "window.tradingChannel.backend === 'qmt' && document.getElementById('tradingChannelCurrent').textContent === '当前使用：QMT'"
     )
     page.screenshot(path=OUT / "settings.png", full_page=False)
+    page.locator("#qmt_ca_file").locator("..").screenshot(path=OUT / "certificate-upload.png")
     page.goto("http://channel.local/")
     page.wait_for_function("window.tradingChannel.backend === 'qmt'")
     page.locator("#brokerCard").scroll_into_view_if_needed()
@@ -129,6 +160,11 @@ with sync_playwright() as playwright:
     page.wait_for_function("window.tradingChannel.backend === 'qmt'")
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
     page.screenshot(path=OUT / "settings-mobile.png", full_page=False)
+    page.locator("#qmt_ca_file").locator("..").screenshot(
+        path=OUT / "certificate-upload-mobile.png"
+    )
     browser.close()
     assert not errors, errors
-print("PASS: settings, channel switch, dashboard, request identity, desktop/mobile layout")
+print(
+    "PASS: certificate file upload/test/save, channel switch, request identity, desktop/mobile layout"
+)

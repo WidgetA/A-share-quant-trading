@@ -19,12 +19,13 @@ window.channelLoaded = (async () => {
         const label = document.getElementById('tradingChannelCurrent');
         if (label) label.textContent = '当前使用：' + (data.backend === 'qmt' ? 'QMT' : 'miniQMT');
         const qmt = data.profiles.qmt;
-        for (const field of ['url', 'instance_id', 'key_id', 'ca_file']) {
+        for (const field of ['url', 'instance_id', 'key_id']) {
             const input = document.getElementById('qmt_' + field);
             if (input) input.value = qmt[field] || '';
         }
         const secret = document.getElementById('qmt_secret');
         if (secret && qmt.configured) secret.placeholder = '已保存；留空保留原密钥';
+        showQmtCertificateStatus(qmt.ca_configured);
         const hint = document.getElementById('channelBatchHint');
         if (hint) hint.textContent = data.backend === 'qmt'
             ? 'QMT：按金额和参考价换算股数，每只提交一次市价委托，未成交余量撤销。'
@@ -57,14 +58,36 @@ async function switchTradingChannel() {
     } finally { button.disabled = false; }
 }
 
+function showQmtCertificateStatus(configured) {
+    const label = document.getElementById('qmtCertificateStatus');
+    if (label) label.textContent = configured ? '已保存 CA 证书；选择新文件可更换。' : '未上传 CA 证书，当前使用系统信任证书。';
+}
+
 async function saveQmtChannel(testOnly = false) {
     const body = {};
-    for (const field of ['url', 'instance_id', 'key_id', 'secret', 'ca_file']) {
+    for (const field of ['url', 'instance_id', 'key_id', 'secret']) {
         body[field] = document.getElementById('qmt_' + field).value.trim();
     }
     const message = document.getElementById('qmtConfigMessage');
+    const input = document.getElementById('qmt_ca_file');
+    const systemCa = document.getElementById('qmt_system_ca');
+    const buttons = ['qmtTestBtn', 'qmtSaveBtn'].map(id => document.getElementById(id));
+    buttons.forEach(button => button.disabled = true);
     message.textContent = testOnly ? '正在测试连接…' : '正在保存…';
     try {
+        body.use_system_ca = systemCa.checked;
+        const file = input.files[0];
+        if (file && !body.use_system_ca) {
+            if (!file.size || file.size > 65536) throw new Error('请选择不超过 64 KB 的 CA 证书文件');
+            message.textContent = '正在上传 CA 证书…';
+            const form = new FormData();
+            form.append('file', file);
+            const uploaded = await channelFetch('/api/settings/trading-channel/qmt/ca', {method: 'POST', body: form});
+            const result = await uploaded.json();
+            if (!uploaded.ok) throw new Error(typeof result.detail === 'string' ? result.detail : '证书上传失败');
+            body.ca_certificate_id = result.certificate_id;
+        }
+        message.textContent = testOnly ? '正在测试连接…' : '正在保存…';
         const resp = await channelFetch('/api/settings/trading-channel/qmt' + (testOnly ? '/test' : ''), {
             method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
         });
@@ -73,8 +96,12 @@ async function saveQmtChannel(testOnly = false) {
         if (resp.ok && data.success && !testOnly) {
             document.getElementById('qmt_secret').value = '';
             document.getElementById('qmt_secret').placeholder = '已保存；留空保留原密钥';
+            input.value = '';
+            systemCa.checked = false;
+            showQmtCertificateStatus(data.ca_configured);
         }
-    } catch (_) { message.textContent = '请求未完成，请检查连接'; }
+    } catch (error) { message.textContent = error.message || '请求未完成，请检查连接'; }
+    finally { buttons.forEach(button => button.disabled = false); }
 }
 
 async function channelOrderPayload(payload, action) {

@@ -20,11 +20,20 @@
                 <input id="qmt_key_id" class="token-input" autocomplete="off"></div>
             <div class="form-group"><label for="qmt_secret">签名密钥</label>
                 <input id="qmt_secret" type="password" class="token-input" autocomplete="new-password"></div>
-            <div class="form-group"><label for="qmt_ca_file">CA 证书文件路径（Web 服务端）</label>
-                <input id="qmt_ca_file" class="token-input" placeholder="系统信任的证书可留空"></div>
+            <div class="form-group"><label for="qmt_ca_file">CA 证书文件</label>
+                <input id="qmt_ca_file" type="file" class="token-input" accept=".pem,.crt,.cer"
+                       onchange="if (this.files.length) document.getElementById('qmt_system_ca').checked = false;">
+                <p id="qmtCertificateStatus" class="settings-desc">正在读取证书状态…</p>
+                <p class="settings-desc">选择电脑上的 .pem、.crt 或 .cer 证书（最大 64 KB），测试或保存时自动上传。不选择新文件则保留已保存证书。</p>
+                <label style="font-weight:normal;display:flex;gap:0.5rem;align-items:center;">
+                    <input id="qmt_system_ca" type="checkbox"
+                           onchange="if (this.checked) document.getElementById('qmt_ca_file').value = '';">
+                    使用系统信任证书（保存后替换已上传证书）
+                </label>
+            </div>
             <div class="token-actions">
-                <button class="btn btn-secondary" onclick="saveQmtChannel(true)">测试连接</button>
-                <button class="btn btn-primary" onclick="saveQmtChannel(false)">保存 QMT 配置</button>
+                <button id="qmtTestBtn" class="btn btn-secondary" onclick="saveQmtChannel(true)">测试连接</button>
+                <button id="qmtSaveBtn" class="btn btn-primary" onclick="saveQmtChannel(false)">保存 QMT 配置</button>
             </div>
             <p id="qmtConfigMessage" role="status"></p>
         </div>
@@ -781,5 +790,5 @@ loadLambdaKlineTokenStatus();
 loadBltcyKeyStatus();
 loadAssistantStatus();
 </script>
-<script src="/static/trading-channel.js"></script>
+<script src="/static/trading-channel.js?v=ca-upload-1"></script>
 {% endblock %}
