@@ -223,7 +223,7 @@ class BrokerClient:
         resp.raise_for_status()
         return self._unwrap(resp.json()) or {}
 
-    async def cancel_order(self, order_id: int) -> dict:
+    async def cancel_order(self, order_id: int | str) -> dict:
         resp = await self._c().delete(f"/v1/orders/{order_id}")
         resp.raise_for_status()
         return self._unwrap(resp.json()) or {}

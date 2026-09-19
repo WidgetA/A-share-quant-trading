@@ -81,7 +81,7 @@ QMT 账户快照里的其他来源委托可查看，不冒充本 Web 订单，�
 `uv run python scripts/verify_trading_channel_ui.py` 在拦截全部 HTTP 的浏览器中验证
 实际设置页与首页、切换后刷新、密码不回填、买入请求、重试编号、桌面与窄屏布局。
 
-本次本地结果：完整 `tests/unit` 共 495 项通过（其中交易、Web、笔记相关共 162 项）；
+本次本地结果：完整 `tests/unit` 共 497 项通过（其中交易、Web、笔记相关共 164 项）；
 全仓库 Ruff 检查及格式检查、JavaScript 语法检查、浏览器离线验证及 `git diff --check`
 通过。页面截图位于忽略目录 `data/channel-ui/`。
 

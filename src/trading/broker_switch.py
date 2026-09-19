@@ -20,7 +20,7 @@ _TERMINAL = {"FILLED", "CANCELLED", "PARTIALLY_CANCELLED", "REJECTED", "EXPIRED"
 class BrokerSwitch:
     def __init__(self, store: ChannelStore | None = None):
         self.store = store or default_store()
-        self._clients = {}
+        self._clients: dict[str, BrokerClient | QmtHttpClient] = {}
         self._lock = asyncio.Lock()
         self.route = self.store.preference(
             "active_route", self.store.preference(self.store.backend, "")

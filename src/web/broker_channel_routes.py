@@ -116,9 +116,11 @@ def create_broker_channel_router():
         if not hasattr(request.app.state, "broker_selection_lock"):
             request.app.state.broker_selection_lock = asyncio.Lock()
         async with request.app.state.broker_selection_lock:
-            broker = getattr(request.app.state, "broker", None)
-            created = not isinstance(broker, BrokerSwitch)
-            if created:
+            active = getattr(request.app.state, "broker", None)
+            created = not isinstance(active, BrokerSwitch)
+            if isinstance(active, BrokerSwitch):
+                broker = active
+            else:
                 broker = BrokerSwitch()
                 broker.import_legacy_config()
             try:

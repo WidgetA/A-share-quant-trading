@@ -107,6 +107,8 @@ _STATES = {
 def to_order(data: dict, intent: dict, key: str) -> OrderRecord:
     filled = data.get("filled_quantity")
     average = data.get("filled_average_price")
+    raw_state = data.get("state")
+    state = raw_state if isinstance(raw_state, str) and raw_state else "UNKNOWN"
     return OrderRecord(
         order_id=key,
         seq=None,
@@ -116,7 +118,7 @@ def to_order(data: dict, intent: dict, key: str) -> OrderRecord:
         qty=intent["quantity"],
         traded_qty=filled,
         avg_traded_price=float(average) if average is not None else None,
-        status=_STATES.get(data.get("state"), data.get("state", "UNKNOWN")),
+        status=_STATES.get(state, state),
         backend="qmt",
     )
 

@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from src.trading.broker_client import AccountInfo, BrokerError, OrderRecord
 from src.trading.broker_switch import BrokerSwitch
 from src.trading.channel_store import ChannelStore
-from src.trading.qmt_http_client import QmtHttpClient, business_id, order_intent
+from src.trading.qmt_http_client import QmtHttpClient, business_id, order_intent, to_order
 from src.web.app import _broker_fetch_once
 from src.web.broker_channel_routes import create_broker_channel_router
 from src.web.routes import create_trading_router
@@ -26,6 +26,13 @@ SPEC = {
     "secret": "test-signing-secret",
     "ca_file": None,
 }
+
+
+@pytest.mark.parametrize("state", [None, 123])
+def test_missing_or_invalid_qmt_state_remains_unknown(state):
+    intent = order_intent("601988.SH", "BUY", 100, "MARKET", None)
+    result = to_order({"state": state}, intent, "test-order")
+    assert result.status == "UNKNOWN"
 
 
 class Mini:
