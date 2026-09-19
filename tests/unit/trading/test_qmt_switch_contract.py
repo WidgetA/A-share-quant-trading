@@ -236,6 +236,105 @@ async def test_select_route_sign_bytes_and_preserve_choice_after_restart(setup):
     await s.switch.stop()
 
 
+async def test_confirmed_same_account_keeps_equity_identity_across_channel_switch(setup):
+    s = setup
+    s.store.link_account(s.qmt_route, "123456")
+    await s.switch.select("qmt")
+    _, account = await s.switch.get_account_and_positions()
+    assert account.account_id == "123456"
+    assert (await s.switch.get_account()).account_id == "123456"
+    reopened = ChannelStore(s.store.path)
+    rotated = reopened.save_profile({**SPEC, "secret": "new-test-secret"})
+    assert reopened.linked_account(rotated) == "123456"
+    other = reopened.save_profile({**SPEC, "instance_id": "another-instance"})
+    assert reopened.linked_account(other) is None
+    assert s.switch.route == s.qmt_route  # Order ownership remains on its original route.
+    await s.switch.stop()
+
+
+def test_qmt_uses_broker_reported_position_cost_without_inventing_missing_cost():
+    client = QmtHttpClient(SPEC)
+    row = {"symbol": "601988.SH", "quantity": 100, "available": 100, "market_value": "700"}
+    assert client._positions({"positions": [dict(row, avg_price="6.12")]})[0].avg_price == 6.12
+    assert client._positions({"positions": [row]})[0].avg_price is None
+
+
+@pytest.mark.parametrize("raw", ["NaN", "Infinity", "1e20", True])
+def test_invalid_qmt_cost_stays_unknown(raw):
+    row = {"symbol": "601988.SH", "quantity": 100, "available": 100, "market_value": "700"}
+    assert (
+        QmtHttpClient(SPEC)._positions({"positions": [dict(row, avg_price=raw)]})[0].avg_price
+        is None
+    )
+
+
+@pytest.mark.parametrize("price", [0, -1.25])
+async def test_qmt_zero_or_negative_cost_displays_without_invalid_return_percentage(
+    price, monkeypatch
+):
+    app = FastAPI()
+    app.state.broker = SimpleNamespace(backend="qmt", route="qmt-test")
+    app.state.broker_positions = [
+        {"code": "601988.SH", "volume": 100, "avg_price": price, "market_value": 700}
+    ]
+    monkeypatch.setattr("src.common.config.get_trading_api_key", lambda: None)
+    app.include_router(create_trading_router())
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://web"
+    ) as client:
+        response = await client.get("/api/trading/holdings")
+    assert response.status_code == 200
+    position = response.json()["holdings"][0]
+    assert position["avg_price"] == price
+    assert position["pnl"] == 700 - price * 100
+    assert position["pnl_pct"] is None
+
+
+async def test_linked_qmt_web_curve_reads_existing_history_and_writes_same_account(
+    setup, monkeypatch
+):
+    s = setup
+    s.store.link_account(s.qmt_route, "123456")
+    await s.switch.select("qmt")
+    statements = []
+
+    class Database:
+        async def execute(self, sql):
+            statements.append(sql)
+
+        async def fetch(self, sql):
+            assert "account_id = '123456'" in sql
+            return [
+                {
+                    "trade_date": day,
+                    "total_asset": 100000,
+                    "cash": 50000,
+                    "market_value": 50000,
+                    "source": "broker",
+                }
+                for day in ("2026-07-03", "2026-07-02")
+            ]
+
+    app = FastAPI()
+    app.state.broker = s.switch
+    app.state.storage = SimpleNamespace(db=Database())
+    monkeypatch.setattr("src.common.config.get_trading_api_key", lambda: None)
+    app.include_router(create_trading_router())
+    assert await _broker_fetch_once(app) is None
+    assert any(
+        "'123456'" in sql and "INSERT INTO account_equity_snapshot" in sql for sql in statements
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://web"
+    ) as client:
+        response = await client.get("/api/trading/equity-curve")
+    assert response.status_code == 200
+    points = response.json()["snapshots"]
+    assert [p["date"] for p in points[:2]] == ["2026-07-02", "2026-07-03"]
+    assert points[-1]["source"] == "live"
+    await s.switch.stop()
+
+
 async def test_lost_response_restart_and_switch_retry_queries_original_route(setup):
     s = setup
     await s.switch.select("qmt")

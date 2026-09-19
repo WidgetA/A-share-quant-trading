@@ -3376,7 +3376,10 @@ def create_trading_router() -> APIRouter:
             is_repo = is_non_stock_position_code(pos["code"])
             name = mapper.get_stock_name(pos["code"]) or ("国债逆回购" if is_repo else "")
             avg_price = pos.get("avg_price")
-            if avg_price is not None and float(avg_price) <= 0:
+            is_qmt = (
+                getattr(getattr(request.app.state, "broker", None), "backend", "miniqmt") == "qmt"
+            )
+            if avg_price is not None and float(avg_price) <= 0 and not is_qmt:
                 avg_price = None
             if (
                 avg_price is None
@@ -3395,7 +3398,7 @@ def create_trading_router() -> APIRouter:
             if not is_repo and avg_price is not None and market_value is not None:
                 cost = float(avg_price) * volume
                 pnl = round(float(market_value) - cost, 2)
-                pnl_pct = round(pnl / cost * 100, 2)
+                pnl_pct = round(pnl / cost * 100, 2) if cost > 0 else None
             holdings.append(
                 {
                     "code": pos["code"],

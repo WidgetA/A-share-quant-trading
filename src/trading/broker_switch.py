@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -97,13 +97,22 @@ class BrokerSwitch:
 
     async def get_account(self):
         async with self._lock:
-            return await (await self._client(self.route)).get_account()
+            account = await (await self._client(self.route)).get_account()
+            return self._account_identity(account)
+
+    def _account_identity(self, account):
+        if self.backend == "qmt":
+            linked = self.store.linked_account(self.route)
+            if linked:
+                return replace(account, account_id=linked)
+        return account
 
     async def get_account_and_positions(self):
         async with self._lock:
             client = await self._client(self.route)
             if isinstance(client, QmtHttpClient):
-                return await client.get_account_and_positions()
+                positions, account = await client.get_account_and_positions()
+                return positions, self._account_identity(account)
             return await client.get_positions(), await client.get_account()
 
     async def get_trades(self):

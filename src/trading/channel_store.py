@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -88,6 +90,31 @@ class ChannelStore:
         if row is None:
             raise BrokerError("UNKNOWN_CHANNEL", "找不到订单所属通道的配置")
         return json.loads(row[0])
+
+    def _account_link_key(self, route: str) -> str:
+        spec = self.profile(route)
+        if spec["backend"] != "qmt":
+            raise BrokerError("INVALID_CHANNEL", "账户关联只用于 QMT 通道")
+        identity = canonical({k: spec[k] for k in ("url", "instance_id")})
+        return "account-link:" + hashlib.sha256(identity.encode()).hexdigest()
+
+    def linked_account(self, route: str) -> str | None:
+        value = self.preference(self._account_link_key(route))
+        return json.loads(value)["account_id"] if value else None
+
+    def link_account(self, route: str, account_id: str) -> None:
+        """Record an operator-confirmed same-account association; never infer one."""
+        if not re.fullmatch(r"[0-9]{1,32}", account_id):
+            raise BrokerError("INVALID_ACCOUNT", "资金账号无效")
+        key = self._account_link_key(route)
+        with self.db() as db:
+            previous = db.execute("SELECT value FROM preferences WHERE name=?", (key,)).fetchone()
+            if previous and json.loads(previous[0])["account_id"] != account_id:
+                raise BrokerError("ACCOUNT_ALREADY_LINKED", "通道已关联其他资金账号")
+            db.execute(
+                "INSERT OR IGNORE INTO preferences VALUES (?, ?)",
+                (key, canonical({"account_id": account_id, "confirmed_at": time.time()})),
+            )
 
     def reserve(self, key: str, route: str, kind: str, intent: dict) -> tuple[dict, bool]:
         raw = canonical(intent)

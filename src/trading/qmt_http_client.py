@@ -252,13 +252,23 @@ class QmtHttpClient:
         return snapshot["data"]
 
     def _positions(self, data):
+        def cost(row):
+            raw = row.get("avg_price")
+            if raw is None:
+                return None
+            try:
+                value = Decimal(str(raw))
+                return float(value) if value.is_finite() and abs(value) <= Decimal("1e16") else None
+            except InvalidOperation:
+                return None
+
         return [
             Position(
                 code=p["symbol"],
                 volume=p["quantity"],
                 can_use_volume=p["available"],
                 frozen_volume=None,
-                avg_price=None,
+                avg_price=cost(p),
                 market_value=float(p["market_value"]),
             )
             for p in data["positions"]
