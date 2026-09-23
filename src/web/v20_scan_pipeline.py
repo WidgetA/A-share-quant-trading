@@ -182,6 +182,10 @@ class FrozenV16ScanBundle:
     # projection here.  It is deliberately separate from ``stock_data``:
     # restart hydration omits the full raw/history-heavy stock objects.
     legacy_recommendation: Mapping[str, Any] | None = None
+    # Request-local projection from the fresh canonical minute facts. The
+    # notification evaluation persists these facts in its own entry semantic;
+    # adding an advisory does not change the frozen selection snapshot format.
+    entry_timing_features: Mapping[str, Mapping[str, float]] | None = None
 
 
 class V20ScanPipeline:

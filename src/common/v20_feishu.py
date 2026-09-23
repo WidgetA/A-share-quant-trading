@@ -667,6 +667,18 @@ def _render_data_alert_for_operator(
     """Give runtime alerts a human title and an explicit operator impact."""
 
     code = str(semantic.get("alert_code", "UNKNOWN"))
+    if code == "V22_ENTRY_TIMING_ALERT":
+        symbols = semantic.get("symbols") or []
+        return "\n".join(
+            [
+                "今天可以考虑不在开盘进。",
+                f"适用交易日：{semantic.get('event_trade_date', '-')}",
+                "以下股票可以考虑等待更低价再介入：",
+                *[f"{item['code']} {item['name']}" for item in symbols],
+                "参考：9:40价格下方1%。上午到价，13:30仍到价再考虑，否则继续等到收盘；"
+                "上午未到价，下午13:00后首次到价再考虑。",
+            ]
+        )
     if code == "V22_EXIT_ALERT":
         quantity = semantic.get("quantity")
         amount = f"{quantity} 股（已校准）" if quantity is not None else "数量尚未校准"
@@ -1445,7 +1457,25 @@ def _validate_formatter_semantic(record: OutboxRecord, semantic: Mapping[str, An
         message = semantic.get("message", semantic.get("reason"))
         if not isinstance(message, str) or not message:
             raise ValueError("V20 DATA_ALERT semantic requires a message")
-        if semantic.get("alert_code") == "MANUAL_MONITOR_ARMED":
+        if semantic.get("alert_code") == "V22_ENTRY_TIMING_ALERT":
+            symbols = semantic.get("symbols")
+            if (
+                semantic.get("strategy_version") != "V22-slim"
+                or semantic.get("event_id") != record.event_id
+                or not isinstance(semantic.get("entry_event_id"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", semantic["entry_event_id"])
+                or not isinstance(symbols, list)
+                or not symbols
+                or any(
+                    not isinstance(item, Mapping)
+                    or not isinstance(item.get("code"), str)
+                    or not re.fullmatch(r"\d{6}", item["code"])
+                    or not isinstance(item.get("name"), str)
+                    for item in symbols
+                )
+            ):
+                raise ValueError("V22 entry timing notice requires its entry and matching stocks")
+        elif semantic.get("alert_code") == "MANUAL_MONITOR_ARMED":
             _require_fields(
                 semantic,
                 {

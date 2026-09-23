@@ -25,6 +25,9 @@ jobs:
         run: >-
           uv run pytest -q
           tests/unit/web/test_selection_task_contract.py
+          tests/unit/web/test_v22_entry_timing_task.py
+          tests/unit/strategy/test_v22_entry_timing.py
+          tests/unit/common/test_v22_entry_timing_message.py
           tests/unit/web/test_legacy_position_sync.py
           tests/unit/web/test_v22_canonical_artifact.py
           tests/unit/web/test_v20_mews_guard_service_acceptance.py
