@@ -668,6 +668,39 @@ def _render_data_alert_for_operator(
 
     code = str(semantic.get("alert_code", "UNKNOWN"))
     if code == "V22_ENTRY_TIMING_ALERT":
+        advisory = semantic.get("entry_timing_advisory") or {}
+        status = advisory.get("status", "WAIT")
+        reason = str(advisory.get("reason", ""))
+        if status != "WAIT":
+            if status == "NO_WAIT":
+                headline = "今天不满足延后入场条件。"
+                explanation = {
+                    "ORIGINAL_GATE_BLOCKED": "原策略未放行，今天不新开仓。",
+                    "NO_CANDIDATES": "本次没有可买入股票。",
+                    "NO_ALLOWED_SYMBOLS": "本次没有可买入股票。",
+                    "INDEX_NOT_GREEN": "9:40上证指数没有低于昨收。",
+                    "NO_STOCK_RULE_MATCH": "计划买入股票均未命中等待低价的条件。",
+                }.get(reason, "本次未命中等待低价的条件。")
+            else:
+                headline = "本次入场时点暂时无法判断。"
+                if reason == "STOCK_FEATURES_UNAVAILABLE":
+                    explanation = "个股开盘分钟数据不足或无效。"
+                elif reason == "INDEX_0940_PENDING":
+                    explanation = "9:40的指数数据尚未齐备。"
+                elif reason.startswith("PRIOR_INDEX") or reason == "INDEX_DAILY_SOURCE_ERROR":
+                    explanation = "指数昨收数据不可用。"
+                elif reason.startswith("ORIGINAL_"):
+                    explanation = "原策略所需数据或判断结果不可用。"
+                else:
+                    explanation = "指数分钟数据暂不可用。"
+            return "\n".join(
+                [
+                    headline,
+                    f"适用交易日：{semantic.get('event_trade_date', '-')}",
+                    f"原因：{explanation}",
+                    "具体开仓判断以随后票单为准。",
+                ]
+            )
         symbols = semantic.get("symbols") or []
         return "\n".join(
             [
@@ -1459,13 +1492,21 @@ def _validate_formatter_semantic(record: OutboxRecord, semantic: Mapping[str, An
             raise ValueError("V20 DATA_ALERT semantic requires a message")
         if semantic.get("alert_code") == "V22_ENTRY_TIMING_ALERT":
             symbols = semantic.get("symbols")
+            advisory = semantic.get("entry_timing_advisory")
+            status = (
+                "WAIT"
+                if advisory is None
+                else (advisory.get("status") if isinstance(advisory, Mapping) else None)
+            )
             if (
                 semantic.get("strategy_version") != "V22-slim"
                 or semantic.get("event_id") != record.event_id
                 or not isinstance(semantic.get("entry_event_id"), str)
                 or not re.fullmatch(r"[0-9a-f]{64}", semantic["entry_event_id"])
+                or not isinstance(status, str)
+                or status not in {"WAIT", "NO_WAIT", "UNAVAILABLE"}
                 or not isinstance(symbols, list)
-                or not symbols
+                or (status == "WAIT" and not symbols)
                 or any(
                     not isinstance(item, Mapping)
                     or not isinstance(item.get("code"), str)
@@ -1474,7 +1515,7 @@ def _validate_formatter_semantic(record: OutboxRecord, semantic: Mapping[str, An
                     for item in symbols
                 )
             ):
-                raise ValueError("V22 entry timing notice requires its entry and matching stocks")
+                raise ValueError("V22 entry timing notice requires its entry and valid result")
         elif semantic.get("alert_code") == "MANUAL_MONITOR_ARMED":
             _require_fields(
                 semantic,

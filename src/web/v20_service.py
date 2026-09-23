@@ -8270,38 +8270,61 @@ class V20Service:
     ) -> EntryCommit:
         """Evaluate the notification after selection, without changing its decision."""
         commit = calculation.prepared.commit
-        if self.config.strategy_version != "V22-slim" or commit.semantic.get("action") != "ENTER":
+        if self.config.strategy_version != "V22-slim":
             return commit
-        from src.strategy.v22_slim.entry_timing import evaluate_entry_timing, matches_wait_rule
+        action = str(commit.semantic.get("action") or "")
+        advisory: dict[str, Any]
+        if action != "ENTER":
+            status, reason = {
+                "BLOCK": ("NO_WAIT", "ORIGINAL_GATE_BLOCKED"),
+                "NO_SIGNAL": ("NO_WAIT", "NO_CANDIDATES"),
+                "INPUT_INVALID": ("UNAVAILABLE", "ORIGINAL_INPUT_INVALID"),
+            }.get(action, ("UNAVAILABLE", "ORIGINAL_ACTION_UNAVAILABLE"))
+            advisory = {
+                "schema": "v22-entry-timing/v1",
+                "trade_date": commit.trade_date.isoformat(),
+                "evaluated_at": self._aware_now().isoformat(),
+                "status": status,
+                "reason": reason,
+                "symbols": [],
+                "index": {},
+            }
+        else:
+            from src.strategy.v22_slim.entry_timing import evaluate_entry_timing, matches_wait_rule
 
-        bundle = calculation.bundle
-        features = bundle.entry_timing_features or {}
-        symbols = list(commit.semantic.get("symbols") or [])
-        needs_index = any(
-            matches_wait_rule(features[item["code"]])
-            for item in symbols
-            if item["code"] in features
-        )
-        current = self._aware_now()
-        if needs_index and current.date() == bundle.trade_date:
-            ready_at = _local(bundle.trade_date, time(9, 40))
-            if current < ready_at:
-                await asyncio.sleep((ready_at - current).total_seconds())
-        for attempt in range(3):
-            advisory = await evaluate_entry_timing(
-                self._scan_state.realtime_client,
-                trade_date=bundle.trade_date,
-                prior_trade_date=bundle.prior_trade_date,
-                symbols=symbols,
-                features=features,
-                now=self._aware_now(),
+            bundle = calculation.bundle
+            features = bundle.entry_timing_features or {}
+            symbols = list(commit.semantic.get("symbols") or [])
+            needs_index = any(
+                matches_wait_rule(features[item["code"]])
+                for item in symbols
+                if item["code"] in features
             )
-            if advisory.get("reason") != "INDEX_0940_PENDING" or attempt == 2:
-                break
-            await asyncio.sleep(self.config.market.minute_poll_seconds)
+            current = self._aware_now()
+            if needs_index and current.date() == bundle.trade_date:
+                ready_at = _local(bundle.trade_date, time(9, 40))
+                if current < ready_at:
+                    await asyncio.sleep((ready_at - current).total_seconds())
+            for attempt in range(3):
+                advisory = await evaluate_entry_timing(
+                    self._scan_state.realtime_client,
+                    trade_date=bundle.trade_date,
+                    prior_trade_date=bundle.prior_trade_date,
+                    symbols=symbols,
+                    features=features,
+                    now=self._aware_now(),
+                )
+                if advisory.get("reason") != "INDEX_0940_PENDING" or attempt == 2:
+                    break
+                await asyncio.sleep(self.config.market.minute_poll_seconds)
+        advisory = {
+            **advisory,
+            "original_action": action,
+            "original_reason_codes": list(commit.semantic.get("reason_codes") or []),
+        }
         if advisory.get("status") == "UNAVAILABLE":
             logger.warning(
-                "V22 entry timing unavailable for %s: %s", bundle.trade_date, advisory.get("reason")
+                "V22 entry timing unavailable for %s: %s", commit.trade_date, advisory.get("reason")
             )
         semantic = {**dict(commit.semantic), "entry_timing_advisory": advisory}
         return replace(commit, semantic=semantic, semantic_content_hash=sha256_json(semantic))

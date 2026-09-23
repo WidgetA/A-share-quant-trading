@@ -34,7 +34,9 @@ SAFE_PREFIX = "v20_test_"
 pytestmark = pytest.mark.postgres
 
 
-async def _entry_timing_commit(repository, *, status="WAIT", blocked=False, empty=False):
+async def _entry_timing_commit(
+    repository, *, status="WAIT", blocked=False, empty=False, no_signal=False
+):
     """Real entry engine and persistence, with only advisory market facts supplied."""
     from src.strategy.v20.artifacts import load_g_artifacts
     from src.strategy.v20.decision_engine import prepare_entry
@@ -53,6 +55,9 @@ async def _entry_timing_commit(repository, *, status="WAIT", blocked=False, empt
             "h90": {"known": True, "block": blocked},
         },
     }
+    if no_signal:
+        snapshot["symbols"] = []
+        snapshot["funnel"] = {**snapshot["funnel"], "final_candidates": 0}
     bundle = replace(
         bundle,
         trade_date=today,
@@ -60,6 +65,11 @@ async def _entry_timing_commit(repository, *, status="WAIT", blocked=False, empt
         computation_calendar=calendar,
         snapshot=snapshot,
         snapshot_hash=sha256_json(snapshot),
+        scan_result=(
+            replace(bundle.scan_result, recommended=[], final_candidates=0)
+            if no_signal
+            else bundle.scan_result
+        ),
     )
     prepared = prepare_entry(
         config=config,
@@ -78,7 +88,7 @@ async def _entry_timing_commit(repository, *, status="WAIT", blocked=False, empt
         "schema": "v22-entry-timing/v1",
         "status": status,
         "symbols": []
-        if empty
+        if empty or status != "WAIT"
         else [
             {
                 "code": "600001",
@@ -89,6 +99,16 @@ async def _entry_timing_commit(repository, *, status="WAIT", blocked=False, empt
             }
         ],
         "index": {"code": "000001.SH", "price_0940": 3990.0, "pre_close": 4000.0},
+        "reason": (
+            "FIXED_RULE_MATCHED"
+            if status == "WAIT"
+            else "STOCK_FEATURES_UNAVAILABLE"
+            if status == "UNAVAILABLE"
+            else {
+                "BLOCK": "ORIGINAL_GATE_BLOCKED",
+                "NO_SIGNAL": "NO_CANDIDATES",
+            }.get(prepared.commit.action, "NO_STOCK_RULE_MATCH")
+        ),
     }
     semantic = {**prepared.commit.semantic, "entry_timing_advisory": advisory}
     commit = replace(
@@ -112,9 +132,81 @@ async def _entry_timing_commit(repository, *, status="WAIT", blocked=False, empt
     return config, commit
 
 
+TIMING_SELECTION_CASES = [
+    ("WAIT", "ENTER"),
+    ("NO_WAIT", "ENTER"),
+    ("NO_WAIT", "BLOCK"),
+    ("NO_WAIT", "NO_SIGNAL"),
+    ("UNAVAILABLE", "ENTER"),
+]
+
+
+@pytest.mark.parametrize("status,action", TIMING_SELECTION_CASES)
+@pytest.mark.parametrize("strategy_version", ["V22-slim", "V20"])
+async def test_entry_timing_status_links_before_daily_transaction(
+    monkeypatch, status, action, strategy_version
+):
+    """Local behavioral red check; real PostgreSQL tests below verify the entire pair."""
+    from tests.unit.data.database.test_v20_repository_contract import (
+        _enter,
+        _entry,
+        _FakeConnection,
+        _repository,
+    )
+
+    base = _enter(1.0, 1) if action == "ENTER" and strategy_version == "V20" else _entry(action)
+    semantic = {
+        **base.semantic,
+        "strategy_version": strategy_version,
+        "entry_only": strategy_version == "V22-slim",
+        "final_multiplier": 1.0 if action == "ENTER" else 0.0,
+        "entry_timing_advisory": {
+            "schema": "v22-entry-timing/v1",
+            "status": status,
+            "symbols": [{"code": "600001"}] if status == "WAIT" else [],
+        },
+    }
+    commit = replace(
+        base,
+        strategy_version=strategy_version,
+        semantic=semantic,
+        final_multiplier=semantic["final_multiplier"],
+        semantic_content_hash=sha256_json(semantic),
+    )
+    connection = _FakeConnection(
+        fetchrows=[
+            {"revision": 0, "state_hash": commit.expected_state_hash},
+            None,
+            {
+                "config_hash": commit.config_hash,
+                "strategy_version": commit.strategy_version,
+                "effective_trade_date": commit.trade_date,
+            },
+            None,
+        ]
+    )
+    instance = _repository(connection)
+
+    class DailyTransactionReached(Exception):
+        pass
+
+    async def capture_daily_commit(_connection, actual):
+        assert bool(actual.semantic.get("entry_timing_alert_event_id")) == (
+            strategy_version == "V22-slim"
+        ), "every supported V22 timing result must link its separate notice; V20 is unchanged"
+        assert actual.semantic_content_hash == sha256_json(actual.semantic)
+        assert actual.action == action and actual.final_multiplier == commit.final_multiplier
+        raise DailyTransactionReached
+
+    monkeypatch.setattr(instance, "_commit_entry_transaction", capture_daily_commit)
+    with pytest.raises(DailyTransactionReached):
+        await instance.commit_selection_run(commit, run_id="c" * 64)
+
+
 @pytest.mark.parametrize("lost_response", [None, "alert", "entry"])
+@pytest.mark.parametrize("status,action", TIMING_SELECTION_CASES)
 async def test_entry_timing_pair_preserves_order_receipts_and_unknown_delivery(
-    repository, monkeypatch, lost_response
+    repository, monkeypatch, lost_response, status, action
 ):
     from types import SimpleNamespace
 
@@ -129,7 +221,10 @@ async def test_entry_timing_pair_preserves_order_receipts_and_unknown_delivery(
     )
 
     instance, pool, schema = repository
-    config, commit = await _entry_timing_commit(repository)
+    config, commit = await _entry_timing_commit(
+        repository, status=status, blocked=action == "BLOCK", no_signal=action == "NO_SIGNAL"
+    )
+    assert commit.action == action
     run_id = "e" * 64
     entry_id = await instance.commit_selection_run(commit, run_id=run_id)
     scope = dict(
@@ -139,7 +234,7 @@ async def test_entry_timing_pair_preserves_order_receipts_and_unknown_delivery(
     )
     entry = await instance.seal_event(entry_id, seal_v20_payload)
     alert_id = entry.semantic.get("entry_timing_alert_event_id")
-    assert alert_id, "a matched run must durably link its separate pre-entry notice"
+    assert alert_id, "every supported timing result must durably link its separate notice"
     assert await pool.fetchval(f"SELECT count(*) FROM {schema}.outbox_events") == 2
     assert _render_entry_strategy_body(entry.semantic) == _render_entry_strategy_body(
         commit.semantic
@@ -147,7 +242,9 @@ async def test_entry_timing_pair_preserves_order_receipts_and_unknown_delivery(
     assert entry.semantic["symbols"] == commit.semantic["symbols"]
     assert await instance.commit_selection_run(commit, run_id=run_id) == entry_id
     assert (await instance.load_state(config.state_lineage_id)).revision == 1
-    assert await pool.fetchval(f"SELECT count(*) FROM {schema}.v22_alert_positions") == 3
+    assert await pool.fetchval(f"SELECT count(*) FROM {schema}.v22_alert_positions") == (
+        3 if action == "ENTER" else 0
+    )
     posts = []
 
     def reply(request):
@@ -180,11 +277,22 @@ async def test_entry_timing_pair_preserves_order_receipts_and_unknown_delivery(
     assert await publisher("before-alert-seal").publish_once() == 0
     alert = await instance.seal_event(alert_id, seal_v20_payload)
     assert alert.semantic["entry_event_id"] == entry_id
-    assert alert.payload["message"].startswith("今天可以考虑不在开盘进。")
-    assert await publisher("notice-worker").publish_once() == (0 if lost_response == "alert" else 1)
-    assert len(posts) == 1 and "今天可以考虑不在开盘进。" in json.dumps(
-        posts[0], ensure_ascii=False
+    first_line = alert.payload["message"].splitlines()[0]
+    assert alert.semantic["entry_timing_advisory"]["status"] == status
+    assert (
+        first_line
+        == {
+            "WAIT": "今天可以考虑不在开盘进。",
+            "NO_WAIT": "今天不满足延后入场条件。",
+            "UNAVAILABLE": "本次入场时点暂时无法判断。",
+        }[status]
     )
+    if action == "BLOCK":
+        assert "原策略未放行，今天不新开仓。" in alert.payload["message"]
+    elif action == "NO_SIGNAL":
+        assert "本次没有可买入股票。" in alert.payload["message"]
+    assert await publisher("notice-worker").publish_once() == (0 if lost_response == "alert" else 1)
+    assert len(posts) == 1 and first_line in json.dumps(posts[0], ensure_ascii=False)
     if lost_response != "alert":
         # A same-ID notice under any other scope cannot unlock this stock list.
         for field in ("route_id", "official_stream_id", "lineage_id"):
@@ -224,11 +332,17 @@ async def test_entry_timing_pair_preserves_order_receipts_and_unknown_delivery(
     ) == len(posts)
 
 
-async def test_entry_timing_pair_rolls_back_and_new_run_gets_distinct_pair(repository):
+@pytest.mark.parametrize("status,action", TIMING_SELECTION_CASES)
+async def test_entry_timing_pair_rolls_back_and_new_run_gets_distinct_pair(
+    repository, status, action
+):
     from src.common.v20_feishu import seal_v20_payload
 
     instance, pool, schema = repository
-    config, commit = await _entry_timing_commit(repository)
+    config, commit = await _entry_timing_commit(
+        repository, status=status, blocked=action == "BLOCK", no_signal=action == "NO_SIGNAL"
+    )
+    assert commit.action == action
     await pool.execute(
         f"ALTER TABLE {schema}.outbox_events ADD CONSTRAINT reject_timing_test "
         "CHECK (event_type <> 'DATA_ALERT')"
@@ -253,7 +367,9 @@ async def test_entry_timing_pair_rolls_back_and_new_run_gets_distinct_pair(repos
     assert alerts[0] != alerts[1]
     assert await pool.fetchval(f"SELECT count(*) FROM {schema}.outbox_events") == 4
     assert await pool.fetchval(f"SELECT count(*) FROM {schema}.selection_runs") == 2
-    assert await pool.fetchval(f"SELECT count(*) FROM {schema}.v22_alert_positions") == 3
+    assert await pool.fetchval(f"SELECT count(*) FROM {schema}.v22_alert_positions") == (
+        3 if action == "ENTER" else 0
+    )
     assert (await instance.load_state(config.state_lineage_id)).revision == 1
 
 
@@ -262,7 +378,6 @@ async def test_entry_timing_pair_rolls_back_and_new_run_gets_distinct_pair(repos
     [
         ("SKIP", False, False),
         ("UNKNOWN", False, False),
-        ("WAIT", True, False),
         ("WAIT", False, True),
     ],
 )
@@ -697,19 +812,40 @@ async def test_v22_slim_real_entry_commit_seal_and_delivery_without_exit_lots(
     assert len(status.semantic["reference_symbols"]) == 10
     assert await pool.fetchval(f"SELECT count(*) FROM {schema}.model_legs") == 0
     assert await pool.fetchval(f"SELECT count(*) FROM {schema}.shadow_batches") == 1
-    assert await pool.fetchval(f"SELECT count(*) FROM {schema}.outbox_events") == 2
+    assert await pool.fetchval(f"SELECT count(*) FROM {schema}.outbox_events") == 4
     assert await pool.fetchval(f"SELECT count(*) FROM {schema}.selection_runs") == 2
     sealed = await instance.seal_event(commit.event_id, seal_v20_payload)
     assert "V22-slim" in sealed.payload["message"]
     repeated = await instance.seal_event(second_event, seal_v20_payload)
     assert repeated.event_type == sealed.event_type == "ENTRY_DECISION"
-    assert {**repeated.semantic, "event_id": first_event} == sealed.semantic
+    first_notice_id = sealed.semantic["entry_timing_alert_event_id"]
+    second_notice_id = repeated.semantic["entry_timing_alert_event_id"]
+    assert first_notice_id != second_notice_id
+    assert {
+        **repeated.semantic,
+        "event_id": first_event,
+        "entry_timing_alert_event_id": first_notice_id,
+    } == sealed.semantic
+    notices = []
+    for notice_id, entry_id in ((first_notice_id, first_event), (second_notice_id, second_event)):
+        notice = await instance.seal_event(notice_id, seal_v20_payload)
+        assert notice.event_type == "DATA_ALERT"
+        assert notice.semantic["entry_event_id"] == entry_id
+        assert notice.semantic["entry_timing_advisory"]["status"] == (
+            "NO_WAIT" if blocked else "UNAVAILABLE"
+        )
+        assert notice.payload["message"].startswith(
+            "今天不满足延后入场条件。" if blocked else "本次入场时点暂时无法判断。"
+        )
+        notices.append(notice)
+    assert all(result["entry_timing_alert_event_id"] == second_notice_id for result in results)
     assert "仅核查" not in repeated.payload["message"]
     posts = []
 
     def reply(request):
-        posts.append(json.loads(request.content))
-        if lose_rerun_response and len(posts) == 2:
+        payload = json.loads(request.content)
+        posts.append(payload)
+        if lose_rerun_response and payload["message"] == repeated.payload["message"]:
             raise httpx.ReadTimeout(
                 "relay accepted the rerun but its reply was lost", request=request
             )
@@ -738,10 +874,44 @@ async def test_v22_slim_real_entry_commit_seal_and_delivery_without_exit_lots(
         official_stream_id=config.official_stream_id,
         lineage_id=config.state_lineage_id,
     )
-    assert await publisher.publish_once() == 1
-    assert await publisher.publish_once() == (0 if lose_rerun_response else 1)
+    expected_messages = [
+        notices[0].payload["message"],
+        sealed.payload["message"],
+        notices[1].payload["message"],
+        repeated.payload["message"],
+    ]
+    for ordinal, message in enumerate(expected_messages, start=1):
+        assert await publisher.publish_once() == (0 if lose_rerun_response and ordinal == 4 else 1)
+        assert len(posts) == ordinal and posts[-1]["message"] == message
     assert await publisher.publish_once() == 0
-    assert len(posts) == 2
+    assert len(posts) == 4
+    for notice_id, entry_id in ((first_notice_id, first_event), (second_notice_id, second_event)):
+        notice_delivery = await instance.get_outbox_event(
+            notice_id,
+            route_id=config.route_id,
+            official_stream_id=config.official_stream_id,
+            lineage_id=config.state_lineage_id,
+        )
+        assert notice_delivery.delivery_status == "SENT" and notice_delivery.attempt_count == 1
+        assert (
+            await pool.fetchval(
+                f"SELECT count(*) FROM {schema}.delivery_attempts WHERE event_id=$1 AND succeeded",
+                notice_id,
+            )
+            == 1
+        )
+        entry_attempt = await pool.fetchrow(
+            f"SELECT attempt.attempted_at,attempt.succeeded,attempt.phase,notice.delivered_at "
+            f"FROM {schema}.delivery_attempts AS attempt "
+            f"JOIN {schema}.outbox_events AS notice ON notice.event_id=$2 "
+            "WHERE attempt.event_id=$1",
+            entry_id,
+            notice_id,
+        )
+        assert entry_attempt["attempted_at"] >= entry_attempt["delivered_at"]
+        unknown = lose_rerun_response and entry_id == second_event
+        assert entry_attempt["succeeded"] is (None if unknown else True)
+        assert entry_attempt["phase"] == ("UNKNOWN" if unknown else "DELIVERED")
     delivered = await instance.get_outbox_event(
         commit.event_id,
         route_id=config.route_id,
@@ -806,6 +976,7 @@ async def test_v22_slim_real_entry_commit_seal_and_delivery_without_exit_lots(
         "DELIVERY_UNKNOWN" if lose_rerun_response else "SENT"
     )
     delivered_result = await _dispatch_manual_trigger(service, "postgres-button-rerun-001")
+    assert delivered_result["entry_timing_alert_delivery_status"] == "SENT"
     assert delivered_result["task_success"] is (not lose_rerun_response)
     assert delivered_result["feishu_delivery_confirmed"] is (not lose_rerun_response)
     # A restarted publisher must not resend a delivered or uncertain attempt.
@@ -819,7 +990,7 @@ async def test_v22_slim_real_entry_commit_seal_and_delivery_without_exit_lots(
             lineage_id=config.state_lineage_id,
         )
         assert await restarted.publish_once() == 0
-    assert calculations == [today, today] and len(posts) == (2 if blocked else 3)
+    assert calculations == [today, today] and len(posts) == (4 if blocked else 5)
     assert (await instance.load_state(config.state_lineage_id)).revision == 1
 
 

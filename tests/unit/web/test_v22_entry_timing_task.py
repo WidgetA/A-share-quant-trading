@@ -19,10 +19,12 @@ NOW = datetime(2026, 9, 23, 9, 41, tzinfo=TZ)
 class _Commit:
     semantic: dict
     semantic_content_hash: str
+    trade_date: date = NOW.date()
 
 
 def _task():
     service = object.__new__(V20Service)
+    service._clock = lambda: NOW
     service.config = SimpleNamespace(
         official_stream_id="stream",
         state_lineage_id="lineage",
@@ -89,18 +91,122 @@ async def test_same_request_retry_does_not_recompute_advisory_but_recovers_seali
     assert [c.args[0] for c in service._repository.seal_event.await_args_list] == ["entry", "alert"]
 
 
-@pytest.mark.parametrize("action", ["BLOCK", "NO_SIGNAL", "INPUT_INVALID"])
-async def test_unallowed_selection_never_fetches_timing_data(action):
+@pytest.mark.parametrize(
+    "action,status,reason",
+    [
+        ("BLOCK", "NO_WAIT", "ORIGINAL_GATE_BLOCKED"),
+        ("NO_SIGNAL", "NO_WAIT", "NO_CANDIDATES"),
+        ("INPUT_INVALID", "UNAVAILABLE", "ORIGINAL_INPUT_INVALID"),
+    ],
+)
+async def test_unallowed_selection_reports_status_without_fetching_timing_data(
+    action, status, reason, monkeypatch
+):
+    import src.strategy.v22_slim.entry_timing as timing
+
     service, _ = _task()
-    semantic = {"strategy_version": "V22-slim", "action": action}
+    semantic = {
+        "strategy_version": "V22-slim",
+        "action": action,
+        "reason_codes": ["ORIGINAL_REASON"],
+        "symbols": [],
+        "final_multiplier": 0,
+    }
     commit = _Commit(semantic, sha256_json(semantic))
     calculation = SimpleNamespace(prepared=SimpleNamespace(commit=commit))
     # No client or bundle is needed when the original rule does not allow entry.
+    evaluator = AsyncMock()
+    monkeypatch.setattr(timing, "evaluate_entry_timing", evaluator)
+    actual = await V20Service._prepare_entry_timing_commit(service, calculation)
+    advisory = actual.semantic.get("entry_timing_advisory")
+    assert advisory is not None
+    assert advisory["schema"] == "v22-entry-timing/v1"
+    assert advisory["status"] == status
+    assert advisory["reason"] == reason
+    assert advisory["original_action"] == action
+    assert advisory["original_reason_codes"] == semantic["reason_codes"]
+    assert advisory["trade_date"] == "2026-09-23"
+    assert advisory["evaluated_at"] == NOW.isoformat()
+    assert advisory["symbols"] == []
+    assert advisory["index"] == {}
+    assert {
+        key: value for key, value in actual.semantic.items() if key != "entry_timing_advisory"
+    } == semantic
+    assert actual.semantic_content_hash == sha256_json(actual.semantic)
+    evaluator.assert_not_awaited()
+
+
+@pytest.mark.parametrize("trigger", ["timer", "button"])
+@pytest.mark.parametrize(
+    "action,reason", [("BLOCK", "ORIGINAL_GATE_BLOCKED"), ("NO_SIGNAL", "NO_CANDIDATES")]
+)
+async def test_complete_task_persists_nonmatching_status_for_both_triggers(trigger, action, reason):
+    service, context = _task()
+    del service._prepare_entry_timing_commit
+    calculation = service._orchestrate_morning_selection.return_value
+    semantic = {
+        "strategy_version": "V22-slim",
+        "action": action,
+        "reason_codes": ["ORIGINAL_REASON"],
+        "symbols": [],
+    }
+    calculation.prepared.commit = _Commit(semantic, sha256_json(semantic))
+    if trigger == "timer":
+        await service._commit_entry_from_bundle(context, NOW)
+    else:
+        await service._execute_selection_task(context, NOW, request_id="button-new")
+    committed = service._repository.commit_selection_run.await_args.args[0]
+    advisory = committed.semantic.get("entry_timing_advisory")
+    assert advisory is not None
+    assert advisory["status"] == "NO_WAIT"
+    assert advisory["reason"] == reason
+    assert committed.semantic["action"] == action
+    assert committed.semantic["reason_codes"] == ["ORIGINAL_REASON"]
+    assert committed.semantic_content_hash == sha256_json(committed.semantic)
+    assert [c.args[0] for c in service._repository.seal_event.await_args_list] == ["entry", "alert"]
+
+
+@pytest.mark.parametrize("action", ["ENTER", "BLOCK", "NO_SIGNAL", "INPUT_INVALID"])
+async def test_v20_selection_keeps_original_commit_without_advisory(action):
+    service, _ = _task()
+    service.config.strategy_version = "V20"
+    semantic = {"strategy_version": "V20", "action": action}
+    commit = _Commit(semantic, sha256_json(semantic))
+    calculation = SimpleNamespace(prepared=SimpleNamespace(commit=commit))
     actual = await V20Service._prepare_entry_timing_commit(service, calculation)
     assert actual is commit
 
 
-async def test_advisory_preserves_decision_and_uses_current_request_features(monkeypatch):
+@pytest.mark.parametrize("trigger", ["timer", "button"])
+async def test_missing_current_data_still_does_not_create_tickets_or_advisory(trigger):
+    from src.web.v20_service import _NoCurrentSelectionData
+
+    service, context = _task()
+    service._orchestrate_morning_selection.side_effect = _NoCurrentSelectionData(
+        "empty current data"
+    )
+    if trigger == "timer":
+        await service._commit_entry_from_bundle(context, NOW)
+    else:
+        result = await service._execute_selection_task(context, NOW, request_id="button-new")
+        assert result == (None, False)
+    service._prepare_entry_timing_commit.assert_not_awaited()
+    service._repository.commit_selection_run.assert_not_awaited()
+    service._repository.seal_event.assert_not_awaited()
+    assert context.last_phase == "NO_CURRENT_DATA"
+
+
+@pytest.mark.parametrize(
+    "status,reason",
+    [
+        ("WAIT", "FIXED_RULE_MATCHED"),
+        ("NO_WAIT", "INDEX_NOT_GREEN"),
+        ("UNAVAILABLE", "STOCK_FEATURES_UNAVAILABLE"),
+    ],
+)
+async def test_advisory_preserves_decision_and_uses_current_request_features(
+    status, reason, monkeypatch
+):
     import src.strategy.v22_slim.entry_timing as timing
 
     service, _ = _task()
@@ -122,8 +228,8 @@ async def test_advisory_preserves_decision_and_uses_current_request_features(mon
     evaluator = AsyncMock(
         return_value={
             "schema": "v22-entry-timing/v1",
-            "status": "WAIT",
-            "reason": "FIXED_RULE_MATCHED",
+            "status": status,
+            "reason": reason,
         }
     )
     monkeypatch.setattr(timing, "evaluate_entry_timing", evaluator)
@@ -132,6 +238,11 @@ async def test_advisory_preserves_decision_and_uses_current_request_features(mon
         key: value for key, value in actual.semantic.items() if key != "entry_timing_advisory"
     } == calculation.prepared.commit.semantic
     assert actual.semantic_content_hash == sha256_json(actual.semantic)
+    advisory = actual.semantic["entry_timing_advisory"]
+    assert advisory["status"] == status
+    assert advisory["reason"] == reason
+    assert advisory["original_action"] == "ENTER"
+    assert advisory["original_reason_codes"] == []
     assert evaluator.await_args.kwargs["features"] is features
     assert evaluator.await_args.kwargs["now"] == NOW
 
