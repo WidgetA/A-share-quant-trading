@@ -812,19 +812,40 @@ async def test_v22_slim_real_entry_commit_seal_and_delivery_without_exit_lots(
     assert len(status.semantic["reference_symbols"]) == 10
     assert await pool.fetchval(f"SELECT count(*) FROM {schema}.model_legs") == 0
     assert await pool.fetchval(f"SELECT count(*) FROM {schema}.shadow_batches") == 1
-    assert await pool.fetchval(f"SELECT count(*) FROM {schema}.outbox_events") == 2
+    assert await pool.fetchval(f"SELECT count(*) FROM {schema}.outbox_events") == 4
     assert await pool.fetchval(f"SELECT count(*) FROM {schema}.selection_runs") == 2
     sealed = await instance.seal_event(commit.event_id, seal_v20_payload)
     assert "V22-slim" in sealed.payload["message"]
     repeated = await instance.seal_event(second_event, seal_v20_payload)
     assert repeated.event_type == sealed.event_type == "ENTRY_DECISION"
-    assert {**repeated.semantic, "event_id": first_event} == sealed.semantic
+    first_notice_id = sealed.semantic["entry_timing_alert_event_id"]
+    second_notice_id = repeated.semantic["entry_timing_alert_event_id"]
+    assert first_notice_id != second_notice_id
+    assert {
+        **repeated.semantic,
+        "event_id": first_event,
+        "entry_timing_alert_event_id": first_notice_id,
+    } == sealed.semantic
+    notices = []
+    for notice_id, entry_id in ((first_notice_id, first_event), (second_notice_id, second_event)):
+        notice = await instance.seal_event(notice_id, seal_v20_payload)
+        assert notice.event_type == "DATA_ALERT"
+        assert notice.semantic["entry_event_id"] == entry_id
+        assert notice.semantic["entry_timing_advisory"]["status"] == (
+            "NO_WAIT" if blocked else "UNAVAILABLE"
+        )
+        assert notice.payload["message"].startswith(
+            "今天不满足延后入场条件。" if blocked else "本次入场时点暂时无法判断。"
+        )
+        notices.append(notice)
+    assert all(result["entry_timing_alert_event_id"] == second_notice_id for result in results)
     assert "仅核查" not in repeated.payload["message"]
     posts = []
 
     def reply(request):
-        posts.append(json.loads(request.content))
-        if lose_rerun_response and len(posts) == 2:
+        payload = json.loads(request.content)
+        posts.append(payload)
+        if lose_rerun_response and payload["message"] == repeated.payload["message"]:
             raise httpx.ReadTimeout(
                 "relay accepted the rerun but its reply was lost", request=request
             )
@@ -853,10 +874,42 @@ async def test_v22_slim_real_entry_commit_seal_and_delivery_without_exit_lots(
         official_stream_id=config.official_stream_id,
         lineage_id=config.state_lineage_id,
     )
-    assert await publisher.publish_once() == 1
-    assert await publisher.publish_once() == (0 if lose_rerun_response else 1)
+    expected_messages = [
+        notices[0].payload["message"],
+        sealed.payload["message"],
+        notices[1].payload["message"],
+        repeated.payload["message"],
+    ]
+    for ordinal, message in enumerate(expected_messages, start=1):
+        assert await publisher.publish_once() == (0 if lose_rerun_response and ordinal == 4 else 1)
+        assert len(posts) == ordinal and posts[-1]["message"] == message
     assert await publisher.publish_once() == 0
-    assert len(posts) == 2
+    assert len(posts) == 4
+    for notice_id, entry_id in ((first_notice_id, first_event), (second_notice_id, second_event)):
+        notice_delivery = await instance.get_outbox_event(
+            notice_id,
+            route_id=config.route_id,
+            official_stream_id=config.official_stream_id,
+            lineage_id=config.state_lineage_id,
+        )
+        assert notice_delivery.delivery_status == "SENT" and notice_delivery.attempt_count == 1
+        assert (
+            await pool.fetchval(
+                f"SELECT count(*) FROM {schema}.delivery_attempts WHERE event_id=$1 AND succeeded",
+                notice_id,
+            )
+            == 1
+        )
+        entry_attempt = await pool.fetchrow(
+            f"SELECT attempt.attempted_at,attempt.succeeded,notice.delivered_at "
+            f"FROM {schema}.delivery_attempts AS attempt "
+            f"JOIN {schema}.outbox_events AS notice ON notice.event_id=$2 "
+            "WHERE attempt.event_id=$1",
+            entry_id,
+            notice_id,
+        )
+        assert entry_attempt["attempted_at"] >= entry_attempt["delivered_at"]
+        assert entry_attempt["succeeded"] is (not lose_rerun_response or entry_id == first_event)
     delivered = await instance.get_outbox_event(
         commit.event_id,
         route_id=config.route_id,
@@ -921,6 +974,7 @@ async def test_v22_slim_real_entry_commit_seal_and_delivery_without_exit_lots(
         "DELIVERY_UNKNOWN" if lose_rerun_response else "SENT"
     )
     delivered_result = await _dispatch_manual_trigger(service, "postgres-button-rerun-001")
+    assert delivered_result["entry_timing_alert_delivery_status"] == "SENT"
     assert delivered_result["task_success"] is (not lose_rerun_response)
     assert delivered_result["feishu_delivery_confirmed"] is (not lose_rerun_response)
     # A restarted publisher must not resend a delivered or uncertain attempt.
@@ -934,7 +988,7 @@ async def test_v22_slim_real_entry_commit_seal_and_delivery_without_exit_lots(
             lineage_id=config.state_lineage_id,
         )
         assert await restarted.publish_once() == 0
-    assert calculations == [today, today] and len(posts) == (2 if blocked else 3)
+    assert calculations == [today, today] and len(posts) == (4 if blocked else 5)
     assert (await instance.load_state(config.state_lineage_id)).revision == 1
 
 
