@@ -3382,13 +3382,11 @@ class V20Repository:
         advisory = commit.semantic.get("entry_timing_advisory")
         timing_notice = (
             commit.strategy_version == "V22-slim"
-            and commit.action == "ENTER"
-            and commit.final_multiplier > 0
             and isinstance(advisory, Mapping)
             and advisory.get("schema") == "v22-entry-timing/v1"
-            and advisory.get("status") == "WAIT"
+            and advisory.get("status") in ("WAIT", "NO_WAIT", "UNAVAILABLE")
             and isinstance(advisory.get("symbols"), list)
-            and bool(advisory["symbols"])
+            and (advisory["status"] != "WAIT" or bool(advisory["symbols"]))
         )
         alert_id = sha256_json(["V22_ENTRY_TIMING_ALERT_V1", run_id]) if timing_notice else None
         if alert_id is not None:
@@ -3506,7 +3504,11 @@ class V20Repository:
                         "entry_event_id": event_id,
                         "alert_code": "V22_ENTRY_TIMING_ALERT",
                         "event_trade_date": commit.trade_date.isoformat(),
-                        "message": "今天可以考虑不在开盘进。",
+                        "message": (
+                            "今天可以考虑不在开盘进。"
+                            if advisory["status"] == "WAIT"
+                            else "入场时点判断"
+                        ),
                         "symbols": advisory["symbols"],
                         "entry_timing_advisory": dict(advisory),
                     }
