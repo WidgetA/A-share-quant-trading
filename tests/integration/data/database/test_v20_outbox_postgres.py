@@ -34,6 +34,253 @@ SAFE_PREFIX = "v20_test_"
 pytestmark = pytest.mark.postgres
 
 
+async def _entry_timing_commit(repository, *, status="WAIT", blocked=False, empty=False):
+    """Real entry engine and persistence, with only advisory market facts supplied."""
+    from src.strategy.v20.artifacts import load_g_artifacts
+    from src.strategy.v20.decision_engine import prepare_entry
+    from tests.unit.strategy.test_v22_slim_entry import fixture
+
+    instance, pool, _schema_name = repository
+    config, state, bundle = fixture()
+    now = (await pool.fetchval("SELECT clock_timestamp()")).astimezone(ZoneInfo("Asia/Shanghai"))
+    today = now.date()
+    calendar = tuple(today + timedelta(days=i) for i in range(3))
+    snapshot = {
+        **bundle.snapshot,
+        "trade_date": today.isoformat(),
+        "v22_slim_inputs": {
+            **bundle.snapshot["v22_slim_inputs"],
+            "h90": {"known": True, "block": blocked},
+        },
+    }
+    bundle = replace(
+        bundle,
+        trade_date=today,
+        frozen_at=now,
+        computation_calendar=calendar,
+        snapshot=snapshot,
+        snapshot_hash=sha256_json(snapshot),
+    )
+    prepared = prepare_entry(
+        config=config,
+        state=state,
+        bundle=bundle,
+        completed_health=[],
+        completed_rolling=[],
+        maturity_gaps=[],
+        calendar=calendar,
+        artifacts=load_g_artifacts(
+            config.artifact_manifest_path.parent,
+            expected_manifest_sha256=config.artifact_manifest_sha256,
+        ),
+    )
+    advisory = {
+        "schema": "v22-entry-timing/v1",
+        "status": status,
+        "symbols": []
+        if empty
+        else [
+            {
+                "code": "600001",
+                "name": "Stock 1",
+                "max_short_drop": 0.02,
+                "early_amount": 100_000_000.0,
+                "late_amount_share": 0.2,
+            }
+        ],
+        "index": {"code": "000001.SH", "price_0940": 3990.0, "pre_close": 4000.0},
+    }
+    semantic = {**prepared.commit.semantic, "entry_timing_advisory": advisory}
+    commit = replace(
+        prepared.commit, semantic=semantic, semantic_content_hash=sha256_json(semantic)
+    )
+    await instance.register_config(
+        config_id=commit.config_id,
+        config_hash=commit.config_hash,
+        strategy_version=commit.strategy_version,
+        deployment_mode=config.deployment_mode,
+        effective_trade_date=today,
+        payload=config.frozen_payload,
+    )
+    await pool.execute(
+        f"INSERT INTO {_schema_name}.official_state (lineage_id,revision,state_hash,state_json) "
+        "VALUES ($1,0,$2,$3::jsonb)",
+        state.lineage_id,
+        state.state_hash,
+        json.dumps(state.payload),
+    )
+    return config, commit
+
+
+@pytest.mark.parametrize("lost_response", [None, "alert", "entry"])
+async def test_entry_timing_pair_preserves_order_receipts_and_unknown_delivery(
+    repository, monkeypatch, lost_response
+):
+    from types import SimpleNamespace
+
+    import httpx
+
+    from src.common import feishu_bot
+    from src.common.v20_feishu import (
+        V20FeishuRoute,
+        V20OutboxPublisher,
+        _render_entry_strategy_body,
+        seal_v20_payload,
+    )
+
+    instance, pool, schema = repository
+    config, commit = await _entry_timing_commit(repository)
+    run_id = "e" * 64
+    entry_id = await instance.commit_selection_run(commit, run_id=run_id)
+    scope = dict(
+        route_id=config.route_id,
+        official_stream_id=config.official_stream_id,
+        lineage_id=config.state_lineage_id,
+    )
+    entry = await instance.seal_event(entry_id, seal_v20_payload)
+    alert_id = entry.semantic.get("entry_timing_alert_event_id")
+    assert alert_id, "a matched run must durably link its separate pre-entry notice"
+    assert await pool.fetchval(f"SELECT count(*) FROM {schema}.outbox_events") == 2
+    assert _render_entry_strategy_body(entry.semantic) == _render_entry_strategy_body(
+        commit.semantic
+    )
+    assert entry.semantic["symbols"] == commit.semantic["symbols"]
+    assert await instance.commit_selection_run(commit, run_id=run_id) == entry_id
+    assert (await instance.load_state(config.state_lineage_id)).revision == 1
+    assert await pool.fetchval(f"SELECT count(*) FROM {schema}.v22_alert_positions") == 3
+    posts = []
+
+    def reply(request):
+        posts.append(json.loads(request.content))
+        ordinal = 1 if lost_response == "alert" else 2 if lost_response == "entry" else -1
+        if len(posts) == ordinal:
+            raise httpx.ReadTimeout("accepted, response lost", request=request)
+        return httpx.Response(200, json={"code": 0, "msg": "success"})
+
+    original_client = httpx.AsyncClient
+
+    class Client(original_client):
+        def __init__(self, **kwargs):
+            super().__init__(**{**kwargs, "transport": httpx.MockTransport(reply)})
+
+    monkeypatch.setattr(feishu_bot, "httpx", SimpleNamespace(AsyncClient=Client))
+    route = V20FeishuRoute(
+        route_id=config.route_id,
+        bot_url="https://relay.test",
+        app_id="test-app",
+        app_secret="test-secret",
+        chat_id="test-chat",
+        transport="legacy_send",
+    )
+
+    def publisher(worker):
+        return V20OutboxPublisher(instance, {config.route_id: route}, worker_id=worker, **scope)
+
+    # Entry sealing may finish first or recover first after a crash. It must wait.
+    assert await publisher("before-alert-seal").publish_once() == 0
+    alert = await instance.seal_event(alert_id, seal_v20_payload)
+    assert alert.semantic["entry_event_id"] == entry_id
+    assert alert.payload["message"].startswith("今天可以考虑不在开盘进。")
+    assert await publisher("notice-worker").publish_once() == (0 if lost_response == "alert" else 1)
+    assert len(posts) == 1 and "今天可以考虑不在开盘进。" in json.dumps(
+        posts[0], ensure_ascii=False
+    )
+    if lost_response != "alert":
+        # A same-ID notice under any other scope cannot unlock this stock list.
+        for field in ("route_id", "official_stream_id", "lineage_id"):
+            original = scope[field]
+            await pool.execute(
+                f"UPDATE {schema}.outbox_events SET {field}=$1 WHERE event_id=$2",
+                "different-" + original,
+                alert_id,
+            )
+            assert await publisher("wrong-scope").publish_once() == 0
+            await pool.execute(
+                f"UPDATE {schema}.outbox_events SET {field}=$1 WHERE event_id=$2",
+                original,
+                alert_id,
+            )
+        assert await publisher("stock-worker").publish_once() == (
+            0 if lost_response == "entry" else 1
+        )
+        assert len(posts) == 2
+        assert "今天可以考虑不在开盘进。" not in json.dumps(posts[1], ensure_ascii=False)
+    for worker in ("retry-1", "restart-2", "restart-3"):
+        assert await publisher(worker).publish_once() == 0
+    warning = await instance.get_outbox_event(alert_id, **scope)
+    stock = await instance.get_outbox_event(entry_id, **scope)
+    assert warning.delivery_status == ("DELIVERY_UNKNOWN" if lost_response == "alert" else "SENT")
+    assert stock.delivery_status == (
+        "PENDING"
+        if lost_response == "alert"
+        else "DELIVERY_UNKNOWN"
+        if lost_response == "entry"
+        else "SENT"
+    )
+    assert warning.attempt_count == 1
+    assert stock.attempt_count == (0 if lost_response == "alert" else 1)
+    assert await pool.fetchval(
+        f"SELECT count(DISTINCT event_id) FROM {schema}.delivery_attempts"
+    ) == len(posts)
+
+
+async def test_entry_timing_pair_rolls_back_and_new_run_gets_distinct_pair(repository):
+    from src.common.v20_feishu import seal_v20_payload
+
+    instance, pool, schema = repository
+    config, commit = await _entry_timing_commit(repository)
+    await pool.execute(
+        f"ALTER TABLE {schema}.outbox_events ADD CONSTRAINT reject_timing_test "
+        "CHECK (event_type <> 'DATA_ALERT')"
+    )
+    with pytest.raises(asyncpg.CheckViolationError):
+        await instance.commit_selection_run(commit, run_id="a" * 64)
+    for table in ("entry_decisions", "outbox_events", "selection_runs", "v22_alert_positions"):
+        assert await pool.fetchval(f"SELECT count(*) FROM {schema}.{table}") == 0
+    assert (await instance.load_state(config.state_lineage_id)).revision == 0
+    await pool.execute(f"ALTER TABLE {schema}.outbox_events DROP CONSTRAINT reject_timing_test")
+    first = await instance.commit_selection_run(commit, run_id="a" * 64)
+    assert await instance.commit_selection_run(commit, run_id="a" * 64) == first
+    second = await instance.commit_selection_run(commit, run_id="b" * 64)
+    assert second != first
+    alerts = []
+    for entry_id in (first, second):
+        entry = await instance.seal_event(entry_id, seal_v20_payload)
+        alert_id = entry.semantic["entry_timing_alert_event_id"]
+        alert = await instance.seal_event(alert_id, seal_v20_payload)
+        assert alert.semantic["entry_event_id"] == entry_id
+        alerts.append(alert_id)
+    assert alerts[0] != alerts[1]
+    assert await pool.fetchval(f"SELECT count(*) FROM {schema}.outbox_events") == 4
+    assert await pool.fetchval(f"SELECT count(*) FROM {schema}.selection_runs") == 2
+    assert await pool.fetchval(f"SELECT count(*) FROM {schema}.v22_alert_positions") == 3
+    assert (await instance.load_state(config.state_lineage_id)).revision == 1
+
+
+@pytest.mark.parametrize(
+    "status,blocked,empty",
+    [
+        ("SKIP", False, False),
+        ("UNKNOWN", False, False),
+        ("WAIT", True, False),
+        ("WAIT", False, True),
+    ],
+)
+async def test_entry_timing_nonmatching_runs_keep_one_ordinary_message(
+    repository, status, blocked, empty
+):
+    from src.common.v20_feishu import seal_v20_payload
+
+    instance, pool, schema = repository
+    _config_value, commit = await _entry_timing_commit(
+        repository, status=status, blocked=blocked, empty=empty
+    )
+    entry_id = await instance.commit_selection_run(commit, run_id="d" * 64)
+    entry = await instance.seal_event(entry_id, seal_v20_payload)
+    assert "entry_timing_alert_event_id" not in entry.semantic
+    assert await pool.fetchval(f"SELECT count(*) FROM {schema}.outbox_events") == 1
+
+
 def _baseline_for_schema(schema: str) -> str:
     root = Path(__file__).resolve().parents[4]
     baseline = (root / "migrations" / "v20" / "001_v20.sql").read_text(encoding="utf-8")

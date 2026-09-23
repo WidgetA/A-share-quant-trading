@@ -51,6 +51,7 @@ from src.data.database.v20_mews_guard_store import V20MewsGuardStore
 from src.data.database.v20_mews_receipt_guard import V20MewsReceiptGuard
 from src.data.database.v20_repository import (
     ActiveModelLeg,
+    EntryCommit,
     EntryStatus,
     ExitCommit,
     ManualMonitorEnrollmentCommit,
@@ -2915,6 +2916,21 @@ class V20Service:
                 "message": "实时接口没有返回可用的当日数据，本次不出票。",
             }
         semantic = record.semantic
+        timing_alert_id = semantic.get("entry_timing_alert_event_id")
+        timing_delivery_status = "NOT_REQUIRED"
+        if timing_alert_id:
+            timing_record = await self._repository.get_outbox_event(
+                timing_alert_id,
+                route_id=self.config.route_id,
+                **self._ledger_scope,
+            )
+            timing_delivery_status = (
+                timing_record.delivery_status if timing_record is not None else "PENDING"
+            )
+        delivered = record.delivery_status == "SENT" and timing_delivery_status in {
+            "NOT_REQUIRED",
+            "SENT",
+        }
         return {
             "accepted": True,
             "created": created,
@@ -2934,8 +2950,10 @@ class V20Service:
             "retrospective_expired": self._aware_now().date() != trade_date,
             "orders_changed": False,
             "delivery_status": record.delivery_status,
-            "feishu_delivery_confirmed": record.delivery_status == "SENT",
-            "task_success": record.delivery_status == "SENT",
+            "entry_timing_alert_event_id": timing_alert_id,
+            "entry_timing_alert_delivery_status": timing_delivery_status,
+            "feishu_delivery_confirmed": delivered,
+            "task_success": delivered,
         }
 
     async def trigger_canonical_selection_check_only(
@@ -8122,10 +8140,15 @@ class V20Service:
             },
             "board_avg_gains": dict(sorted(result.step2_board_avg_gains.items())),
         }
+        entry_timing_features = None
         if canonical.model_sha256 == V22_SCORER_MODEL_SHA256:
+            from src.strategy.v22_slim.entry_timing import project_features
             from src.strategy.v22_slim.selection import market_projection
 
             snapshot["v22_market"] = market_projection(canonical.early_bars, canonical.trade_date)
+            entry_timing_features = project_features(
+                canonical.early_bars, canonical.trade_date, [item["code"] for item in symbols[:3]]
+            )
         return FrozenV16ScanBundle(
             trade_date=canonical.trade_date,
             frozen_at=canonical.computed_at,
@@ -8143,6 +8166,7 @@ class V20Service:
             snapshot=snapshot,
             snapshot_hash=sha256_json(snapshot),
             computation_calendar=canonical_calendar,
+            entry_timing_features=entry_timing_features,
         )
 
     def _verify_prewarm_dependencies(self, prewarmed: V20PrewarmedScan) -> None:
@@ -8241,6 +8265,47 @@ class V20Service:
     ) -> None:
         await self._execute_selection_task(context, now, request_id="scheduled")
 
+    async def _prepare_entry_timing_commit(
+        self, calculation: _MorningSelectionComputation
+    ) -> EntryCommit:
+        """Evaluate the notification after selection, without changing its decision."""
+        commit = calculation.prepared.commit
+        if self.config.strategy_version != "V22-slim" or commit.semantic.get("action") != "ENTER":
+            return commit
+        from src.strategy.v22_slim.entry_timing import evaluate_entry_timing, matches_wait_rule
+
+        bundle = calculation.bundle
+        features = bundle.entry_timing_features or {}
+        symbols = list(commit.semantic.get("symbols") or [])
+        needs_index = any(
+            matches_wait_rule(features[item["code"]])
+            for item in symbols
+            if item["code"] in features
+        )
+        current = self._aware_now()
+        if needs_index and current.date() == bundle.trade_date:
+            ready_at = _local(bundle.trade_date, time(9, 40))
+            if current < ready_at:
+                await asyncio.sleep((ready_at - current).total_seconds())
+        for attempt in range(3):
+            advisory = await evaluate_entry_timing(
+                self._scan_state.realtime_client,
+                trade_date=bundle.trade_date,
+                prior_trade_date=bundle.prior_trade_date,
+                symbols=symbols,
+                features=features,
+                now=self._aware_now(),
+            )
+            if advisory.get("reason") != "INDEX_0940_PENDING" or attempt == 2:
+                break
+            await asyncio.sleep(self.config.market.minute_poll_seconds)
+        if advisory.get("status") == "UNAVAILABLE":
+            logger.warning(
+                "V22 entry timing unavailable for %s: %s", bundle.trade_date, advisory.get("reason")
+            )
+        semantic = {**dict(commit.semantic), "entry_timing_advisory": advisory}
+        return replace(commit, semantic=semantic, semantic_content_hash=sha256_json(semantic))
+
     async def _execute_selection_task(
         self,
         context: _DayContext,
@@ -8282,11 +8347,14 @@ class V20Service:
                 return None, False
             context.canonical_bundle = calculation.bundle
             context.canonical_first_received_at = calculation.canonical_first_received_at
-            existing_id = await self._repository.commit_selection_run(
-                calculation.prepared.commit, run_id=run_id
-            )
+            commit = await self._prepare_entry_timing_commit(calculation)
+            existing_id = await self._repository.commit_selection_run(commit, run_id=run_id)
         assert existing_id is not None
         record = await self._repository.seal_event(existing_id, seal_v20_payload)
+        if self.config.strategy_version == "V22-slim":
+            timing_alert_id = record.semantic.get("entry_timing_alert_event_id")
+            if timing_alert_id:
+                await self._repository.seal_event(timing_alert_id, seal_v20_payload)
         context.entry_status = await self._repository.get_entry_status(
             self.config.official_stream_id, context.trade_date
         )

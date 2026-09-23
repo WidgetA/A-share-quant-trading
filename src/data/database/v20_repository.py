@@ -19,7 +19,7 @@ import math
 import os
 import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -3379,6 +3379,21 @@ class V20Repository:
         """
         self._validate_entry_commit(commit)
         _require_sha256(run_id, "selection run_id")
+        advisory = commit.semantic.get("entry_timing_advisory")
+        timing_notice = (
+            commit.strategy_version == "V22-slim"
+            and commit.action == "ENTER"
+            and commit.final_multiplier > 0
+            and isinstance(advisory, Mapping)
+            and advisory.get("schema") == "v22-entry-timing/v1"
+            and advisory.get("status") == "WAIT"
+            and isinstance(advisory.get("symbols"), list)
+            and bool(advisory["symbols"])
+        )
+        alert_id = sha256_json(["V22_ENTRY_TIMING_ALERT_V1", run_id]) if timing_notice else None
+        if alert_id is not None:
+            semantic = {**commit.semantic, "entry_timing_alert_event_id": alert_id}
+            commit = replace(commit, semantic=semantic, semantic_content_hash=sha256_json(semantic))
         proposal = {
             "semantic": dict(commit.semantic),
             "snapshot_hash": commit.snapshot_hash,
@@ -3479,6 +3494,33 @@ class V20Repository:
                         commit.lineage_id,
                         sha256_json(semantic),
                         canonical_json(semantic),
+                    )
+                if alert_id is not None:
+                    assert isinstance(advisory, Mapping)
+                    alert_semantic = {
+                        "schema_version": V20_DATA_ALERT_SEMANTIC_SCHEMA,
+                        "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
+                        "strategy_version": "V22-slim",
+                        "deployment_mode": commit.semantic.get("deployment_mode"),
+                        "event_id": alert_id,
+                        "entry_event_id": event_id,
+                        "alert_code": "V22_ENTRY_TIMING_ALERT",
+                        "event_trade_date": commit.trade_date.isoformat(),
+                        "message": "今天可以考虑不在开盘进。",
+                        "symbols": advisory["symbols"],
+                        "entry_timing_advisory": dict(advisory),
+                    }
+                    await connection.execute(
+                        f"INSERT INTO {self.schema}.outbox_events "
+                        "(event_id,event_type,route_id,official_stream_id,lineage_id,"
+                        "semantic_content_hash,semantic_json) "
+                        "VALUES ($1,'DATA_ALERT',$2,$3,$4,$5,$6::jsonb)",
+                        alert_id,
+                        commit.route_id,
+                        commit.official_stream_id,
+                        commit.lineage_id,
+                        sha256_json(alert_semantic),
+                        canonical_json(alert_semantic),
                     )
                 await connection.execute(
                     f"INSERT INTO {self.schema}.selection_runs "
@@ -3938,6 +3980,25 @@ class V20Repository:
                         WHERE seal_status='SEALED'
                           AND route_id=$1 AND official_stream_id=$2 AND lineage_id=$3
                           AND available_at <= clock_timestamp()
+                          AND (
+                              event_type <> 'ENTRY_DECISION'
+                              OR NOT (semantic_json ? 'entry_timing_alert_event_id')
+                              OR EXISTS (
+                                  SELECT 1 FROM {self.schema}.outbox_events AS timing_notice
+                                  WHERE timing_notice.event_id=
+                                      outbox_events.semantic_json->>'entry_timing_alert_event_id'
+                                    AND timing_notice.event_type='DATA_ALERT'
+                                    AND timing_notice.semantic_json->>'alert_code'=
+                                        'V22_ENTRY_TIMING_ALERT'
+                                    AND timing_notice.semantic_json->>'entry_event_id'=
+                                        outbox_events.event_id
+                                    AND timing_notice.route_id=outbox_events.route_id
+                                    AND timing_notice.official_stream_id=
+                                        outbox_events.official_stream_id
+                                    AND timing_notice.lineage_id=outbox_events.lineage_id
+                                    AND timing_notice.delivery_status='SENT'
+                              )
+                          )
                           AND NOT EXISTS (
                               SELECT 1 FROM {self.schema}.model_legs AS sold
                               WHERE sold.model_leg_id=outbox_events.semantic_json->>'model_leg_id'
