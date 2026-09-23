@@ -901,7 +901,7 @@ async def test_v22_slim_real_entry_commit_seal_and_delivery_without_exit_lots(
             == 1
         )
         entry_attempt = await pool.fetchrow(
-            f"SELECT attempt.attempted_at,attempt.succeeded,notice.delivered_at "
+            f"SELECT attempt.attempted_at,attempt.succeeded,attempt.phase,notice.delivered_at "
             f"FROM {schema}.delivery_attempts AS attempt "
             f"JOIN {schema}.outbox_events AS notice ON notice.event_id=$2 "
             "WHERE attempt.event_id=$1",
@@ -909,7 +909,9 @@ async def test_v22_slim_real_entry_commit_seal_and_delivery_without_exit_lots(
             notice_id,
         )
         assert entry_attempt["attempted_at"] >= entry_attempt["delivered_at"]
-        assert entry_attempt["succeeded"] is (not lose_rerun_response or entry_id == first_event)
+        unknown = lose_rerun_response and entry_id == second_event
+        assert entry_attempt["succeeded"] is (None if unknown else True)
+        assert entry_attempt["phase"] == ("UNKNOWN" if unknown else "DELIVERED")
     delivered = await instance.get_outbox_event(
         commit.event_id,
         route_id=config.route_id,
