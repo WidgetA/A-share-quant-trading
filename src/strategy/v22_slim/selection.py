@@ -19,6 +19,9 @@ from src.strategy.v20.selection_scorer import LGBRankScorer
 
 ASSET_ROOT = Path(__file__).resolve().parents[3] / "models" / "v22_slim"
 LABELS = tuple(f"09:{minute:02}" for minute in range(30, 40))
+# User exclusion (2026-09-30): remove this board's selection route, not its stocks.
+# Keep V22 policy local; the shared junk-board filter is also consumed by V16.
+V22_BOARD_BLACKLIST = frozenset({"中韩自贸区"})
 
 
 def read_asset(name: str) -> bytes:
@@ -35,6 +38,7 @@ class FrozenBoards:
         self._board_stocks = {
             board: [(str(row[0])[:6], str(row[1]) if len(row) > 1 else "") for row in rows if row]
             for board, rows in raw.items()
+            if board not in V22_BOARD_BLACKLIST
         }
         self.names = {code: name for rows in self._board_stocks.values() for code, name in rows}
 
