@@ -38,7 +38,6 @@ class FrozenBoards:
         self._board_stocks = {
             board: [(str(row[0])[:6], str(row[1]) if len(row) > 1 else "") for row in rows if row]
             for board, rows in raw.items()
-            if board not in V22_BOARD_BLACKLIST
         }
         self.names = {code: name for rows in self._board_stocks.values() for code, name in rows}
 
@@ -51,12 +50,24 @@ class FrozenBoards:
         ]
 
 
+class V22Scanner(V16Scanner):
+    def _step2_hot_boards(self, clean_boards, stock_data):
+        # Board exclusion is selection policy, not a change to the frozen facts.
+        # Preserve the original mapping used to verify previously saved inputs.
+        eligible = {
+            board: members
+            for board, members in clean_boards.items()
+            if board not in V22_BOARD_BLACKLIST
+        }
+        return super()._step2_hot_boards(eligible, stock_data)
+
+
 def make_scanner():
     boards = FrozenBoards()
     read_asset("lgbrank_latest.txt")
     read_asset("feature_list.json")
     scorer = LGBRankScorer(ASSET_ROOT / "lgbrank_latest.txt", ASSET_ROOT / "feature_list.json")
-    scanner = V16Scanner(
+    scanner = V22Scanner(
         boards,
         boards,
         StockFilter(
