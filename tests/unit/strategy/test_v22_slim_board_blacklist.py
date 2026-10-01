@@ -10,7 +10,7 @@ from src.strategy.filters.board_filter import is_junk_board
 from src.strategy.v22_slim import selection
 from src.web.v20_canonical_selection import _stable_external_market_fact_hash
 
-EXCLUDED_BOARDS = ["中韩自贸区", "上海自贸区", "同花顺果指数", "同花顺新质50"]
+EXCLUDED_BOARDS = ["中韩自贸区", "上海自贸区", "同花顺果指数", "同花顺新质50", "中国AI 50"]
 
 
 @pytest.mark.parametrize("excluded_board", EXCLUDED_BOARDS)
