@@ -19,11 +19,13 @@ EXCLUDED_BOARDS = [
     "同花顺漂亮100",
     "同花顺中特估100",
     "同花顺出海50",
+    "机器视觉",
+    "PPP概念",
 ]
 FUTURE_PREFIX_BOARDS = ["同花顺未来主题99", "同花顺", "同花顺出海500"]
 
 
-def test_v22_records_all_eight_exact_names_and_current_five_prefix_boards():
+def test_v22_records_all_ten_exact_names_and_current_five_prefix_boards():
     assert selection.V22_BOARD_BLACKLIST == frozenset(EXCLUDED_BOARDS)
     raw = json.loads(selection.read_asset("board_constituents.json"))
     assert {name for name in raw if name.startswith("同花顺")} == {
