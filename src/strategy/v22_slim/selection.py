@@ -19,7 +19,7 @@ from src.strategy.v20.selection_scorer import LGBRankScorer
 
 ASSET_ROOT = Path(__file__).resolve().parents[3] / "models" / "v22_slim"
 LABELS = tuple(f"09:{minute:02}" for minute in range(30, 40))
-# User exclusions (2026-09-30 through 10-02): remove routes, not their stocks.
+# User exclusions (2026-09-30 through 10-03): remove routes, not their stocks.
 # Keep V22 policy local; the shared junk-board filter is also consumed by V16.
 V22_BOARD_BLACKLIST = frozenset(
     {
@@ -31,6 +31,8 @@ V22_BOARD_BLACKLIST = frozenset(
         "同花顺漂亮100",
         "同花顺中特估100",
         "同花顺出海50",
+        "机器视觉",
+        "PPP概念",
     }
 )
 
