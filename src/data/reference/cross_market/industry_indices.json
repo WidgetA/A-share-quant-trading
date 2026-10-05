@@ -1780,7 +1780,7 @@
       "exchange_timezone": "America/New_York",
       "capability": "daily_history",
       "listing_scope_note": "Provider-specific eligibility and constituent universe; inspect method before treating as an entire US industry board.",
-      "scope_taxonomy": "provider_method_pending",
+      "scope_taxonomy": "provider_methodology",
       "scope_codes": null,
       "identity_evidence": {
         "chart_index_and_symbol_confirmed": true,
@@ -2222,7 +2222,7 @@
       "exchange_timezone": "America/New_York",
       "capability": "daily_history",
       "listing_scope_note": "Provider-specific eligibility and constituent universe; inspect method before treating as an entire US industry board.",
-      "scope_taxonomy": "provider_method_pending",
+      "scope_taxonomy": "provider_methodology",
       "scope_codes": null,
       "identity_evidence": {
         "chart_index_and_symbol_confirmed": true,
@@ -2362,7 +2362,7 @@
       "exchange_timezone": "America/New_York",
       "capability": "daily_history",
       "listing_scope_note": "Provider-specific eligibility and constituent universe; inspect method before treating as an entire US industry board.",
-      "scope_taxonomy": "provider_method_pending",
+      "scope_taxonomy": "provider_methodology",
       "scope_codes": null,
       "identity_evidence": {
         "chart_index_and_symbol_confirmed": true,
@@ -2429,7 +2429,7 @@
       "exchange_timezone": "America/New_York",
       "capability": "daily_history",
       "listing_scope_note": "Provider-specific eligibility and constituent universe; inspect method before treating as an entire US industry board.",
-      "scope_taxonomy": "provider_method_pending",
+      "scope_taxonomy": "provider_methodology",
       "scope_codes": null,
       "identity_evidence": {
         "chart_index_and_symbol_confirmed": true,
@@ -6334,7 +6334,6 @@
           "content_type": "text/html; charset=utf-8",
           "title": "Overview for NQUSB40401010",
           "mentions_amazon": false,
-          "text_tail": "Overview for NQUSB40401010 Search Indexes Indexes Equity U.S. Europe Global Smart Beta - Dividend & Income - Dorsey Wright - Nasdaq AlphaDEX - Smart Sectors Green VINX KBW Financial Indexes See All Indexes Fixed Income Nordic Market Governance Research Resources Resources Fact Sheets Methodologies See All Resources Global Index Watch (GIW) Directory Index Component Search Global Index Data Service (GIDS) Directory Index Dates Corporate Actions Investment Products Index Licensing License Nasdaq’s full range of global equity, commodity or fixed income indexes. See All Index Licensing/ETPs ETF & Advisor Solutions Research, news and commentary from our ETP partners and solutions to help Financial Advisors. Index Linked Products A searchable list of products based on Nasdaq Global Indexes. Index Data Nasdaq offers reliable and comprehensive data through flexible access options. Learn about proprietary data products, distributors and subscription details. Index Data Delivery Options Data Entitlements Month End Files GIW Web Service Specification Global Index Watch (GIW) is the direct web interface for index weights, components and more. To automate the retrieval of this data, view the secure web service specification. GIFFD - SFTP Technical Specification Global Index FlexFile Delivery (GIFFD) offers clients a flexible and efficient delivery service for index weighting, advance corporate actions and extensive additional data for Nasdaq Indexes GIDS 2.0 Specification Global Index Data Service (GIDS) offers a real-time data feed that consolidates all 45,000 Nasdaq indexes, as well as exchange-traded products (ETPs) valuation data and third-party partner data. Contact Us Search Indexes Search Indexes Login or Register Login Username Password TOTP Remember Me Log In Register Trouble logging in? Nasdaq US Benchmark Diversified Retailers Index NQUSB40401010 DATA AS OF 10/5/2026 12,182.22 15.30 0.23% Key Stats Previous Close 12,154.71 Today’s High 12,191.31 Today’s Low 12,104.41 Overview Performance Weighting Industry Breakdown Corporate Actions NQUSB40401010 Nasdaq US Benchmark Diversified Retailers Index 10/5/2026 1D 1M 3M 6M YTD 1Y 3Y 5Y 10Y All INDEX COMPARISION Reset Nasdaq provides either actual historical index values or back-tested histories for certain indexes. All back-tested index values for periods prior to the launch date of an index are merely indicative, and they are provided \"AS IS\" for informational and educational purposes only... See More Index Comparison Compare up to 5 different Nasdaq Indexes Primary Index INDEX 2 INDEX 3 INDEX 4 INDEX 5 Start Date End Date 1M 3M 6M YTD 1Y 3Y 5Y 10Y All Nasdaq provides either actual historical index values or back-tested histories for certain indexes. All back-tested index values for periods prior to the launch date of an index are merely indicative, and they are provided \"AS IS\" for informational and educational purposes only... See More DATE RANGE Set Start and End Start Date End Date End of Day Start of Day Download Index Description The Nasdaq US Benchmark Diversified Retailers Index is a float adjusted market capitalization-weighted index which includes securities  in the US Benchmark Index that are classified in the Diversified Retailers Subsector according to the Industry Classification Benchmark (ICB). The Index began on June 6, 2011 at a base value of 1000. Summary Details Last 12,182.22 Net Change 15.30 Net Change(%) 0.23% Day High 12,191.31 Day Low 12,104.41 Previous Close 12,154.71 Base Value 1,000.00 Divisor 272,034,649 Quick Facts # of Components 19 Index Currency USD Entitlement NASDAQ Global Index Americas Region Recent Articles Beyond the Tariff Storm: Nasdaq-100®’s Blueprint for Resilience 9/16/2025 NYGBIG Research – 2025 6/26/2025 GHHO Research 6/23/2025 Related Links Research Pieces About Disclaimer Investor Relations Accessibility Press Careers Contact Cookie Policy Privacy Policy Transparency Statements Legal Do Not Sell My Personal Information (CA Residents Only) ©2026, Nasdaq, Inc. All Rights Reserved.",
           "links_with_weight_or_component": [
             "/Resource/Index/FactSheet",
             "/Index/Weighting/NQUSB40401010"
@@ -11969,7 +11968,7 @@
       "exchange_timezone": "America/New_York",
       "capability": "daily_history",
       "listing_scope_note": "Provider-specific eligibility and constituent universe; inspect method before treating as an entire US industry board.",
-      "scope_taxonomy": "provider_method_pending",
+      "scope_taxonomy": "provider_methodology",
       "scope_codes": null,
       "identity_evidence": {
         "chart_index_and_symbol_confirmed": true,
@@ -12036,7 +12035,7 @@
       "exchange_timezone": "America/New_York",
       "capability": "daily_history",
       "listing_scope_note": "Provider-specific eligibility and constituent universe; inspect method before treating as an entire US industry board.",
-      "scope_taxonomy": "provider_method_pending",
+      "scope_taxonomy": "provider_methodology",
       "scope_codes": null,
       "identity_evidence": {
         "chart_index_and_symbol_confirmed": true,
@@ -12103,7 +12102,7 @@
       "exchange_timezone": "America/New_York",
       "capability": "daily_history",
       "listing_scope_note": "Provider-specific eligibility and constituent universe; inspect method before treating as an entire US industry board.",
-      "scope_taxonomy": "provider_method_pending",
+      "scope_taxonomy": "provider_methodology",
       "scope_codes": null,
       "identity_evidence": {
         "chart_index_and_symbol_confirmed": true,
@@ -42742,7 +42741,6 @@
                   "content_type": "text/html; charset=utf-8",
                   "title": "Overview for NQUSB40401010",
                   "mentions_amazon": false,
-                  "text_tail": "Overview for NQUSB40401010 Search Indexes Indexes Equity U.S. Europe Global Smart Beta - Dividend & Income - Dorsey Wright - Nasdaq AlphaDEX - Smart Sectors Green VINX KBW Financial Indexes See All Indexes Fixed Income Nordic Market Governance Research Resources Resources Fact Sheets Methodologies See All Resources Global Index Watch (GIW) Directory Index Component Search Global Index Data Service (GIDS) Directory Index Dates Corporate Actions Investment Products Index Licensing License Nasdaq’s full range of global equity, commodity or fixed income indexes. See All Index Licensing/ETPs ETF & Advisor Solutions Research, news and commentary from our ETP partners and solutions to help Financial Advisors. Index Linked Products A searchable list of products based on Nasdaq Global Indexes. Index Data Nasdaq offers reliable and comprehensive data through flexible access options. Learn about proprietary data products, distributors and subscription details. Index Data Delivery Options Data Entitlements Month End Files GIW Web Service Specification Global Index Watch (GIW) is the direct web interface for index weights, components and more. To automate the retrieval of this data, view the secure web service specification. GIFFD - SFTP Technical Specification Global Index FlexFile Delivery (GIFFD) offers clients a flexible and efficient delivery service for index weighting, advance corporate actions and extensive additional data for Nasdaq Indexes GIDS 2.0 Specification Global Index Data Service (GIDS) offers a real-time data feed that consolidates all 45,000 Nasdaq indexes, as well as exchange-traded products (ETPs) valuation data and third-party partner data. Contact Us Search Indexes Search Indexes Login or Register Login Username Password TOTP Remember Me Log In Register Trouble logging in? Nasdaq US Benchmark Diversified Retailers Index NQUSB40401010 DATA AS OF 10/5/2026 12,182.22 15.30 0.23% Key Stats Previous Close 12,154.71 Today’s High 12,191.31 Today’s Low 12,104.41 Overview Performance Weighting Industry Breakdown Corporate Actions NQUSB40401010 Nasdaq US Benchmark Diversified Retailers Index 10/5/2026 1D 1M 3M 6M YTD 1Y 3Y 5Y 10Y All INDEX COMPARISION Reset Nasdaq provides either actual historical index values or back-tested histories for certain indexes. All back-tested index values for periods prior to the launch date of an index are merely indicative, and they are provided \"AS IS\" for informational and educational purposes only... See More Index Comparison Compare up to 5 different Nasdaq Indexes Primary Index INDEX 2 INDEX 3 INDEX 4 INDEX 5 Start Date End Date 1M 3M 6M YTD 1Y 3Y 5Y 10Y All Nasdaq provides either actual historical index values or back-tested histories for certain indexes. All back-tested index values for periods prior to the launch date of an index are merely indicative, and they are provided \"AS IS\" for informational and educational purposes only... See More DATE RANGE Set Start and End Start Date End Date End of Day Start of Day Download Index Description The Nasdaq US Benchmark Diversified Retailers Index is a float adjusted market capitalization-weighted index which includes securities  in the US Benchmark Index that are classified in the Diversified Retailers Subsector according to the Industry Classification Benchmark (ICB). The Index began on June 6, 2011 at a base value of 1000. Summary Details Last 12,182.22 Net Change 15.30 Net Change(%) 0.23% Day High 12,191.31 Day Low 12,104.41 Previous Close 12,154.71 Base Value 1,000.00 Divisor 272,034,649 Quick Facts # of Components 19 Index Currency USD Entitlement NASDAQ Global Index Americas Region Recent Articles Beyond the Tariff Storm: Nasdaq-100®’s Blueprint for Resilience 9/16/2025 NYGBIG Research – 2025 6/26/2025 GHHO Research 6/23/2025 Related Links Research Pieces About Disclaimer Investor Relations Accessibility Press Careers Contact Cookie Policy Privacy Policy Transparency Statements Legal Do Not Sell My Personal Information (CA Residents Only) ©2026, Nasdaq, Inc. All Rights Reserved.",
                   "links_with_weight_or_component": [
                     "/Resource/Index/FactSheet",
                     "/Index/Weighting/NQUSB40401010"
@@ -43846,7 +43844,6 @@
                   "content_type": "text/html; charset=utf-8",
                   "title": "Overview for NQUSB40401010",
                   "mentions_amazon": false,
-                  "text_tail": "Overview for NQUSB40401010 Search Indexes Indexes Equity U.S. Europe Global Smart Beta - Dividend & Income - Dorsey Wright - Nasdaq AlphaDEX - Smart Sectors Green VINX KBW Financial Indexes See All Indexes Fixed Income Nordic Market Governance Research Resources Resources Fact Sheets Methodologies See All Resources Global Index Watch (GIW) Directory Index Component Search Global Index Data Service (GIDS) Directory Index Dates Corporate Actions Investment Products Index Licensing License Nasdaq’s full range of global equity, commodity or fixed income indexes. See All Index Licensing/ETPs ETF & Advisor Solutions Research, news and commentary from our ETP partners and solutions to help Financial Advisors. Index Linked Products A searchable list of products based on Nasdaq Global Indexes. Index Data Nasdaq offers reliable and comprehensive data through flexible access options. Learn about proprietary data products, distributors and subscription details. Index Data Delivery Options Data Entitlements Month End Files GIW Web Service Specification Global Index Watch (GIW) is the direct web interface for index weights, components and more. To automate the retrieval of this data, view the secure web service specification. GIFFD - SFTP Technical Specification Global Index FlexFile Delivery (GIFFD) offers clients a flexible and efficient delivery service for index weighting, advance corporate actions and extensive additional data for Nasdaq Indexes GIDS 2.0 Specification Global Index Data Service (GIDS) offers a real-time data feed that consolidates all 45,000 Nasdaq indexes, as well as exchange-traded products (ETPs) valuation data and third-party partner data. Contact Us Search Indexes Search Indexes Login or Register Login Username Password TOTP Remember Me Log In Register Trouble logging in? Nasdaq US Benchmark Diversified Retailers Index NQUSB40401010 DATA AS OF 10/5/2026 12,182.22 15.30 0.23% Key Stats Previous Close 12,154.71 Today’s High 12,191.31 Today’s Low 12,104.41 Overview Performance Weighting Industry Breakdown Corporate Actions NQUSB40401010 Nasdaq US Benchmark Diversified Retailers Index 10/5/2026 1D 1M 3M 6M YTD 1Y 3Y 5Y 10Y All INDEX COMPARISION Reset Nasdaq provides either actual historical index values or back-tested histories for certain indexes. All back-tested index values for periods prior to the launch date of an index are merely indicative, and they are provided \"AS IS\" for informational and educational purposes only... See More Index Comparison Compare up to 5 different Nasdaq Indexes Primary Index INDEX 2 INDEX 3 INDEX 4 INDEX 5 Start Date End Date 1M 3M 6M YTD 1Y 3Y 5Y 10Y All Nasdaq provides either actual historical index values or back-tested histories for certain indexes. All back-tested index values for periods prior to the launch date of an index are merely indicative, and they are provided \"AS IS\" for informational and educational purposes only... See More DATE RANGE Set Start and End Start Date End Date End of Day Start of Day Download Index Description The Nasdaq US Benchmark Diversified Retailers Index is a float adjusted market capitalization-weighted index which includes securities  in the US Benchmark Index that are classified in the Diversified Retailers Subsector according to the Industry Classification Benchmark (ICB). The Index began on June 6, 2011 at a base value of 1000. Summary Details Last 12,182.22 Net Change 15.30 Net Change(%) 0.23% Day High 12,191.31 Day Low 12,104.41 Previous Close 12,154.71 Base Value 1,000.00 Divisor 272,034,649 Quick Facts # of Components 19 Index Currency USD Entitlement NASDAQ Global Index Americas Region Recent Articles Beyond the Tariff Storm: Nasdaq-100®’s Blueprint for Resilience 9/16/2025 NYGBIG Research – 2025 6/26/2025 GHHO Research 6/23/2025 Related Links Research Pieces About Disclaimer Investor Relations Accessibility Press Careers Contact Cookie Policy Privacy Policy Transparency Statements Legal Do Not Sell My Personal Information (CA Residents Only) ©2026, Nasdaq, Inc. All Rights Reserved.",
                   "links_with_weight_or_component": [
                     "/Resource/Index/FactSheet",
                     "/Index/Weighting/NQUSB40401010"
