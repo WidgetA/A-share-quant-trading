@@ -57,5 +57,42 @@ semiconductors = industries["270100"]
 缺少同名专类的种子、动物疫苗、家电零部件等，只在取得实际经营与板块归属证据后建立局部对应。
 材料按实际申万归属核对，碳纤维原丝与碳/碳复合材料不能仅凭“碳”字合并。
 
-数据只交付二级行业与行业板块对应，不包含 ETF、指数、价格序列或其他层级的完整目录。
-对应关系本身不证明价格相关性。此次工作未发布生产服务。
+基础板块文件保持原始快照；后续指数取数使用
+[`industry_indices.json`](../src/data/reference/cross_market/industry_indices.json)。
+它保留全部 134 个二级行业及 US、KR 两个结果，记录 170 个去重行业指数代码
+（美国 131 个、韩国 39 个）和 457 条有范围依据的关联。未建立已核指数对应的结果也保留，
+美国 3 个、韩国 8 个；这表示本次已审来源中的缺口，不表示市场不存在相关企业。
+新的指数证据可以补充基础板块文件中的空缺，两个文件通过基础文件 SHA256 关联。
+
+`indices` 保存真实 Yahoo `symbol`、提供方名称、已见 Yahoo 名称别名、币种、交易所时区、
+身份及数据能力证据。各行业的 `markets.US/KR.matches` 用 `index_id` 关联这些记录，
+保留原板块标识、范围差异、提供方定义定位、实际成员业务证据及来源摘要。
+定义、当前成员与继承的基础业务记录分别标明；取得的官方原文与网页处理文本不混称。
+例如金融指数中的渔业控股公司仅提供该公司已证实业务的部分交集，
+不把金融指数视为纯渔业指数，也不推导成分权重或价格相关性。
+
+Yahoo 的可回补日线与当前快照分别记录为 `daily_history`、`snapshot_only`。
+本次已采用 7 个有日线历史的美国指数，其余 163 个只取得当前快照；
+试取的 `1mo`、`1y` 不是正式历史上限。首次正式取数用显式起止时间请求源端全部日线，
+并检查实际返回粒度；`range=max&interval=1d` 曾实际返回月线，不能据请求参数认定日线。
+韩国快照里的零开高低和成交量占位保持空值，未生成历史日线。
+
+采集入口为 [`scripts/collect_cross_market_indices.py`](../scripts/collect_cross_market_indices.py)，
+将真实行情存入 Greptime `cross_market_index_prices`，完整对应关系存入
+`cross_market_industry_indices`。每个参考版本有美国、韩国各 134 行。
+可先按二级行业读出 `mapping_json` 中的真实指数，再查询其行情：
+
+```sql
+SELECT mapping_json FROM cross_market_industry_indices
+WHERE provider = 'yahoo' AND market = 'US' AND sw_code = '270100'
+ORDER BY reference_at DESC LIMIT 1;
+
+SELECT * FROM cross_market_index_prices
+WHERE provider = 'yahoo' AND market = 'US' AND symbol = '^SOX'
+ORDER BY ts DESC LIMIT 5;
+```
+
+`ts` 保存源时间，`fetched_at` 保存取回时间；`trade_date` 使用交易所本地日期。
+快照、历史日线及来源缺口按实际内容保留，最新日线可能尚未最终确认。
+生产运行、失败批次重放和部署版本核对见 [采集运行说明](cross-market-index-operations.md)。
+没有增加 ETF、个股取数或其他分类层级的产品功能。

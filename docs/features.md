@@ -5,7 +5,7 @@
 
 ## Version History
 
-本轮数据工作（2026-10-05）：在生产重构 v15 基线上建立申万 2021 二级行业与美股、韩国股市行业板块的对应基础数据，与 Kimi 核对真实来源和范围差异。只交付二级板块对应数据及必要说明，详见 [数据口径](cross-market-industry-reference.md)。
+本轮数据工作（2026-10-05）：在生产重构 v15 基线上建立申万 2021 全部 134 个二级行业与美股、韩股板块的对应基础，与 Kimi 核对原始板块来源。后续增加已核行业指数代码及 Yahoo 代理采集入口，统一写入 Greptime 的独立行情和对应关系表，区分历史日线、当前快照与真实缺口。详见 [数据口径](cross-market-industry-reference.md) 和 [运行说明](cross-market-index-operations.md)。
 
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|

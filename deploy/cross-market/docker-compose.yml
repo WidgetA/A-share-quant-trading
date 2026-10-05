@@ -1,0 +1,74 @@
+version: "3.7"
+
+services:
+  yahoo-index-proxy:
+    image: "${CROSS_MARKET_RUNTIME_IMAGE:?Set the immutable production v15 image ID}"
+    labels:
+      org.ashare.cross-market.source-revision: "${CROSS_MARKET_SOURCE_REVISION:?Set the collector source commit}"
+      org.ashare.cross-market.bundle-sha256: "${CROSS_MARKET_BUNDLE_SHA256:?Set the deployed runtime bundle SHA256}"
+    entrypoint: ["/usr/local/bin/mihomo"]
+    command: ["-d", "/tmp/mihomo", "-f", "/etc/mihomo/config.yaml"]
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - type: bind
+        source: /opt/ashare-cross-market/proxy/mihomo
+        target: /usr/local/bin/mihomo
+        read_only: true
+      - type: bind
+        source: /opt/ashare-cross-market/proxy/config.yaml
+        target: /etc/mihomo/config.yaml
+        read_only: true
+    networks:
+      - production
+
+  cross-market-collector:
+    image: "${CROSS_MARKET_RUNTIME_IMAGE:?Set the immutable production v15 image ID}"
+    labels:
+      org.ashare.cross-market.source-revision: "${CROSS_MARKET_SOURCE_REVISION:?Set the collector source commit}"
+      org.ashare.cross-market.bundle-sha256: "${CROSS_MARKET_BUNDLE_SHA256:?Set the deployed runtime bundle SHA256}"
+    working_dir: /collector
+    entrypoint: ["python", "/collector/scripts/collect_cross_market_indices.py"]
+    command:
+      - --proxy
+      - http://yahoo-index-proxy:17897
+      - --greptime-url
+      - http://greptimedb:4000
+      - --reference
+      - /collector/src/data/reference/cross_market/industry_indices.json
+      - --base-reference
+      - /collector/src/data/reference/cross_market/industry_boards.json
+      - --state-dir
+      - /state
+      - --concurrency
+      - "${CROSS_MARKET_CONCURRENCY:-2}"
+      - --loop-seconds
+      - "${CROSS_MARKET_LOOP_SECONDS:-300}"
+      - --batch-size
+      - "${CROSS_MARKET_BATCH_SIZE:-100}"
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+    depends_on:
+      - yahoo-index-proxy
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - type: bind
+        source: /opt/ashare-cross-market/runtime
+        target: /collector
+        read_only: true
+      - type: bind
+        source: /opt/ashare-cross-market/state
+        target: /state
+    networks:
+      - production
+
+networks:
+  production:
+    external: true
+    name: root_default
