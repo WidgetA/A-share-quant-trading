@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from scripts import collect_cross_market_indices as cli
@@ -458,6 +459,8 @@ async def test_mapping_failure_is_replayed_and_independent_symbols_still_run(ref
     yahoo = FakeYahoo()
     first = await producer(references, state_dir, yahoo, store).run_once()
     assert first["status"] == "partial_failure" and len(yahoo.calls) == 2
+    assert first["mapping"]["confirmed_rows"] == 0
+    assert first["mapping"]["cause_type"] is None
     pending = state_dir / "mappings.pending.json"
     cached = json.loads(pending.read_text(encoding="utf-8"))
     assert len(cached["rows"]) == 268
@@ -466,6 +469,52 @@ async def test_mapping_failure_is_replayed_and_independent_symbols_still_run(ref
     assert second["status"] == "verified"
     assert store.mapping_writes[-1] == cached["rows"]
     assert not pending.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replay", [False, True])
+async def test_uncertain_write_reports_confirmed_rows_and_cause_without_exception_text(
+    references, tmp_path, replay
+):
+    state_dir = tmp_path / "state"
+    original = [source_point(ts=1728000000123 + number * DAY_MS) for number in range(3)]
+
+    class TimeoutStore(FakeStore):
+        async def upsert_prices(self, points):
+            if points[0]["symbol"] == "^SOX":
+                self.prices[self.key(points[-1])] = copy.deepcopy(points[-1])
+                try:
+                    raise httpx.ReadTimeout(
+                        "http://private-user:secret-password@proxy",
+                        request=httpx.Request("POST", "http://private-user:secret-password@db"),
+                    )
+                except httpx.ReadTimeout as cause:
+                    raise GreptimeWriteError(
+                        "private-user:secret-password uncertain write", confirmed_rows=2
+                    ) from cause
+            return await super().upsert_prices(points)
+
+    yahoo = FakeYahoo({"^SOX": [source_window(original)]})
+    job = producer(references, state_dir, yahoo, TimeoutStore(state_dir))
+    state_path, pending_path = job._paths(selected_index(references))
+    result = await job.run_once()
+    original_pending = pending_path.read_bytes()
+    if replay:
+        result = await job.run_once()
+    failed = next(item for item in result["indices"] if item["symbol"] == "^SOX")
+    assert failed["stage"] == ("pending_replay" if replay else "write_and_verify")
+    assert failed["error_type"] == "GreptimeWriteError"
+    assert failed["confirmed_rows"] == 2
+    assert failed["cause_type"] == "ReadTimeout"
+    assert failed["pending_retained"] is True
+    assert not state_path.exists() and pending_path.read_bytes() == original_pending
+    assert len([call for call in yahoo.calls if call[0] == "^SOX"]) == 1
+    assert next(item for item in result["indices"] if item["market"] == "KR")[
+        "status"
+    ] == "verified"
+    encoded = json.dumps(result)
+    assert "private-user" not in encoded and "secret-password" not in encoded
+    assert "http://" not in encoded and "uncertain write" not in encoded
 
 
 @pytest.mark.asyncio

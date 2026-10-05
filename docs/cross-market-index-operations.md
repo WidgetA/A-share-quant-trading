@@ -54,15 +54,15 @@ docker-compose -p ashare-cross-market --env-file .env -f docker-compose.yml ps
 docker-compose -p ashare-cross-market --env-file .env -f docker-compose.yml logs --tail 20 cross-market-collector
 ```
 
-采集器每轮向 stdout 输出一条 JSON：总状态、参考版本 SHA256、映射结果以及每个指数的写入行数、回放行数、最后核验源时间和未补齐时间。`verified` 表示该轮原始点写入后逐字段读回一致；`verified_with_gaps` 表示这些源点已一致入库，但仍有来源缺少收盘值的时间。映射的 `previously_verified` 表示同一参考 SHA256 已有成功核验状态，本轮复用该状态而未重写、重读静态映射；价格仍逐轮获取并核验。参考改变或映射状态文件丢失会重新完整写入和核验映射，已有 pending 始终先重放。`partial_failure` 保留独立失败项，其余指数继续采集。错误只输出类型和阶段，避免异常文本包含代理认证材料。
+采集器每轮向 stdout 输出一条 JSON：总状态、参考版本 SHA256、映射结果以及每个指数的写入行数、回放行数、最后核验源时间和未补齐时间。`verified` 表示该轮原始点写入后逐字段读回一致；`verified_with_gaps` 表示这些源点已一致入库，但仍有来源缺少收盘值的时间。映射的 `previously_verified` 表示同一参考 SHA256 已有成功核验状态，本轮复用该状态而未重写、重读静态映射；价格仍逐轮获取并核验。参考改变或映射状态文件丢失会重新完整写入和核验映射，已有 pending 始终先重放。`partial_failure` 保留独立失败项，其余指数继续采集。错误输出类型和阶段；写库错误另带此前已确认行数 `confirmed_rows` 和直接原因类型 `cause_type`，避免任意异常文本包含代理认证材料。已确认行数不代表后续未确认的行没有落库，仍须整批重放并回读。
 
 容器启动或存活不能证明行情更新。核查首轮、下一轮以及重启后的结果，并同时检查源时间、待处理文件和库中对应行。Greptime HTTP SQL 响应还须核对 `code`、`error` 和返回行；HTTP 200 本身不代表 SQL 成功。库内概览可使用：
 
 ```sql
-SELECT market, symbol, interval, data_kind, COUNT(*) AS rows,
+SELECT market, symbol, "interval", data_kind, COUNT(*) AS rows,
        MIN(ts) AS first_source_time, MAX(ts) AS last_source_time
 FROM cross_market_index_prices
-GROUP BY market, symbol, interval, data_kind;
+GROUP BY market, symbol, "interval", data_kind;
 
 SELECT market, reference_at, COUNT(*) AS industry_rows
 FROM cross_market_industry_indices
@@ -75,7 +75,7 @@ GROUP BY market, reference_at;
 
 采集器在写价格前将完整原始 Yahoo JSON、源摘要、解析点和窗口存入 `/state/*.pending.json`。写库部分成功、HTTP 错误、读回不一致或状态保存失败时，成功游标不前进。下轮或进程重启先按原始整批重放，逐字段核验后才保存成功状态并清理 pending；不要以数据库最大时间替代状态，也不要删除 pending 来掩盖失败。
 
-首次获取源端可用的完整日线历史；之后从成功源时间回溯一天覆盖可更新日线。未补齐源点把拉取起点提前到最早缺口。指数身份为 `index_id/market/symbol`，参考升级为支持日线历史时保留原待处理窗口并在其重放后完整取历史，无需清空状态。
+支持日线的指数首次获取源端可用的完整日线历史；之后从成功源时间回溯一天覆盖可更新日线。未补齐源点把拉取起点提前到最早缺口。指数身份为 `index_id/market/symbol`，参考升级为支持日线历史时保留原待处理窗口并在其重放后完整取历史，无需清空状态。
 
 代理临时不可用时保留原始 pending 和源时间；同一 Yahoo 客户端共享 HTTP 429 冷却时间并做有限退避重试。循环模式会继续后续轮次。恢复代理可单独重启 `yahoo-index-proxy`；要核验采集重启，可重启 `cross-market-collector`，核对 `replayed_rows` 和状态文件。
 
@@ -99,6 +99,8 @@ docker-compose -p ashare-cross-market --env-file .env -f docker-compose.yml up -
 
 ## 源数据边界
 
-Yahoo 当前实测的部分韩国行业指数只发布最新快照，未提供可回补的历史日线。这些参考项标为 `snapshot_only`，按发布的源时间收集快照，重复源时间幂等覆盖；未发布的数据不生成历史 OHLC。原接口没有的 OHLC、成交量等保持空值，存在的真实值保留。
+当前参考有 170 个去重行业指数，US 131 个、KR 39 个。其中 7 个 US 指数返回真实历史日线，其余 124 个 US 和 39 个 KR 指数当前接口只提供快照。这些参考项标为 `snapshot_only`，按发布的源时间收集快照，重复源时间幂等覆盖；未发布的数据不生成历史 OHLC。原接口没有的 OHLC、成交量等保持空值，存在的真实值保留。历史响应中的全空点也保留原始源时间，并作为缺口记录，不能为使批次通过而丢弃。
 
 当前行情是否最终确认由源交易时段证据决定，`is_final` 可为 `False` 或空值，抓取发生在收盘后不单独证明最终确认。`ts` 是源时间毫秒，`fetched_at` 是取回时间，两者分别保存；接口延迟不得冒充新行情。Yahoo 非官方接口和代理未来可用性没有 SLA，本部署的持续结果应由实际每轮记录及源/库核验确认。
+
+实测 Yahoo 可能在同一交易日修改尚未结束的日线点及其源时间。库按实际 `ts` 保存这些观测，`trade_date` 保存交易所当地日期，因此价格表总行数不等于独立交易日数。分析完整交易日日线时须同时核对 `trade_date`、源时间和 `is_final`，不能把同日多个尚未最终确认的观测当成多个交易日。

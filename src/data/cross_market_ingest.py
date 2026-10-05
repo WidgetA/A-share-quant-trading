@@ -10,7 +10,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from src.data.cross_market_store import GreptimeWriteError
+
 DAY_MS = 86_400_000
+
+
+def _failure_details(exc: Exception) -> dict[str, Any]:
+    """Expose acknowledgement progress and exception types, without their text or URLs."""
+    details: dict[str, Any] = {"error_type": type(exc).__name__}
+    if isinstance(exc, GreptimeWriteError):
+        details["confirmed_rows"] = exc.confirmed_rows
+        details["cause_type"] = type(exc.__cause__).__name__ if exc.__cause__ else None
+    return details
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -377,7 +388,7 @@ class CrossMarketIngestor:
                 "market": index["market"],
                 "status": "failed",
                 "stage": stage,
-                "error_type": type(exc).__name__,
+                **_failure_details(exc),
                 "pending_retained": pending_path.exists(),
                 "replayed_rows": replayed,
             }
@@ -443,7 +454,7 @@ class CrossMarketIngestor:
         try:
             mappings = await mappings_task
         except Exception as exc:
-            mappings = {"status": "failed", "error_type": type(exc).__name__}
+            mappings = {"status": "failed", **_failure_details(exc)}
         failed = mappings["status"] == "failed" or any(r["status"] == "failed" for r in results)
         return {
             "status": "partial_failure" if failed else "verified",
