@@ -1,6 +1,7 @@
 """Replayable Massive history backfill into the existing 18-field price table."""
 
 import hashlib
+import importlib
 import json
 import os
 from contextlib import contextmanager
@@ -77,7 +78,7 @@ def queue_lock(state_dir: Path):
         stream.seek(0)
         try:
             if os.name == "nt":
-                import msvcrt
+                msvcrt = importlib.import_module("msvcrt")
 
                 msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
             else:

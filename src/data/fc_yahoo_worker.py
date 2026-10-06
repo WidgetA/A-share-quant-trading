@@ -8,7 +8,7 @@ import json
 import os
 import threading
 from collections.abc import Callable, Mapping
-from typing import Any
+from typing import Any, cast
 
 from src.data.yahoo_indices import YahooIndexClient, YahooIndexError
 from src.data.yahoo_intraday_indices import YahooIntradayIndexClient
@@ -66,14 +66,14 @@ def validate_request(event: bytes | bytearray | str | Mapping[str, Any]) -> dict
 async def fetch_envelope(
     request: Mapping[str, Any],
     *,
-    yahoo: YahooIndexClient,
+    yahoo: YahooIndexClient | YahooIntradayIndexClient,
     fc_request_id: str,
     region: str | None,
 ) -> dict[str, Any]:
     """Fetch one requested period and return original source bytes as UTF-8 JSON."""
     request = validate_request(request)
     if request["capability"] in ("minute_history", "hour_history"):
-        source = await yahoo.fetch(
+        source = await cast(YahooIntradayIndexClient, yahoo).fetch(
             request["symbol"],
             request["market"],
             start=request["start"],
@@ -81,7 +81,7 @@ async def fetch_envelope(
             interval=request["interval"],
         )
     else:
-        source = await yahoo.fetch(
+        source = await cast(YahooIndexClient, yahoo).fetch(
             request["symbol"],
             request["market"],
             start=request["start"],
@@ -144,7 +144,7 @@ class FCYahooWorker:
         if self._yahoo is None:
             # No configured or environment proxy is used for US FC egress.
             self._yahoo = self._client_factory(proxy=None)
-        source_client = self._yahoo
+        source_client: YahooIndexClient | YahooIntradayIndexClient = self._yahoo
         if request["capability"] in ("minute_history", "hour_history"):
             if self._intraday is None:
                 self._intraday = self._intraday_client_factory(transport=self._yahoo)

@@ -3,7 +3,7 @@
 import json
 import math
 from collections.abc import Iterable, Mapping
-from typing import Any
+from typing import Any, Literal, overload
 
 import httpx
 
@@ -109,6 +109,14 @@ def _literal(value: Any) -> str:
     raise ValueError(f"Unsupported SQL value type: {type(value).__name__}")
 
 
+@overload
+def _text(value: Any, field: str, *, required: Literal[True]) -> str: ...
+
+
+@overload
+def _text(value: Any, field: str, *, required: Literal[False] = False) -> str | None: ...
+
+
 def _text(value: Any, field: str, *, required: bool = False) -> str | None:
     if value is None and not required:
         return None
@@ -153,7 +161,7 @@ def _normalise_price(point: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _normalise_reference(reference: Mapping[str, Any]) -> dict[str, Any]:
-    row = {
+    row: dict[str, Any] = {
         field: _text(reference.get(field), field, required=True) for field in REFERENCE_KEYS[:-1]
     }
     row["reference_at"] = _millis(reference.get("reference_at"), "reference_at")
@@ -320,7 +328,7 @@ class CrossMarketStore:
         identities = list(
             {
                 (
-                    *(_text(row.get(field), field, required=True) for field in keys[:-1]),
+                    tuple(_text(row.get(field), field, required=True) for field in keys[:-1]),
                     _millis(row.get(keys[-1]), keys[-1]),
                 ): None
                 for row in expected
@@ -335,8 +343,8 @@ class CrossMarketStore:
         rows = []
         for start in range(0, len(identities), self._batch_size):
             series: dict[tuple[str, ...], list[int]] = {}
-            for identity in identities[start : start + self._batch_size]:
-                series.setdefault(identity[:-1], []).append(identity[-1])
+            for tags, stamp in identities[start : start + self._batch_size]:
+                series.setdefault(tags, []).append(stamp)
             clauses = []
             for tags, stamps in series.items():
                 tag_clause = " AND ".join(

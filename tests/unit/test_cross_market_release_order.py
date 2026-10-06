@@ -162,6 +162,22 @@ def test_cli_failure_does_not_print_provider_message_or_arbitrary_code(monkeypat
     }
 
 
+def test_cli_snapshot_failure_reports_only_safe_parse_diagnostics(monkeypatch, capsys):
+    def fail(argv):
+        raise ORDER.RemoteJSONError(stdout_bytes=600000, json_error_position=599990)
+
+    monkeypatch.setattr(ORDER, "main", fail)
+    assert ORDER.cli([]) == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "failed",
+        "error_type": "RemoteJSONError",
+        "code": "RemoteJSONInvalid",
+        "phase": "collector_state_snapshot",
+        "stdout_bytes": 600000,
+        "json_error_position": 599990,
+    }
+
+
 def test_unversioned_legacy_target_can_receive_first_ordered_release(release):
     result, events, _ = execute(release, release.revision, {})
     assert result["status"] == "verified" and events[0] == "fc"

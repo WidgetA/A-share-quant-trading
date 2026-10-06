@@ -3,11 +3,11 @@
 import uuid
 from typing import Any
 
-from src.data.fc_yahoo_indices import FCYahooIndexClient
+from src.data.fc_yahoo_indices import _FCYahooSourceClient
 from src.data.yahoo_intraday_indices import INTERVAL_SECONDS, parse_intraday_chart
 
 
-class FCYahooIntradayIndexClient(FCYahooIndexClient):
+class FCYahooIntradayIndexClient(_FCYahooSourceClient):
     """Share official SDK authentication and finite retries with the daily adapter."""
 
     def _parse_source(self, source: dict, payload: dict, fetched_at: int):

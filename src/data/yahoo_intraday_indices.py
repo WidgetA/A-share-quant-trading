@@ -5,7 +5,7 @@ from __future__ import annotations
 import struct
 import time
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -80,7 +80,12 @@ def parse_intraday_chart(
         raise YahooIndexError("Returned granularity is not the requested intraday interval")
     indicators = result.get("indicators")
     quotes = indicators.get("quote") if isinstance(indicators, dict) else None
-    if not isinstance(quotes, list) or len(quotes) != 1 or not isinstance(quotes[0], dict):
+    if (
+        not isinstance(indicators, dict)
+        or not isinstance(quotes, list)
+        or len(quotes) != 1
+        or not isinstance(quotes[0], dict)
+    ):
         raise YahooIndexError("No unique intraday quote arrays")
     series = quotes[0]
     timestamps = result.get("timestamp")
@@ -180,7 +185,7 @@ def parse_intraday_chart(
         outside = [
             index
             for index, stamp in enumerate(timestamps)
-            if not start - seconds <= stamp < end + seconds
+            if not start - seconds <= stamp < cast(int, end) + seconds
         ]
         if outside:
             if outside != [len(timestamps) - 1]:

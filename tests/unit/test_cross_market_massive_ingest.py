@@ -292,7 +292,7 @@ async def test_delayed_values_persist_but_late_ok_bars_finish_window_without_dou
     collector = producer(tmp_path, index, source, store)
     first = await collector.run_once(start_date="2026-10-01", end_date="2026-10-02")
     directory = collector.series_dir(index)
-    state = json.loads((directory / "state.json").read_text())
+    state = json.loads((directory / "state.json").read_text(encoding="utf8"))
     assert first["status"] == "source_delayed"
     assert first["results"][0]["classification"] == "source_delayed"
     assert len(store.writes[0]) == len(store.verifies[0]) == 2
@@ -302,13 +302,13 @@ async def test_delayed_values_persist_but_late_ok_bars_finish_window_without_dou
     assert not (directory / "pending.json").exists()
     delayed = list((directory / "delayed_receipts").glob("*.json"))
     assert len(delayed) == 1
-    receipt = json.loads(delayed[0].read_text())
+    receipt = json.loads(delayed[0].read_text(encoding="utf8"))
     assert receipt["status"] == "source_delayed" and receipt["verified_rows"] == 2
     assert receipt["fetched"]["fetched_at"] == 1791310000000
     assert receipt["fetched"]["payload_sha256"]
     # Same state, fresh source request; this is not replaying the old delayed RAW.
     second = await collector.run_once(start_date="2026-10-01", end_date="2026-10-02")
-    state = json.loads((directory / "state.json").read_text())
+    state = json.loads((directory / "state.json").read_text(encoding="utf8"))
     assert second["status"] == "verified" and len(source.calls) == 2
     assert len(store.writes[1]) == 4 and len(store.verifies[1]) == 4
     assert state["covered_until_exclusive"] == "2026-10-03" and state["todo"] == []
@@ -323,7 +323,7 @@ async def test_old_completed_delayed_raw_reopens_window_but_keeps_saved_values(t
     await collector.run_once(start_date="2026-10-01", end_date="2026-10-02")
     directory = collector.series_dir(index)
     receipt_path = directory / "receipts/2026-10-01_2026-10-02.verified.json"
-    receipt = json.loads(receipt_path.read_text())
+    receipt = json.loads(receipt_path.read_text(encoding="utf8"))
     raw = json.loads(receipt["fetched"]["raw_json"])
     raw["status"] = "DELAYED"
     receipt["fetched"]["raw_json"] = json.dumps(raw)
@@ -331,7 +331,7 @@ async def test_old_completed_delayed_raw_reopens_window_but_keeps_saved_values(t
     receipt["fetched"]["payload_sha256"] = receipt["fetched"]["source_payload_sha256"] = sha
     receipt_path.write_text(json.dumps(receipt), encoding="utf8")
     state_path = directory / "state.json"
-    state = json.loads(state_path.read_text())
+    state = json.loads(state_path.read_text(encoding="utf8"))
     state["verified_windows"][0]["payload_sha256"] = sha
     state.pop("coverage_status_policy", None)  # actual prior-version state format
     state_path.write_text(json.dumps(state), encoding="utf8")
@@ -341,12 +341,12 @@ async def test_old_completed_delayed_raw_reopens_window_but_keeps_saved_values(t
     retry = Source(failure="transport_failure")
     restarted = producer(tmp_path, index, retry, Store())
     result = await restarted.run_once(start_date="2026-10-01", end_date="2026-10-02")
-    state = json.loads(state_path.read_text())
+    state = json.loads(state_path.read_text(encoding="utf8"))
     assert result["status"] == "partial_failure" and len(retry.calls) == 1
     assert state["covered_until_exclusive"] == "2026-10-01"
     assert state["verified_windows"] == [] and state["verified_rows"] == 0
     assert state["todo"] == [{"start_date": "2026-10-01", "end_date": "2026-10-02"}]
     delayed = list((directory / "delayed_receipts").glob("*.json"))
     assert len(delayed) == 1
-    saved = json.loads(delayed[0].read_text())
+    saved = json.loads(delayed[0].read_text(encoding="utf8"))
     assert saved["fetched"] == receipt["fetched"] and saved["verified_rows"] == 2

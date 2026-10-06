@@ -259,7 +259,7 @@ class MassiveIndexClient:
             f"{API_ROOT}/v2/aggs/ticker/{quote(index['vendor_ticker'], safe='')}/"
             f"range/5/minute/{start_date}/{end_date}"
         )
-        params = {"sort": "asc", "limit": BASE_LIMIT}
+        params: dict[str, str | int] = {"sort": "asc", "limit": BASE_LIMIT}
         async with self._lock:
             await self._reserve()
             try:

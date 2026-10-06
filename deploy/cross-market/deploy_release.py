@@ -20,7 +20,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from build_release import _atomic_write, verify_release
-from deploy_collectors import NAMES, CollectorDeployer, SSHRemote, credentials
+from deploy_collectors import NAMES, CollectorDeployer, RemoteJSONError, SSHRemote, credentials
 from deploy_fc import (
     FUNCTION,
     REGION,
@@ -192,6 +192,15 @@ def cli(argv=None):
     try:
         return main(argv)
     except Exception as exc:
+        diagnostic = (
+            {
+                "phase": exc.phase,
+                "stdout_bytes": exc.stdout_bytes,
+                "json_error_position": exc.json_error_position,
+            }
+            if isinstance(exc, RemoteJSONError)
+            else {}
+        )
         print(
             json.dumps(
                 {
@@ -199,7 +208,10 @@ def cli(argv=None):
                     "error_type": type(exc).__name__,
                     "code": ReleaseOrderError.code
                     if isinstance(exc, ReleaseOrderError)
+                    else RemoteJSONError.code
+                    if isinstance(exc, RemoteJSONError)
                     else "DeploymentFailed",
+                    **diagnostic,
                 }
             )
         )

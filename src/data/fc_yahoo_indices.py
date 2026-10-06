@@ -11,8 +11,9 @@ import os
 import time
 import uuid
 from collections.abc import Callable, Mapping
+from datetime import datetime
 from email.utils import parsedate_to_datetime
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlsplit
 
 import httpx
@@ -178,7 +179,7 @@ def _transient(exc: Exception) -> bool:
 
 
 def _retry_after(exc: Exception, default: float) -> float:
-    value = getattr(exc, "retry_after", None)
+    value: Any = getattr(exc, "retry_after", None)
     headers = getattr(exc, "headers", {})
     if value is None and isinstance(headers, Mapping):
         value = next((v for k, v in headers.items() if str(k).lower() == "retry-after"), None)
@@ -187,13 +188,14 @@ def _retry_after(exc: Exception, default: float) -> float:
         return max(1, delay) if math.isfinite(delay) else default
     except (TypeError, ValueError):
         try:
-            return max(1, parsedate_to_datetime(value).timestamp() - time.time())
+            parsed = cast(datetime, parsedate_to_datetime(value))
+            return max(1, parsed.timestamp() - time.time())
         except (TypeError, ValueError, OverflowError):
             return default
 
 
-class FCYahooIndexClient:
-    """A fetch-compatible signed FC client; ingestion/checkpoints remain domestic.
+class _FCYahooSourceClient:
+    """Shared signed native source transport; ingestion/checkpoints remain domestic.
 
     ``invoke`` may inject a synchronous invocation returning the official response
     shape. The SDK call and entire response stream are read in a worker thread.
@@ -294,6 +296,32 @@ class FCYahooIndexClient:
             capability=payload["capability"],
         )
 
+    async def _fetch_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        for attempt in range(self._max_attempts):
+            await self._wait_cooldown()
+            try:
+                raw_response = await asyncio.to_thread(
+                    lambda: _read_response(self._invoke(dict(payload)))
+                )
+            except Exception as exc:
+                error = _root_error(exc)
+                if not _transient(error) or attempt + 1 == self._max_attempts:
+                    raise FCYahooIndexError(
+                        "FC invocation failed", status_code=_status(error)
+                    ) from None
+                if _status(error) == 429:
+                    delay = _retry_after(error, 30 * (attempt + 1))
+                    self._cooldown_until = max(self._cooldown_until, time.monotonic() + delay)
+                else:
+                    await asyncio.sleep(min(2**attempt, 8))
+                continue
+            return self._decode(raw_response, payload)
+        raise FCYahooIndexError("FC invocation did not return a source window")
+
+
+class FCYahooIndexClient(_FCYahooSourceClient):
+    """Daily/quote request interface using the shared signed source transport."""
+
     async def fetch(
         self,
         symbol: str,
@@ -319,25 +347,3 @@ class FCYahooIndexClient:
             "capability": capability,
         }
         return await self._fetch_payload(payload)
-
-    async def _fetch_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
-        for attempt in range(self._max_attempts):
-            await self._wait_cooldown()
-            try:
-                raw_response = await asyncio.to_thread(
-                    lambda: _read_response(self._invoke(dict(payload)))
-                )
-            except Exception as exc:
-                error = _root_error(exc)
-                if not _transient(error) or attempt + 1 == self._max_attempts:
-                    raise FCYahooIndexError(
-                        "FC invocation failed", status_code=_status(error)
-                    ) from None
-                if _status(error) == 429:
-                    delay = _retry_after(error, 30 * (attempt + 1))
-                    self._cooldown_until = max(self._cooldown_until, time.monotonic() + delay)
-                else:
-                    await asyncio.sleep(min(2**attempt, 8))
-                continue
-            return self._decode(raw_response, payload)
-        raise FCYahooIndexError("FC invocation did not return a source window")

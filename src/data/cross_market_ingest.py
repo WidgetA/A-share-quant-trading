@@ -68,7 +68,8 @@ def _version_ms(value: Any) -> int:
     if not isinstance(value, str):
         raise ValueError("checked_at must be an ISO UTC reference time")
     when = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    if when.tzinfo is None or when.utcoffset().total_seconds() != 0:
+    offset = when.utcoffset()
+    if when.tzinfo is None or offset is None or offset.total_seconds() != 0:
         raise ValueError("checked_at must be an ISO UTC reference time")
     return int(when.timestamp() * 1000)
 

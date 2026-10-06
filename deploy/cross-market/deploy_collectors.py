@@ -50,6 +50,18 @@ class VerificationTimeout(DeploymentError):
     """Collectors remain active, but a complete new cycle was not verified."""
 
 
+class RemoteJSONError(DeploymentError):
+    """An SSH state response failed parsing, without exposing its contents."""
+
+    code = "RemoteJSONInvalid"
+    phase = "collector_state_snapshot"
+
+    def __init__(self, stdout_bytes: int, json_error_position: int):
+        super().__init__("State snapshot response was not valid JSON")
+        self.stdout_bytes = stdout_bytes
+        self.json_error_position = json_error_position
+
+
 def digest(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
@@ -242,8 +254,11 @@ class SSHRemote:
                     stdout.extend(channel.recv(65536))
                 while channel.recv_stderr_ready():
                     stderr.extend(channel.recv_stderr(65536))
+                # Exit status can arrive before final stream data. Drain until
+                # the channel has closed, rather than closing it on status alone.
                 if (
-                    channel.exit_status_ready()
+                    channel.closed
+                    and channel.exit_status_ready()
                     and not channel.recv_ready()
                     and not channel.recv_stderr_ready()
                 ):
@@ -519,7 +534,13 @@ class CollectorDeployer:
         ]
 
     def snapshot(self):
-        return json.loads(self.remote.run(remote_script(_snapshot, self.root)))
+        raw = self.remote.run(remote_script(_snapshot, self.root))
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RemoteJSONError(len(raw), exc.pos) from None
+        except UnicodeDecodeError as exc:
+            raise RemoteJSONError(len(raw), exc.start) from None
 
     def deploy(self, private: bytes, verify_timeout: float = 900, poll_seconds: float = 5):
         manifest = self.release["manifest"]

@@ -22,6 +22,71 @@ IMAGE = "registry.example/team/trading-service:" + REVISION
 IMMUTABLE = "sha256:" + "b" * 64
 
 
+def test_ssh_output_after_exit_status_is_not_truncated(monkeypatch):
+    class Channel:
+        closed = False
+
+        def __init__(self):
+            self.stdout = [b'{"files":']
+            self.stderr = []
+            self.close_called = False
+
+        def exec_command(self, command):
+            assert command == "python3 snapshot.py"
+
+        def recv_ready(self):
+            return bool(self.stdout)
+
+        def recv(self, size):
+            return self.stdout.pop(0)
+
+        def recv_stderr_ready(self):
+            return bool(self.stderr)
+
+        def recv_stderr(self, size):
+            return self.stderr.pop(0)
+
+        def exit_status_ready(self):
+            # A process status is not EOF on its stdout/stderr streams.
+            return True
+
+        def recv_exit_status(self):
+            return 0
+
+        def deliver_remaining_streams(self, seconds):
+            self.stdout.append(b'{"key":"value"}}\n')
+            self.stderr.append(b"credential-bearing diagnostic must not join stdout")
+            self.closed = True
+
+        def close(self):
+            self.close_called = True
+
+    channel = Channel()
+    remote = deploy.SSHRemote.__new__(deploy.SSHRemote)
+    remote.client = SimpleNamespace(
+        get_transport=lambda: SimpleNamespace(open_session=lambda **kwargs: channel)
+    )
+    monkeypatch.setattr(deploy.time, "sleep", channel.deliver_remaining_streams)
+    raw = remote.run(["python3", "snapshot.py"])
+    assert raw == b'{"files":{"key":"value"}}\n'
+    assert json.loads(raw) == {"files": {"key": "value"}}
+    assert channel.close_called
+
+
+def test_snapshot_invalid_json_has_safe_stage_diagnostics():
+    raw = b"invalid source AK=never-emit-this-credential"
+    collector = deploy.CollectorDeployer.__new__(deploy.CollectorDeployer)
+    collector.remote = SimpleNamespace(run=lambda argv: raw)
+    collector.root = "/opt/ashare-cross-market"
+    with pytest.raises(deploy.DeploymentError) as caught:
+        collector.snapshot()
+    assert caught.value.code == "RemoteJSONInvalid"
+    assert caught.value.phase == "collector_state_snapshot"
+    assert caught.value.stdout_bytes == len(raw)
+    assert caught.value.json_error_position == 0
+    assert "never-emit" not in str(caught.value)
+
+
 def sha(raw):
     return hashlib.sha256(raw).hexdigest()
 

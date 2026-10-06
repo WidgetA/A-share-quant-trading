@@ -119,8 +119,8 @@ def parse_chart(
         ohl = [value(key, index) for key in ("open", "high", "low")]
         if not snapshot and any(item is not None and item <= 0 for item in ohl):
             raise YahooIndexError("Invalid OHLC; zero placeholders are not historical bars")
-        if all(item is not None for item in ohl):
-            opening, high, low = ohl
+        opening, high, low = ohl
+        if opening is not None and high is not None and low is not None:
             bounds = [item for item in (opening, close, low) if item is not None]
             if not snapshot and (high < max(bounds) or low > min(bounds)):
                 raise YahooIndexError("Inconsistent OHLC")
@@ -196,7 +196,7 @@ class YahooChartTransport:
             await asyncio.sleep(min(remaining, 30))
 
     async def fetch_chart(self, symbol: str, params: dict[str, str]) -> dict:
-        last_error = None
+        last_error: Exception | None = None
         for attempt in range(4):
             await self._wait_cooldown()
             host = ("query1", "query2")[attempt % 2]
