@@ -93,6 +93,61 @@ def test_single_and_sparse_five_minute_bars_are_preserved(index, payload):
     assert len(parse(payload, index)["points"]) == 2
 
 
+def test_delayed_success_keeps_actual_bars_and_actual_last_date(index):
+    # Three unmodified source bars from the actual 237-bar BKX response;
+    # only count/results are subsetted. Full RAW SHA c3622924e5c17efc...
+    delayed = {
+        "ticker": "I:BKX",
+        "queryCount": 1181,
+        "status": "DELAYED",
+        "error": None,
+        "count": 3,
+        "results": [
+            {
+                "o": 169.0206873393,
+                "c": 169.64038380546,
+                "h": 169.74318420296,
+                "l": 169.01193617496,
+                "t": 1790861400000,
+            },
+            {
+                "o": 169.63288159028,
+                "c": 168.98731664542,
+                "h": 169.64107184358,
+                "l": 168.98731664542,
+                "t": 1790861700000,
+            },
+            {
+                "o": 170.65120601089,
+                "c": 170.60743756048,
+                "h": 170.65120601089,
+                "l": 170.60743756048,
+                "t": 1791230400000,
+            },
+        ],
+    }
+    kwargs = {"start_date": "2026-10-01", "end_date": "2026-10-06", "fetched_at": 1791327018377}
+    result = parse_aggregates(delayed, index, **kwargs)
+    assert (
+        result["points"] == parse_aggregates(delayed | {"status": "OK"}, index, **kwargs)["points"]
+    )
+    assert result["source_first_date"] == "2026-10-01"
+    assert result["source_last_date"] == "2026-10-05"
+    assert result["source_empty"] is False
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"error": "NOT_AUTHORIZED"},
+        {"ticker": "I:BKXTR"},
+    ],
+)
+def test_delayed_does_not_bypass_failure_or_identity_checks(index, payload, mutation):
+    with pytest.raises(MassiveIndexError):
+        parse(payload | {"status": "DELAYED"} | mutation, index)
+
+
 @pytest.mark.parametrize(
     "mutation",
     [

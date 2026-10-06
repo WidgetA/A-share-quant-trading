@@ -96,7 +96,7 @@ def parse_aggregates(
         raise MassiveIndexError("invalid_window")
     if not isinstance(payload, dict) or payload.get("ticker") != index["vendor_ticker"]:
         raise MassiveIndexError("source_identity_mismatch")
-    if payload.get("status") != "OK" or payload.get("error"):
+    if payload.get("status") not in ("OK", "DELAYED") or payload.get("error"):
         raise MassiveIndexError("source_error")
     count = _integer(payload.get("queryCount"), "query_count")
     bars = payload.get("results", [])
