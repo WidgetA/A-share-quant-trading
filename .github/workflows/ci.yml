@@ -257,8 +257,8 @@ jobs:
 
       - name: Order, deploy and verify the same v15 revision
         env:
-          ALIYUN_ACCESS_KEY_ID: ${{ secrets.ALIYUN_ACCESS_KEY_ID }}
-          ALIYUN_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_ACCESS_KEY_SECRET }}
+          ALIYUN_ACCESS_KEY_ID: ${{ secrets.CROSS_MARKET_ALIYUN_ACCESS_KEY_ID }}
+          ALIYUN_ACCESS_KEY_SECRET: ${{ secrets.CROSS_MARKET_ALIYUN_ACCESS_KEY_SECRET }}
           CROSS_MARKET_SSH_HOST: ${{ secrets.CROSS_MARKET_SSH_HOST }}
           CROSS_MARKET_SSH_USER: ${{ secrets.CROSS_MARKET_SSH_USER }}
           CROSS_MARKET_SSH_PASSWORD: ${{ secrets.CROSS_MARKET_SSH_PASSWORD }}
