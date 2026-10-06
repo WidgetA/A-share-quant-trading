@@ -78,7 +78,8 @@ async def run(args):
             from src.data.fc_yahoo_indices import FC_FUNCTION_NAME, FC_REGION, FCYahooIndexClient
 
             yahoo = FCYahooIndexClient(
-                endpoint, function or FC_FUNCTION_NAME,
+                endpoint,
+                function or FC_FUNCTION_NAME,
                 region=os.environ.get("CROSS_MARKET_FC_REGION") or FC_REGION,
             )
         else:

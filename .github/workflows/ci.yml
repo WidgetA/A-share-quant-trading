@@ -11,6 +11,28 @@ env:
   REGISTRY: ${{ secrets.ACR_REGISTRY }}
 
 jobs:
+  release-changes:
+    name: Detect Complete Push Changes
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      cross_market: ${{ steps.changes.outputs.cross_market }}
+      training: ${{ steps.changes.outputs.training }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check the entire push range
+        id: changes
+        env:
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+        run: >-
+          python3 scripts/cross_market_release_changes.py
+          --before "$PUSH_BEFORE" --after "$PUSH_AFTER"
+          --github-output "$GITHUB_OUTPUT"
+
   lint:
     name: Lint & Format Check
     runs-on: ubuntu-latest
@@ -98,9 +120,9 @@ jobs:
         id: tag
         run: |
           if [ "${{ github.ref }}" = "refs/heads/main" ]; then
-            echo "tag=latest" >> "$GITHUB_OUTPUT"
+            echo "mutable_tag=${{ env.REGISTRY }}/${{ secrets.ACR_NAMESPACE }}/trading-service:latest" >> "$GITHUB_OUTPUT"
           else
-            echo "tag=test" >> "$GITHUB_OUTPUT"
+            echo "mutable_tag=" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Build and push Docker image
@@ -111,7 +133,7 @@ jobs:
           provenance: false
           platforms: linux/amd64
           tags: |
-            ${{ env.REGISTRY }}/${{ secrets.ACR_NAMESPACE }}/trading-service:${{ steps.tag.outputs.tag }}
+            ${{ steps.tag.outputs.mutable_tag }}
             ${{ env.REGISTRY }}/${{ secrets.ACR_NAMESPACE }}/trading-service:${{ github.sha }}
           build-args: |
             GIT_COMMIT=${{ github.sha }}
@@ -120,30 +142,53 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  deploy-serverless:
-    needs: [lint, test]
-    if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/refactor/cleanup-v15-only') && github.event_name == 'push' && vars.ACR_ENABLED == 'true'
+  promote-v15-image:
+    name: Publish Current v15 Trading Image
+    needs: [build-and-push]
+    if: github.ref == 'refs/heads/refactor/cleanup-v15-only' && github.event_name == 'push' && vars.ACR_ENABLED == 'true'
     runs-on: ubuntu-latest
+    concurrency:
+      group: trading-v15-image-publication
+      cancel-in-progress: false
+      queue: max
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
+      - name: Check the branch after the immutable build
+        id: freshness
+        run: >-
+          python3 scripts/cross_market_release_changes.py
+          --publish-if-current '${{ github.sha }}'
+          --branch refactor/cleanup-v15-only --github-output "$GITHUB_OUTPUT"
+      - name: Set up Docker Buildx
+        if: steps.freshness.outputs.publish_v15 == 'true'
+        uses: docker/setup-buildx-action@v3
+      - name: Login to Alibaba Cloud ACR
+        if: steps.freshness.outputs.publish_v15 == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+      - name: Promote the exact current SHA image to test
+        if: steps.freshness.outputs.publish_v15 == 'true'
+        run: >-
+          docker buildx imagetools create
+          --tag '${{ env.REGISTRY }}/${{ secrets.ACR_NAMESPACE }}/trading-service:test'
+          '${{ env.REGISTRY }}/${{ secrets.ACR_NAMESPACE }}/trading-service:${{ github.sha }}'
 
-      - name: Check serverless changes
-        id: changes
-        run: |
-          if git diff --name-only HEAD~1 HEAD | grep -qE '^(serverless/|\.github/workflows/)'; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          fi
+  deploy-serverless:
+    needs: [lint, test, release-changes]
+    if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/refactor/cleanup-v15-only') && github.event_name == 'push' && vars.ACR_ENABLED == 'true' && needs.release-changes.outputs.training == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
-        if: steps.changes.outputs.changed == 'true'
         uses: docker/setup-buildx-action@v3
 
       - name: Login to Alibaba Cloud ACR
-        if: steps.changes.outputs.changed == 'true'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -151,7 +196,6 @@ jobs:
           password: ${{ secrets.ACR_PASSWORD }}
 
       - name: Build and push serverless image
-        if: steps.changes.outputs.changed == 'true'
         uses: docker/build-push-action@v5
         with:
           context: ./serverless
@@ -165,7 +209,6 @@ jobs:
           cache-to: type=gha,mode=max,scope=serverless
 
       - name: Deploy to FC via Serverless Devs
-        if: steps.changes.outputs.changed == 'true'
         env:
           ACR_IMAGE: ${{ env.REGISTRY }}/${{ secrets.ACR_NAMESPACE }}/ml-training-serverless:${{ github.sha }}
           ALIBABA_CLOUD_ACCESS_KEY_ID: ${{ secrets.ALIYUN_ACCESS_KEY_ID }}
@@ -176,3 +219,52 @@ jobs:
           cd serverless
           sed -i "s|\${env.ACR_IMAGE}|${ACR_IMAGE}|g" s.yaml
           s deploy -y --use-local --skip-actions
+
+  deploy-cross-market:
+    name: Release v15 Index Infrastructure
+    needs: [lint, test, build-and-push, release-changes]
+    if: github.ref == 'refs/heads/refactor/cleanup-v15-only' && github.event_name == 'push' && vars.ACR_ENABLED == 'true' && needs.release-changes.outputs.cross_market == 'true'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: cross-market-v15-release
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Build Linux Python dependency environments
+        run: |
+          uv python install 3.12 3.13
+          uv venv --python 3.12 --seed worker-build-env
+          uv venv --python 3.13 --seed collector-build-env
+          uv venv --python 3.13 --seed deploy-env
+          worker-build-env/bin/python -m pip install --no-compile --only-binary=:all: --target worker-vendor -r serverless/yahoo_indices/requirements.txt
+          collector-build-env/bin/python -m pip install --no-compile --only-binary=:all: --target collector-vendor -r deploy/cross-market/requirements-fc.txt
+          deploy-env/bin/python -m pip install --no-compile -r deploy/cross-market/requirements-deploy.txt
+
+      - name: Build one revision of the worker and collectors
+        run: >-
+          deploy-env/bin/python deploy/cross-market/build_release.py
+          --source-root . --revision '${{ github.sha }}' --output-dir release
+          --worker-vendor worker-vendor --collector-vendor collector-vendor
+
+      - name: Order, deploy and verify the same v15 revision
+        env:
+          ALIYUN_ACCESS_KEY_ID: ${{ secrets.ALIYUN_ACCESS_KEY_ID }}
+          ALIYUN_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_ACCESS_KEY_SECRET }}
+          CROSS_MARKET_SSH_HOST: ${{ secrets.CROSS_MARKET_SSH_HOST }}
+          CROSS_MARKET_SSH_USER: ${{ secrets.CROSS_MARKET_SSH_USER }}
+          CROSS_MARKET_SSH_PASSWORD: ${{ secrets.CROSS_MARKET_SSH_PASSWORD }}
+          CROSS_MARKET_SSH_KNOWN_HOSTS: ${{ secrets.CROSS_MARKET_SSH_KNOWN_HOSTS }}
+          RUNTIME_IMAGE: ${{ env.REGISTRY }}/${{ secrets.ACR_NAMESPACE }}/trading-service:${{ github.sha }}
+        run: >-
+          deploy-env/bin/python deploy/cross-market/deploy_release.py
+          --release-dir release --source-root . --runtime-image "$RUNTIME_IMAGE"
+          --remote-root /opt/ashare-cross-market

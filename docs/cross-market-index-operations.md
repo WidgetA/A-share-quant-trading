@@ -1,5 +1,42 @@
 # 跨市场行业指数采集运行
 
+## v15 共用索引和数据来源
+
+这套基础设施随 `refactor/cleanup-v15-only` 开发和发布。索引保持现有 170 个原始指数及其 A 股二级行业对应关系；Massive 的供应商代码单独记录在 `src/data/reference/cross_market/massive_indices.json`，不改变原 `index_id`、Yahoo `symbol`、编制方或指数口径。不会用 ETF、期货、CFD 或其他指数补位。
+
+美股历史五分钟行情由 Massive 免费 Indices Basic 排队回灌，未来增量沿用美国 FC 的 Yahoo 分钟采集。两种来源统一写入 `cross_market_index_prices`：历史来源为 `provider='massive'`，Yahoo 为 `provider='yahoo'`，同一原指数仍用同一个原 `symbol`。两种供应商在重叠日期可能各有一份观测，查询时显式选择来源，不将两份观测当作两个原指数或直接相加。
+
+历史任务从 2023-01-01 发起请求，以接口实际发布的时间和数值为准。季度窗口遇到 `queryCount` 达到 50000 个基础聚合或返回分页信号时继续拆窗，不将截断结果算作窗口完成。数据先保存原始响应，再写入并读回全部 18 个字段；成功后才保存窗口状态。权限拒绝、限流、请求错误及成功返回空数组分别记录，不制造缺少的价格或时间。
+
+整个临时 Key 只由一个历史任务使用，HTTP 请求启动间隔至少 13 秒，重试也进入同一队列；429 按服务端冷却时间等待。Key 从 Git 目录之外的本地文件读取，不写入源码、参考数据、日志、发布包或 Git。已有短窗口验证不代表整个历史范围已经回灌；具体完成范围以实际任务记录和 Greptime 数据为准。
+
+韩国在真实一分钟、五分钟增量之外，增加 39 个原指数的 730 天小时历史，用于回测。`interval='1h'`、`data_kind='hour_bar'` 保存真实小时线，源端尾部报价保存为 `hour_quote_snapshot`。小时线只做一次历史种子写入、读回和原始源归档，之后的自动循环继续采集分钟线，不每轮重拉 730 天。源返回的空值保留，不能用它生成不存在的分钟行情。
+
+## 同分支发布与回灌
+
+CI 根据整个 push 的前后提交判断是否有基础设施变化。实现、参考数据、FC worker、采集器、依赖和部署脚本一起维护；文档变更不单独触发 FC 或采集器重新部署。原训练函数只随训练源码变化发布。
+
+发布先通过检查并构建带完整 Git SHA 的镜像，再由 `deploy/cross-market/build_release.py` 从同一提交构建 Linux FC ZIP、国内 runtime 和摘要清单。`deploy/cross-market/deploy_release.py` 在同一发布队列内先核对实际已部署版本，再依次更新并核对美国 FC 和两个国内采集器。已经上线的新提交不会被迟到的旧任务覆盖；首次迁移兼容旧 FC 没有提交标记的事实，后续发布写入明确版本。v15 的 `test` 镜像别名单独排队，在不可变镜像构建完成后读取真实分支头，再更新当前提交的别名。实际成功仍须有新完整采集轮次及 Greptime 读回证据。
+
+临时 Massive 回灌使用 `scripts/backfill_cross_market_massive.py`。本次任务使用本机代理取得历史数据，国内自动增量仍由美国 FC 取数。回灌状态目录保留每个原指数的完整源响应、验证回执、实际源起止日期、空窗口及尚未完成的窗口；再次运行先重放已保存待写源，再继续剩余请求，不重复推进成功计数。数据库失败不会被当作来源无数据。
+
+维护时可按原索引直接查两种真实粒度，例如：
+
+```sql
+SELECT ts, "open", high, low, "close", volume, fetched_at
+FROM cross_market_index_prices
+WHERE provider = 'massive' AND market = 'US' AND symbol = '^SOX'
+  AND "interval" = '5m' AND data_kind = 'minute_bar'
+  AND ts >= '2023-01-01T00:00:00Z'
+ORDER BY ts;
+
+SELECT ts, "open", high, low, "close", volume, fetched_at
+FROM cross_market_index_prices
+WHERE provider = 'yahoo' AND market = 'KR' AND symbol = 'KOSPI-10.KS'
+  AND "interval" = '1h' AND data_kind = 'hour_bar'
+ORDER BY ts;
+```
+
 国内采集器通过阿里云官方 FC SDK 同步调用美国 `us-west-1` 的独立函数 `ashare_yahoo_indices_v15`。美国函数直接访问 Yahoo，返回完整原始响应；国内校验身份、SHA256 和源数据，再写入已有 GreptimeDB。映射、pending、成功游标和读回核验均在国内处理。FC 的构建和部署见 [`serverless/yahoo_indices/README.md`](../serverless/yahoo_indices/README.md)。
 
 部署定义为 [`deploy/cross-market/docker-compose.yml`](../deploy/cross-market/docker-compose.yml)，所有命令通过 `-p ashare-cross-market` 指定独立项目。生产主机现有工具为 `docker-compose 1.29.2`、Docker Engine `29.1.3`，没有 `docker compose` 插件；文件使用其支持的 `version: "3.7"` 格式。项目运行 `cross-market-collector` 和 `cross-market-intraday-collector`，接入已有 `root_default` 网络，数据库地址为 `http://greptimedb:4000`，不发布宿主端口。已有交易服务和 GreptimeDB 容器不在该项目中。

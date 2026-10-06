@@ -17,8 +17,8 @@ from src.data.cross_market_ingest import (
     _read_json,
     load_reference,
 )
+from src.data.yahoo_intraday_indices import INTERVAL_SECONDS, observation_kinds
 
-INTERVAL_SECONDS = {"1m": 60, "5m": 300}
 DAY_SECONDS = 86400
 
 
@@ -44,6 +44,8 @@ def load_intraday_reference(reference_path: Path, base_path: Path, capability_pa
             raise ValueError("Unsupported minute interval policy")
         for field in ("retention_seconds", "max_window_seconds"):
             _integer(policy.get(field), field, minimum=INTERVAL_SECONDS[interval])
+        if policy.get("update_mode", "continuous") not in ("continuous", "history_seed"):
+            raise ValueError("Unsupported intraday update mode")
     adopted = {index["index_id"]: index for index in reference["indices"]}
     selected, seen = [], set()
     for entity in capability["indices"]:
@@ -162,18 +164,19 @@ class CrossMarketIntradayIngestor:
         if fetched.get("points"):
             source = CrossMarketIngestor._source_window(index, fetched)
             step = INTERVAL_SECONDS[index["interval"]]
+            bar_kind, quote_kind = observation_kinds(index["interval"])
             for point in source["points"]:
                 if point.get("interval") != index["interval"] or point.get("data_kind") not in {
-                    "minute_bar",
-                    "minute_quote_snapshot",
+                    bar_kind,
+                    quote_kind,
                 }:
                     raise ValueError("Point does not match the minute series")
-                if point["data_kind"] == "minute_bar" and point["ts"] % (step * 1000):
+                if point["data_kind"] == bar_kind and point["ts"] % (step * 1000):
                     raise ValueError("Minute bar is not on the requested interval grid")
             bars = [
                 point
                 for point in source["points"]
-                if point["data_kind"] == "minute_bar"
+                if point["data_kind"] == bar_kind
                 and point.get("close") is not None
                 and (start - step) * 1000 <= point["ts"] < (end + step) * 1000
             ]
@@ -211,7 +214,9 @@ class CrossMarketIntradayIngestor:
             raise ValueError("Empty source name differs from verified Yahoo aliases")
         return dict(fetched)
 
-    async def _apply(self, index: dict, window: dict, state_path: Path) -> dict:
+    async def _apply(
+        self, index: dict, window: dict, state_path: Path, *, archive_seed: bool = False
+    ) -> dict:
         if window.get("identity") != self._identity(index):
             raise ValueError("Pending minute identity differs from the reference")
         start = _integer(window.get("start_s"), "window start")
@@ -221,12 +226,44 @@ class CrossMarketIntradayIngestor:
         points = source["points"]
         await self.store.upsert_prices(points)
         verified = await self.store.verify_prices(points)
+        archive_path = None
+        if archive_seed:
+            archive = {
+                "schema_version": 1,
+                "identity": self._identity(index),
+                "index": dict(index),
+                "start_s": start,
+                "end_s": end,
+                "run_end_s": window["run_end_s"],
+                "source": source,
+            }
+            key = hashlib.sha256(
+                json.dumps(
+                    {
+                        "identity": archive["identity"],
+                        "start_s": start,
+                        "end_s": end,
+                        "source_sha256": source["payload_sha256"],
+                    },
+                    sort_keys=True,
+                ).encode()
+            ).hexdigest()
+            archive_path = self.state_dir / "hour-seed-sources" / f"{key}.source.json"
+            # Preserve the original fetch clock, complete RAW and FC provenance.
+            # An archival failure leaves the durable pending window replayable
+            # and must occur before a completed seed marker is advanced.
+            if archive_path.exists():
+                if _read_json(archive_path) != archive:
+                    raise ValueError("Existing hour seed archive differs from its original source")
+            else:
+                _atomic_json(archive_path, archive)
         state = self._state(index, state_path)
         gaps = set(state["gaps"])
         step = INTERVAL_SECONDS[index["interval"]]
+        bar_kind, _ = observation_kinds(index["interval"])
         bars = []
         for point in points:
-            if point["data_kind"] != "minute_bar":
+            if point["data_kind"] != bar_kind:
                 continue
             if point.get("close") is None:
                 gaps.add(point["ts"])
@@ -254,22 +291,48 @@ class CrossMarketIntradayIngestor:
                 "source_sha256": source["payload_sha256"],
             },
         )
+        if archive_path is not None:
+            state["last_verified_window"]["source_archive_path"] = archive_path.relative_to(
+                self.state_dir
+            ).as_posix()
         _atomic_json(state_path, state)
         return state
 
     async def _collect(self, index: dict, policy: dict, run_end: int) -> dict:
         state_path, pending_path = self._paths(index)
         stage, replayed, rows, windows = "pending_replay", 0, 0, []
+        archive_seed = index["interval"] == "1h" and policy.get("update_mode") == "history_seed"
         try:
             if pending_path.exists():
                 pending = _read_json(pending_path)
                 pending_index = pending.get("index", index)
                 if self._identity(pending_index) != self._identity(index):
                     raise ValueError("Pending entity differs from the current minute index")
-                await self._apply(pending_index, pending, state_path)
+                await self._apply(pending_index, pending, state_path, archive_seed=archive_seed)
                 replayed = len(pending["source"]["points"])
                 pending_path.unlink()
             state = self._state(index, state_path)
+            if (
+                policy.get("update_mode") == "history_seed"
+                and state["backfill_complete_until_s"] is not None
+            ):
+                # The requested hour history is an initial backtesting seed.
+                # Later daily acquisitions continue at minute granularity; do
+                # not re-fetch730days for an old explicit sourceNULL every loop.
+                return {
+                    **self._identity(index),
+                    "status": "previously_verified",
+                    "collection_mode": "history_seed",
+                    "rows": 0,
+                    "replayed_rows": replayed,
+                    "windows": [],
+                    "covered_until_s": state["covered_until_s"],
+                    "backfill_complete_until_s": state["backfill_complete_until_s"],
+                    "last_source_bar_ms": state["last_source_bar_ms"],
+                    "gap_timestamps": state["gaps"],
+                    "retention_unavailable_ranges": state["retention_unavailable_ranges"],
+                    "request_boundary_guard_ranges": state["request_boundary_guard_ranges"],
+                }
             retention = policy["retention_seconds"]
             earliest = max(0, int(self.clock()) - retention)
             if state["backfill_complete_until_s"] is None:
@@ -349,13 +412,14 @@ class CrossMarketIntradayIngestor:
                 stage = "persist_pending"
                 _atomic_json(pending_path, pending)
                 stage = "write_and_verify"
-                state = await self._apply(index, pending, state_path)
+                state = await self._apply(index, pending, state_path, archive_seed=archive_seed)
                 pending_path.unlink()
                 windows.append(state["last_verified_window"])
                 rows += len(source["points"])
                 start = end
             return {
                 **self._identity(index),
+                "collection_mode": policy.get("update_mode", "continuous"),
                 "status": "verified_with_gaps"
                 if (
                     state["gaps"]
@@ -428,7 +492,9 @@ class CrossMarketIntradayIngestor:
             if any(r["status"] == "failed" for r in results)
             else (
                 "verified_with_gaps"
-                if any(r["status"] == "verified_with_gaps" for r in results)
+                if any(
+                    r["status"] == "verified_with_gaps" or r.get("gap_timestamps") for r in results
+                )
                 else "verified"
             )
         )

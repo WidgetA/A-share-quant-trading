@@ -10,18 +10,39 @@ from src.data.yahoo_indices import YahooIndexClient, YahooIndexError, parse_char
 
 
 def chart(symbol="^SOX", currency="USD", timezone="America/New_York"):
-    return {"chart": {"error": None, "result": [{
-        "meta": {
-            "symbol": symbol, "instrumentType": "INDEX", "currency": currency,
-            "exchangeTimezoneName": timezone, "firstTradeDate": 700000000,
-            "dataGranularity": "1d",
-            "regularMarketTime": 1791210000,
-            "currentTradingPeriod": {"regular": {"start": 1791207000, "end": 1791230400}},
-        },
-        "timestamp": [1790947800, 1791207000],
-        "indicators": {"quote": [{"open": [100, 103], "high": [105, 106],
-            "low": [99, 102], "close": [104, 105], "volume": [0, 0]}]},
-    }]}}
+    return {
+        "chart": {
+            "error": None,
+            "result": [
+                {
+                    "meta": {
+                        "symbol": symbol,
+                        "instrumentType": "INDEX",
+                        "currency": currency,
+                        "exchangeTimezoneName": timezone,
+                        "firstTradeDate": 700000000,
+                        "dataGranularity": "1d",
+                        "regularMarketTime": 1791210000,
+                        "currentTradingPeriod": {
+                            "regular": {"start": 1791207000, "end": 1791230400}
+                        },
+                    },
+                    "timestamp": [1790947800, 1791207000],
+                    "indicators": {
+                        "quote": [
+                            {
+                                "open": [100, 103],
+                                "high": [105, 106],
+                                "low": [99, 102],
+                                "close": [104, 105],
+                                "volume": [0, 0],
+                            }
+                        ]
+                    },
+                }
+            ],
+        }
+    }
 
 
 def test_real_bar_source_clock_and_active_bar_are_preserved():
@@ -37,9 +58,15 @@ def test_korean_zero_ohl_placeholder_is_a_quote_not_a_bar():
     result = payload["chart"]["result"][0]
     result["meta"]["firstTradeDate"] = None
     result["timestamp"] = [1790939140]
-    result["indicators"]["quote"] = [{
-        "open": [0], "high": [0], "low": [0], "volume": [0], "close": [46539.140625],
-    }]
+    result["indicators"]["quote"] = [
+        {
+            "open": [0],
+            "high": [0],
+            "low": [0],
+            "volume": [0],
+            "close": [46539.140625],
+        }
+    ]
     _, points = parse_chart(payload, symbol="KOSPI-25.KS", market="KR", fetched_at=1791210000000)
     assert len(points) == 1
     point = points[0]
@@ -50,8 +77,9 @@ def test_korean_zero_ohl_placeholder_is_a_quote_not_a_bar():
     assert all(point[key] is None for key in ("open", "high", "low", "volume", "is_final"))
 
 
-@pytest.mark.parametrize("field,value", [("instrumentType", "ETF"), ("symbol", "^KS11"),
-                                          ("currency", "KRW")])
+@pytest.mark.parametrize(
+    "field,value", [("instrumentType", "ETF"), ("symbol", "^KS11"), ("currency", "KRW")]
+)
 def test_wrong_instrument_or_market_cannot_be_inserted(field, value):
     payload = chart()
     payload["chart"]["result"][0]["meta"][field] = value
@@ -113,8 +141,9 @@ def test_quote_only_index_with_real_ohl_remains_a_snapshot():
     result["timestamp"] = result["timestamp"][-1:]
     for key in result["indicators"]["quote"][0]:
         result["indicators"]["quote"][0][key] = result["indicators"]["quote"][0][key][-1:]
-    _, points = parse_chart(payload, symbol="^SOX", market="US",
-                            fetched_at=1791210000000, capability="snapshot_only")
+    _, points = parse_chart(
+        payload, symbol="^SOX", market="US", fetched_at=1791210000000, capability="snapshot_only"
+    )
     assert points[0]["data_kind"] == "quote_snapshot"
     assert points[0]["open"] == 103
     assert points[0]["is_final"] is None
@@ -128,8 +157,9 @@ def test_single_incremental_daily_bar_with_missing_ohl_keeps_its_series():
         result["indicators"]["quote"][0][key] = result["indicators"]["quote"][0][key][-1:]
     for key in ("open", "high", "low"):
         result["indicators"]["quote"][0][key] = [None]
-    _, points = parse_chart(payload, symbol="^SOX", market="US",
-                            fetched_at=1791210000000, capability="daily_history")
+    _, points = parse_chart(
+        payload, symbol="^SOX", market="US", fetched_at=1791210000000, capability="daily_history"
+    )
     assert points[0]["data_kind"] == "daily_bar"
     assert points[0]["interval"] == "1d"
     assert points[0]["open"] is None
@@ -143,8 +173,9 @@ def test_single_missing_daily_close_is_retained_as_an_explicit_gap():
     for key in result["indicators"]["quote"][0]:
         result["indicators"]["quote"][0][key] = result["indicators"]["quote"][0][key][-1:]
     result["indicators"]["quote"][0]["close"] = [None]
-    _, points = parse_chart(payload, symbol="^SOX", market="US",
-                            fetched_at=1791210000000, capability="daily_history")
+    _, points = parse_chart(
+        payload, symbol="^SOX", market="US", fetched_at=1791210000000, capability="daily_history"
+    )
     assert points[0]["data_kind"] == "daily_bar"
     assert points[0]["close"] is None
     assert points[0]["ts"] == 1791207000000

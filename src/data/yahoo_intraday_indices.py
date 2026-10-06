@@ -12,7 +12,13 @@ import httpx
 
 from src.data.yahoo_indices import YahooChartTransport, YahooIndexError, _number
 
-INTERVAL_SECONDS = {"1m": 60, "5m": 300}
+INTERVAL_SECONDS = {"1m": 60, "5m": 300, "1h": 3600}
+
+
+def observation_kinds(interval: str) -> tuple[str, str]:
+    """Keep actual hourly observations distinct from minute data."""
+    prefix = "hour" if interval == "1h" else "minute"
+    return prefix + "_bar", prefix + "_quote_snapshot"
 
 
 def parse_intraday_chart(
@@ -33,6 +39,7 @@ def parse_intraday_chart(
     """
     if interval not in INTERVAL_SECONDS:
         raise YahooIndexError("Unsupported intraday interval")
+    bar_kind, quote_kind = observation_kinds(interval)
     if type(fetched_at) is not int or not 0 < fetched_at < 2**63:
         raise YahooIndexError("Invalid fetch timestamp milliseconds")
     if (start is not None or end is not None) and (
@@ -228,7 +235,7 @@ def parse_intraday_chart(
                 "market": market,
                 "symbol": symbol,
                 "interval": interval,
-                "data_kind": "minute_quote_snapshot" if snapshot else "minute_bar",
+                "data_kind": quote_kind if snapshot else bar_kind,
                 "ts": stamp * 1000,
                 "name": meta.get("longName") or meta.get("shortName") or symbol,
                 "currency": currency,

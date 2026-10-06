@@ -1,0 +1,10 @@
+# Versions inspected in the tools environment used for real native US FC calls.
+alibabacloud-fc20230330==4.8.2
+alibabacloud-sts20150401==1.2.0
+alibabacloud-tea-openapi==0.4.6
+alibabacloud-tea-util==0.3.15
+darabonba-core==1.0.9
+paramiko==5.0.0
+httpx==0.28.1
+# ZoneInfo's database is required when the release tool runs on Windows.
+tzdata==2026.5

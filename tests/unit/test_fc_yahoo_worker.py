@@ -37,27 +37,27 @@ SOX_RAW = (
     ':-14400},"post":{"timezone":"EDT","start":1791230400,"end":1791244800,"gmtoffset":-14400'
     '}},"dataGranularity":"1d","range":"1mo","validRanges":["1d","5d","1mo","3mo","6mo","1y",'
     '"2y","5y","10y","ytd","max"]},"timestamp":[1788874200,1788960600,1789047000,1789133400,1'
-    '789392600,1789479000,1789565400,1789651800,1789738200,1789997400,1790083800,1790170200,1'
-    '790256600,1790343000,1790602200,1790688600,1790775000,1790861400,1790947800,1791207000],'
+    "789392600,1789479000,1789565400,1789651800,1789738200,1789997400,1790083800,1790170200,1"
+    "790256600,1790343000,1790602200,1790688600,1790775000,1790861400,1790947800,1791207000],"
     '"indicators":{"quote":[{"low":[11843.259765625,11854.2197265625,11561.0400390625,11711.3'
-    '30078125,11110.1103515625,11128.8798828125,11132.259765625,11533.9501953125,11686.089843'
-    '75,12059.2998046875,12338.51953125,12371.3701171875,12258.3896484375,12549.58984375,1227'
-    '7.41015625,12588.8603515625,12555.650390625,12587.33984375,13082.009765625,13004.6679687'
+    "30078125,11110.1103515625,11128.8798828125,11132.259765625,11533.9501953125,11686.089843"
+    "75,12059.2998046875,12338.51953125,12371.3701171875,12258.3896484375,12549.58984375,1227"
+    "7.41015625,12588.8603515625,12555.650390625,12587.33984375,13082.009765625,13004.6679687"
     '5],"high":[12023.8603515625,12016.08984375,11733.6796875,11910.2001953125,11285.29980468'
-    '75,11304.240234375,11413.4599609375,11643.8798828125,11922.9501953125,12491.6103515625,1'
-    '2708.33984375,12660.91015625,12517.919921875,12732.7802734375,12665.400390625,12773.8896'
+    "75,11304.240234375,11413.4599609375,11643.8798828125,11922.9501953125,12491.6103515625,1"
+    "2708.33984375,12660.91015625,12517.919921875,12732.7802734375,12665.400390625,12773.8896"
     '484375,12731.099609375,12913.400390625,13269.330078125,13152.673828125],"volume":[0,0,0,'
     '0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"open":[11987.2900390625,11866.5,11663.0,11753.870117'
-    '1875,11191.8203125,11233.0400390625,11347.6796875,11568.4697265625,11691.0,12145.9199218'
-    '75,12338.8798828125,12659.080078125,12309.08984375,12565.83984375,12595.1396484375,12667'
+    "1875,11191.8203125,11233.0400390625,11347.6796875,11568.4697265625,11691.0,12145.9199218"
+    "75,12338.8798828125,12659.080078125,12309.08984375,12565.83984375,12595.1396484375,12667"
     '.3701171875,12665.669921875,12651.5595703125,13130.759765625,13148.8427734375],"close":['
-    '11887.8701171875,11931.3203125,11614.169921875,11824.0,11131.2802734375,11175.5498046875'
-    ',11246.1103515625,11599.490234375,11921.6904296875,12433.169921875,12689.8203125,12534.2'
-    '802734375,12492.5400390625,12668.9296875,12465.240234375,12629.16015625,12628.6201171875'
+    "11887.8701171875,11931.3203125,11614.169921875,11824.0,11131.2802734375,11175.5498046875"
+    ",11246.1103515625,11599.490234375,11921.6904296875,12433.169921875,12689.8203125,12534.2"
+    "802734375,12492.5400390625,12668.9296875,12465.240234375,12629.16015625,12628.6201171875"
     ',12829.0,13136.669921875,13128.23046875]}],"adjclose":[{"adjclose":[11887.8701171875,119'
-    '31.3203125,11614.169921875,11824.0,11131.2802734375,11175.5498046875,11246.1103515625,11'
-    '599.490234375,11921.6904296875,12433.169921875,12689.8203125,12534.2802734375,12492.5400'
-    '390625,12668.9296875,12465.240234375,12629.16015625,12628.6201171875,12829.0,13136.66992'
+    "31.3203125,11614.169921875,11824.0,11131.2802734375,11175.5498046875,11246.1103515625,11"
+    "599.490234375,11921.6904296875,12433.169921875,12689.8203125,12534.2802734375,12492.5400"
+    "390625,12668.9296875,12465.240234375,12629.16015625,12628.6201171875,12829.0,13136.66992"
     '1875,13128.23046875]}]}}],"error":null}}'
 )
 SOX_SHA = "d705b71be6a3f44dd9c776c028d9b1e43a4e6c59a98e026383d0291ecc1f3241"
@@ -105,14 +105,18 @@ async def test_saved_yahoo_responses_are_complete_raw_envelopes(source_raw, dige
     def respond(req):
         calls.append(req)
         return httpx.Response(
-            200, content=source_raw.encode("utf-8"),
+            200,
+            content=source_raw.encode("utf-8"),
             headers={"Content-Type": "application/json; charset=utf-8"},
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
         yahoo = YahooIndexClient(proxy=None, client=http)
         result = await fetch_envelope(
-            event, yahoo=yahoo, fc_request_id="fc-physical-invoke", region="us-west-1",
+            event,
+            yahoo=yahoo,
+            fc_request_id="fc-physical-invoke",
+            region="us-west-1",
         )
     assert len(calls) == 1
     assert dict(calls[0].url.params)["period1"] == str(event["start"] or 0)
@@ -126,7 +130,11 @@ async def test_saved_yahoo_responses_are_complete_raw_envelopes(source_raw, dige
         assert result[key] == value
     assert result["runtime"] == {"region": "us-west-1", "fc_request_id": "fc-physical-invoke"}
     assert set(result) == set(event) | {
-        "fetched_at", "raw_json", "payload_sha256", "request_url", "runtime",
+        "fetched_at",
+        "raw_json",
+        "payload_sha256",
+        "request_url",
+        "runtime",
     }
     # Source history/quote shape survives remote transport, including the Korean
     # source placeholders. Only the domestic parser decides storage observations.
@@ -137,7 +145,8 @@ async def test_saved_yahoo_responses_are_complete_raw_envelopes(source_raw, dige
 
 
 @pytest.mark.parametrize(
-    "field", ["schema_version", "request_id", "symbol", "market", "start", "capability"],
+    "field",
+    ["schema_version", "request_id", "symbol", "market", "start", "capability"],
 )
 def test_missing_contract_fields_fail_before_a_fetch(field):
     event = request()
@@ -149,9 +158,15 @@ def test_missing_contract_fields_fail_before_a_fetch(field):
 @pytest.mark.parametrize(
     "field,value",
     [
-        ("schema_version", True), ("schema_version", 2), ("request_id", ""),
-        ("symbol", None), ("market", "CN"), ("start", True), ("start", -1),
-        ("start", 123.5), ("capability", "monthly_history"),
+        ("schema_version", True),
+        ("schema_version", 2),
+        ("request_id", ""),
+        ("symbol", None),
+        ("market", "CN"),
+        ("start", True),
+        ("start", -1),
+        ("start", 123.5),
+        ("capability", "monthly_history"),
     ],
 )
 def test_invalid_request_types_and_units_are_rejected(field, value):
@@ -169,7 +184,8 @@ def test_event_must_be_one_json_object(event):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "field,value", [("symbol", "^BKX"), ("instrumentType", "ETF"), ("currency", "KRW")],
+    "field,value",
+    [("symbol", "^BKX"), ("instrumentType", "ETF"), ("currency", "KRW")],
 )
 async def test_source_identity_failure_is_an_exception_not_success(field, value):
     payload = json.loads(SOX_RAW)
@@ -179,8 +195,10 @@ async def test_source_identity_failure_is_an_exception_not_success(field, value)
     ) as http:
         with pytest.raises(YahooIndexError):
             await fetch_envelope(
-                request(), yahoo=YahooIndexClient(proxy=None, client=http),
-                fc_request_id="fc-rejected", region="us-west-1",
+                request(),
+                yahoo=YahooIndexClient(proxy=None, client=http),
+                fc_request_id="fc-rejected",
+                region="us-west-1",
             )
 
 
@@ -234,9 +252,12 @@ def test_warm_invocations_reuse_the_same_direct_client_and_own_loop(monkeypatch)
 
     worker = FCYahooWorker(client_factory=factory)
     try:
-        first = json.loads(worker.invoke(
-            json.dumps(request(), ensure_ascii=False).encode(), SimpleNamespace(request_id="fc-1"),
-        ))
+        first = json.loads(
+            worker.invoke(
+                json.dumps(request(), ensure_ascii=False).encode(),
+                SimpleNamespace(request_id="fc-1"),
+            )
+        )
         second_event = request(start=1790000000)
         second = json.loads(worker.invoke(second_event, SimpleNamespace(request_id="fc-2")))
         assert factory_args == [{"proxy": None}]
@@ -285,7 +306,8 @@ def test_native_handler_returns_utf8_json_and_propagates_failures(monkeypatch, c
         created[0].fetch = fail
         with pytest.raises(YahooIndexError, match="429"):
             module.handler(
-                json.dumps(request()).encode(), SimpleNamespace(request_id="fc-source-error"),
+                json.dumps(request()).encode(),
+                SimpleNamespace(request_id="fc-source-error"),
             )
         assert capsys.readouterr().out == ""
     finally:
@@ -294,6 +316,7 @@ def test_native_handler_returns_utf8_json_and_propagates_failures(monkeypatch, c
 
 def test_default_direct_client_ignores_environment_proxy(monkeypatch):
     import src.data.yahoo_indices as yahoo_module
+
     actual_client = httpx.AsyncClient
     observed = []
 

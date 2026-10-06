@@ -279,14 +279,19 @@ class FCYahooIndexClient:
         if payload["capability"] == "minute_history":
             decoded["source_empty"] = not points
             decoded["requested_range"] = {
-                "start": payload["start"], "end": payload["end"], "interval": payload["interval"],
+                "start": payload["start"],
+                "end": payload["end"],
+                "interval": payload["interval"],
             }
         return decoded
 
     def _parse_source(self, source: dict, payload: dict, fetched_at: int):
         return parse_chart(
-            source, symbol=payload["symbol"], market=payload["market"],
-            fetched_at=fetched_at, capability=payload["capability"],
+            source,
+            symbol=payload["symbol"],
+            market=payload["market"],
+            fetched_at=fetched_at,
+            capability=payload["capability"],
         )
 
     async def fetch(

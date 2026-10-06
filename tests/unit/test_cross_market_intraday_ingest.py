@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from scripts import collect_cross_market_intraday as cli
+from src.data import cross_market_intraday_ingest as intraday_module
 from src.data.cross_market_ingest import CrossMarketIngestor, _atomic_json
 from src.data.cross_market_intraday_ingest import (
     DAY_SECONDS,
@@ -150,13 +151,15 @@ class Yahoo:
             if self.quote_only:
                 rows = [point(index, interval, NOW + 1, kind="minute_quote_snapshot")]
             else:
-                step = 60 if interval == "1m" else 300
+                step = {"1m": 60, "5m": 300, "1h": 3600}[interval]
                 first = ((start + step - 1) // step) * step
                 last = (end // step - 1) * step
+                bar_kind = "hour_bar" if interval == "1h" else "minute_bar"
+                quote_kind = "hour_quote_snapshot" if interval == "1h" else "minute_quote_snapshot"
                 rows = [
-                    point(index, interval, first),
-                    point(index, interval, last),
-                    point(index, interval, NOW + 1, kind="minute_quote_snapshot"),
+                    point(index, interval, first, kind=bar_kind),
+                    point(index, interval, last, kind=bar_kind),
+                    point(index, interval, NOW + 1, kind=quote_kind),
                 ]
             return source(index, interval, rows, start=start, end=end)
         finally:
@@ -228,6 +231,230 @@ def test_reference_requires_actual_index_hash_and_identity(refs):
     refs.capabilities.write_text(json.dumps(bad))
     with pytest.raises(ValueError, match="bound"):
         load_intraday_reference(refs.reference, refs.base, refs.capabilities)
+
+
+@pytest.mark.asyncio
+async def test_korean_hour_history_seed_preserves_minutes_and_is_not_repeated_daily(refs, tmp_path):
+    capability = copy.deepcopy(refs.capability)
+    capability["limits"]["1h"] = {
+        "retention_seconds": 730 * DAY_SECONDS,
+        "max_window_seconds": 730 * DAY_SECONDS,
+        "update_mode": "history_seed",
+    }
+    capability["indices"][1]["intervals"].append("1h")
+    refs.capabilities.write_text(json.dumps(capability), encoding="utf-8")
+    state_dir = tmp_path / "state"
+    yahoo, store = Yahoo(refs.indices), Store(state_dir)
+    first = await producer(refs, state_dir, yahoo, store).run_once()
+    assert first["status"] == "verified" and first["series_count"] == 5
+    hour_calls = [call for call in yahoo.calls if call[-1] == "1h"]
+    assert len(hour_calls) == 1 and hour_calls[0][1] == "KR"
+    assert NOW - 730 * DAY_SECONDS < hour_calls[0][2] <= NOW - 730 * DAY_SECONDS + 3600
+    hour_points = [row for row in store.rows.values() if row["interval"] == "1h"]
+    assert len(hour_points) == 3
+    assert {row["data_kind"] for row in hour_points} == {"hour_bar", "hour_quote_snapshot"}
+    job = producer(refs, state_dir, yahoo, store, now=NOW + DAY_SECONDS)
+    identity = {**refs.indices[1], "interval": "1h"}
+    state_path, _ = job._paths(identity)
+    saved_hour_bytes = state_path.read_bytes()
+    yahoo.calls.clear()
+    second = await job.run_once()
+    assert not any(call[-1] == "1h" for call in yahoo.calls)
+    assert len({(r[0], r[-1]) for r in yahoo.calls}) == 4
+    hour_result = next(row for row in second["results"] if row["interval"] == "1h")
+    assert hour_result["status"] == "previously_verified"
+    assert hour_result["covered_until_s"] == NOW
+    assert hour_result["collection_mode"] == "history_seed"
+    assert state_path.read_bytes() == saved_hour_bytes
+
+
+@pytest.mark.asyncio
+async def test_completed_hour_seed_keeps_source_nulls_without_repeating_730_days(refs, tmp_path):
+    capability = copy.deepcopy(refs.capability)
+    capability["limits"]["1h"] = {
+        "retention_seconds": 730 * DAY_SECONDS,
+        "max_window_seconds": 730 * DAY_SECONDS,
+        "update_mode": "history_seed",
+    }
+    capability["indices"][1]["intervals"].append("1h")
+    refs.capabilities.write_text(json.dumps(capability), encoding="utf-8")
+
+    class NullHourYahoo(Yahoo):
+        async def fetch(self, symbol, market, *, start, end, interval):
+            fetched = await super().fetch(symbol, market, start=start, end=end, interval=interval)
+            if interval == "1h":
+                points = fetched["points"]
+                for field in ("open", "high", "low", "close"):
+                    points[0][field] = None
+                return source(self.indices[symbol], interval, points, start=start, end=end)
+            return fetched
+
+    state_dir = tmp_path / "state"
+    yahoo, store = NullHourYahoo(refs.indices), Store(state_dir)
+    first_job = producer(refs, state_dir, yahoo, store)
+    first = await first_job.run_once()
+    hour = next(row for row in first["results"] if row["interval"] == "1h")
+    assert hour["status"] == "verified_with_gaps"
+    identity = {**refs.indices[1], "interval": "1h"}
+    path, pending = first_job._paths(identity)
+    saved_bytes = path.read_bytes()
+    saved_state = json.loads(saved_bytes)
+    null_rows = [r for r in store.rows.values() if r["interval"] == "1h" and r["close"] is None]
+    assert len(null_rows) == 1 and saved_state["gaps"] == [null_rows[0]["ts"]]
+    assert saved_state["backfill_complete_until_s"] == NOW and not pending.exists()
+    assert saved_state["last_source_bar_ms"] < NOW * 1000
+    for later in (NOW + 300, NOW + DAY_SECONDS):
+        yahoo.calls.clear()
+        result = await producer(refs, state_dir, yahoo, store, now=later).run_once()
+        hour = next(row for row in result["results"] if row["interval"] == "1h")
+        assert hour["status"] == "previously_verified" and hour["rows"] == 0
+        assert hour["gap_timestamps"] == saved_state["gaps"]
+        assert hour["covered_until_s"] == hour["backfill_complete_until_s"] == NOW
+        assert len(yahoo.calls) == 4 and all(call[-1] != "1h" for call in yahoo.calls)
+        assert all(
+            row["covered_until_s"] == later for row in result["results"] if row["interval"] != "1h"
+        )
+        assert path.read_bytes() == saved_bytes
+        assert store.rows[store.key(null_rows[0])] == null_rows[0]
+
+
+@pytest.mark.asyncio
+async def test_hour_seed_partial_write_replays_full_pending_before_complete_seed_skip(
+    refs, tmp_path
+):
+    capability = copy.deepcopy(refs.capability)
+    policy = {
+        "retention_seconds": 730 * DAY_SECONDS,
+        "max_window_seconds": 730 * DAY_SECONDS,
+        "update_mode": "history_seed",
+    }
+    capability["limits"]["1h"] = policy
+    capability["indices"][1]["intervals"].append("1h")
+    refs.capabilities.write_text(json.dumps(capability), encoding="utf-8")
+    events, state_dir = [], tmp_path / "state"
+    yahoo, store = Yahoo(refs.indices, events), Store(state_dir, events)
+    identity = {**refs.indices[1], "interval": "1h"}
+    job = producer(refs, state_dir, yahoo, store)
+    # The store accepts one point and fails before the complete original window
+    # has been verified. Its pending receipt must survive, not become a seed.
+    store.fail_ts = (NOW // 3600 - 1) * 3600 * 1000
+    first = await job._collect(identity, policy, NOW)
+    path, pending_path = job._paths(identity)
+    assert first["status"] == "failed" and first["pending_retained"] is True
+    assert json.loads(path.read_text())["backfill_complete_until_s"] is None
+    pending = json.loads(pending_path.read_text())
+    original_points = pending["source"]["points"]
+    assert (
+        hashlib.sha256(pending["source"]["raw_json"].encode()).hexdigest()
+        == pending["source"]["payload_sha256"]
+    )
+    events.clear()
+    yahoo.calls.clear()
+    replay = await producer(refs, state_dir, yahoo, store, now=NOW + 300)._collect(
+        identity, policy, NOW + 300
+    )
+    assert [event[0] for event in events] == ["write", "verify"]
+    assert yahoo.calls == [] and not pending_path.exists()
+    assert replay["status"] == "previously_verified" and replay["replayed_rows"] == len(
+        original_points
+    )
+    assert replay["covered_until_s"] == replay["backfill_complete_until_s"] == NOW
+    assert all(store.rows[store.key(row)] == row for row in original_points)
+    saved = path.read_bytes()
+    again = await producer(refs, state_dir, yahoo, store, now=NOW + DAY_SECONDS)._collect(
+        identity, policy, NOW + DAY_SECONDS
+    )
+    assert again["status"] == "previously_verified" and again["replayed_rows"] == 0
+    assert yahoo.calls == [] and path.read_bytes() == saved
+
+
+@pytest.mark.asyncio
+async def test_verified_hour_seed_archives_original_source_while_minutes_do_not(refs, tmp_path):
+    capability = copy.deepcopy(refs.capability)
+    capability["limits"]["1h"] = {
+        "retention_seconds": 730 * DAY_SECONDS,
+        "max_window_seconds": 730 * DAY_SECONDS,
+        "update_mode": "history_seed",
+    }
+    capability["indices"][1]["intervals"].append("1h")
+    refs.capabilities.write_text(json.dumps(capability), encoding="utf-8")
+    state_dir = tmp_path / "state"
+    yahoo, store = Yahoo(refs.indices), Store(state_dir)
+    result = await producer(refs, state_dir, yahoo, store).run_once()
+    assert result["status"] == "verified" and result["series_count"] == 5
+    archives = list((state_dir / "hour-seed-sources").glob("*.json"))
+    assert len(archives) == 1
+    archive_path = archives[0]
+    archive = json.loads(archive_path.read_text())
+    assert archive["identity"] == {
+        k: refs.indices[1][k] for k in ("index_id", "market", "symbol")
+    } | {"interval": "1h"}
+    assert archive["start_s"] == next(call[2] for call in yahoo.calls if call[-1] == "1h")
+    assert archive["end_s"] == archive["run_end_s"] == NOW
+    assert archive["source"]["fetched_at"] == NOW * 1000
+    assert (
+        hashlib.sha256(archive["source"]["raw_json"].encode()).hexdigest()
+        == archive["source"]["payload_sha256"]
+    )
+    assert {row["data_kind"] for row in archive["source"]["points"]} == {
+        "hour_bar",
+        "hour_quote_snapshot",
+    }
+    assert all(store.rows[store.key(row)] == row for row in archive["source"]["points"])
+    original_bytes = archive_path.read_bytes()
+    yahoo.calls.clear()
+    later = await producer(refs, state_dir, yahoo, store, now=NOW + 300).run_once()
+    assert (
+        next(row for row in later["results"] if row["interval"] == "1h")["status"]
+        == "previously_verified"
+    )
+    assert all(call[-1] in ("1m", "5m") for call in yahoo.calls)
+    assert list((state_dir / "hour-seed-sources").glob("*.json")) == archives
+    assert archive_path.read_bytes() == original_bytes
+
+
+@pytest.mark.asyncio
+async def test_hour_archive_failure_retains_pending_and_replays_without_new_fetch(
+    refs, tmp_path, monkeypatch
+):
+    policy = {
+        "retention_seconds": 730 * DAY_SECONDS,
+        "max_window_seconds": 730 * DAY_SECONDS,
+        "update_mode": "history_seed",
+    }
+    events, state_dir = [], tmp_path / "state"
+    yahoo, store = Yahoo(refs.indices, events), Store(state_dir, events)
+    index = {**refs.indices[1], "interval": "1h"}
+    job = producer(refs, state_dir, yahoo, store)
+    original_atomic = intraday_module._atomic_json
+
+    def fail_archive(path, value):
+        if path.parent == state_dir / "hour-seed-sources":
+            raise OSError("archive volume failure")
+        original_atomic(path, value)
+
+    monkeypatch.setattr(intraday_module, "_atomic_json", fail_archive)
+    failed = await job._collect(index, policy, NOW)
+    path, pending_path = job._paths(index)
+    assert failed["status"] == "failed" and failed["pending_retained"] is True
+    assert json.loads(path.read_text())["covered_until_s"] is None
+    assert json.loads(path.read_text())["backfill_complete_until_s"] is None
+    pending = json.loads(pending_path.read_text())
+    assert [event[0] for event in events] == ["fetch", "write", "verify"]
+    monkeypatch.setattr(intraday_module, "_atomic_json", original_atomic)
+    events.clear()
+    yahoo.calls.clear()
+    replayed = await producer(refs, state_dir, yahoo, store, now=NOW + 300)._collect(
+        index, policy, NOW + 300
+    )
+    assert replayed["status"] == "previously_verified" and replayed["replayed_rows"] == len(
+        pending["source"]["points"]
+    )
+    assert replayed["covered_until_s"] == replayed["backfill_complete_until_s"] == NOW
+    assert [event[0] for event in events] == ["write", "verify"] and yahoo.calls == []
+    assert not pending_path.exists()
+    archives = list((state_dir / "hour-seed-sources").glob("*.json"))
+    assert len(archives) == 1 and json.loads(archives[0].read_text())["source"] == pending["source"]
 
 
 @pytest.mark.asyncio

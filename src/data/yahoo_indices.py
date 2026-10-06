@@ -30,7 +30,11 @@ def _number(value: Any) -> float | None:
 
 
 def parse_chart(
-    payload: dict, *, symbol: str, market: str, fetched_at: int,
+    payload: dict,
+    *,
+    symbol: str,
+    market: str,
+    fetched_at: int,
     capability: str | None = None,
 ) -> tuple[dict, list[dict]]:
     """Validate identity and preserve source clocks; never turn quotes into bars."""
@@ -77,11 +81,17 @@ def parse_chart(
     placeholder_ohl = len(timestamps) == 1 and all(
         value(key, 0) in (None, 0.0) for key in ("open", "high", "low")
     )
-    snapshot = len(timestamps) == 1 and capability != "daily_history" and (
-        placeholder_ohl or capability == "snapshot_only" or (
-            meta.get("firstTradeDate") is None
-            and meta.get("regularMarketTime") == timestamps[0]
-            and not ({"1mo", "max"} & set(meta.get("validRanges", [])))
+    snapshot = (
+        len(timestamps) == 1
+        and capability != "daily_history"
+        and (
+            placeholder_ohl
+            or capability == "snapshot_only"
+            or (
+                meta.get("firstTradeDate") is None
+                and meta.get("regularMarketTime") == timestamps[0]
+                and not ({"1mo", "max"} & set(meta.get("validRanges", [])))
+            )
         )
     )
     if not snapshot and meta.get("dataGranularity") != "1d":
@@ -93,8 +103,7 @@ def parse_chart(
     fetched_seconds = fetched_at / 1000
     quote_time = meta.get("regularMarketTime")
     quote_date = (
-        datetime.fromtimestamp(quote_time, timezone).date()
-        if isinstance(quote_time, int) else None
+        datetime.fromtimestamp(quote_time, timezone).date() if isinstance(quote_time, int) else None
     )
     points = []
     seen = set()
@@ -128,25 +137,35 @@ def parse_chart(
         if not snapshot and close is not None:
             if quote_date is not None and trade_date < quote_date:
                 final = True
-            elif (isinstance(current_start, int) and isinstance(current_end, int)
-                  and current_start <= fetched_seconds < current_end
-                  and trade_date == datetime.fromtimestamp(current_start, timezone).date()):
+            elif (
+                isinstance(current_start, int)
+                and isinstance(current_end, int)
+                and current_start <= fetched_seconds < current_end
+                and trade_date == datetime.fromtimestamp(current_start, timezone).date()
+            ):
                 final = False
-        points.append({
-            "provider": "yahoo", "market": market, "symbol": symbol,
-            "interval": "quote" if snapshot else "1d",
-            "data_kind": "quote_snapshot" if snapshot else "daily_bar",
-            "ts": stamp * 1000,
-            "name": meta.get("longName") or meta.get("shortName") or symbol,
-            "currency": currency, "exchange_timezone": timezone_name,
-            "trade_date": trade_date.isoformat(),
-            "open": None if snapshot and placeholder_ohl else ohl[0],
-            "high": None if snapshot and placeholder_ohl else ohl[1],
-            "low": None if snapshot and placeholder_ohl else ohl[2], "close": close,
-            "adjusted_close": None if snapshot else adj,
-            "volume": None if snapshot and placeholder_ohl else volume,
-            "is_final": final, "fetched_at": fetched_at,
-        })
+        points.append(
+            {
+                "provider": "yahoo",
+                "market": market,
+                "symbol": symbol,
+                "interval": "quote" if snapshot else "1d",
+                "data_kind": "quote_snapshot" if snapshot else "daily_bar",
+                "ts": stamp * 1000,
+                "name": meta.get("longName") or meta.get("shortName") or symbol,
+                "currency": currency,
+                "exchange_timezone": timezone_name,
+                "trade_date": trade_date.isoformat(),
+                "open": None if snapshot and placeholder_ohl else ohl[0],
+                "high": None if snapshot and placeholder_ohl else ohl[1],
+                "low": None if snapshot and placeholder_ohl else ohl[2],
+                "close": close,
+                "adjusted_close": None if snapshot else adj,
+                "volume": None if snapshot and placeholder_ohl else volume,
+                "is_final": final,
+                "fetched_at": fetched_at,
+            }
+        )
     if not points or (
         capability != "daily_history" and all(point["close"] is None for point in points)
     ):
@@ -159,7 +178,9 @@ class YahooChartTransport:
 
     def __init__(self, *, proxy: str | None, client: httpx.AsyncClient | None = None):
         self.client = client or httpx.AsyncClient(
-            proxy=proxy, trust_env=False, timeout=httpx.Timeout(30, connect=10),
+            proxy=proxy,
+            trust_env=False,
+            timeout=httpx.Timeout(30, connect=10),
             headers={"User-Agent": "Mozilla/5.0"},
         )
         self._owns_client = client is None
@@ -200,7 +221,8 @@ class YahooChartTransport:
                 if response.status_code >= 500:
                     raise httpx.HTTPStatusError(
                         f"Yahoo HTTP {response.status_code}",
-                        request=response.request, response=response,
+                        request=response.request,
+                        response=response,
                     )
                 if response.status_code != 200:
                     raise YahooIndexError(f"Yahoo HTTP {response.status_code} for {symbol}")
@@ -213,11 +235,12 @@ class YahooChartTransport:
                     "payload": payload,
                     "raw_json": response.text,
                     "payload_sha256": hashlib.sha256(response.content).hexdigest(),
-                    "url": str(response.url), "fetched_at": fetched_at,
+                    "url": str(response.url),
+                    "fetched_at": fetched_at,
                 }
             except (httpx.TransportError, httpx.HTTPStatusError) as exc:
                 last_error = exc
-                await asyncio.sleep(min(2 ** attempt, 8))
+                await asyncio.sleep(min(2**attempt, 8))
         raise YahooIndexError(f"Request failed for {symbol}: {last_error}") from last_error
 
 
@@ -225,7 +248,11 @@ class YahooIndexClient(YahooChartTransport):
     """Daily/quote charts using the shared transport and unchanged daily parser."""
 
     async def fetch(
-        self, symbol: str, market: str, *, start: int | None = None,
+        self,
+        symbol: str,
+        market: str,
+        *,
+        start: int | None = None,
         capability: str | None = None,
     ) -> dict:
         params = {"interval": "1d"}
@@ -233,11 +260,15 @@ class YahooIndexClient(YahooChartTransport):
         params.update(period1=str(0 if start is None else start), period2=str(int(time.time())))
         source = await self.fetch_chart(symbol, params)
         metadata, points = parse_chart(
-            source.pop("payload"), symbol=symbol, market=market,
-            fetched_at=source["fetched_at"], capability=capability,
+            source.pop("payload"),
+            symbol=symbol,
+            market=market,
+            fetched_at=source["fetched_at"],
+            capability=capability,
         )
         return {
-            "metadata": metadata, "points": points,
+            "metadata": metadata,
+            "points": points,
             "missing_close_timestamps": [p["ts"] for p in points if p["close"] is None],
             **source,
         }

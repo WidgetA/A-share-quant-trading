@@ -509,9 +509,9 @@ async def test_uncertain_write_reports_confirmed_rows_and_cause_without_exceptio
     assert failed["pending_retained"] is True
     assert not state_path.exists() and pending_path.read_bytes() == original_pending
     assert len([call for call in yahoo.calls if call[0] == "^SOX"]) == 1
-    assert next(item for item in result["indices"] if item["market"] == "KR")[
-        "status"
-    ] == "verified"
+    assert (
+        next(item for item in result["indices"] if item["market"] == "KR")["status"] == "verified"
+    )
     encoded = json.dumps(result)
     assert "private-user" not in encoded and "secret-password" not in encoded
     assert "http://" not in encoded and "uncertain write" not in encoded
@@ -614,17 +614,25 @@ async def test_cli_fc_collection_reuses_domestic_ingestion_without_local_yahoo(
     monkeypatch.setattr(cli, "CrossMarketStore", lambda *args, **kwargs: store)
     monkeypatch.setenv("CROSS_MARKET_FC_REGION", "us-west-1")
     args = SimpleNamespace(
-        proxy=None, fc_endpoint="fcv3.us-west-1.aliyuncs.com", fc_function=None,
-        greptime_url="http://db", batch_size=100,
-        reference=references.reference, base_reference=references.base,
-        state_dir=state_dir, concurrency=2, loop_seconds=0,
+        proxy=None,
+        fc_endpoint="fcv3.us-west-1.aliyuncs.com",
+        fc_function=None,
+        greptime_url="http://db",
+        batch_size=100,
+        reference=references.reference,
+        base_reference=references.base,
+        state_dir=state_dir,
+        concurrency=2,
+        loop_seconds=0,
     )
     assert await cli.run(args) == 0
     result = json.loads(capsys.readouterr().out)
     assert result["status"] == "verified" and len(store.mappings) == 268
     assert {call[0] for call in yahoo.calls} == {"^SOX", "KOSPI-25.KS"}
     assert constructed[0] == (
-        "fcv3.us-west-1.aliyuncs.com", "ashare_yahoo_indices_v15", "us-west-1"
+        "fcv3.us-west-1.aliyuncs.com",
+        "ashare_yahoo_indices_v15",
+        "us-west-1",
     )
     assert constructed[-2:] == ["yahoo_closed", "store_closed"]
 
@@ -634,8 +642,10 @@ async def test_cli_fc_proxy_conflict_fails_before_invocation_without_leaking_pro
     monkeypatch, capsys, tmp_path
 ):
     args = SimpleNamespace(
-        proxy="http://private-user:secret-password@proxy", fc_endpoint="fc.example",
-        fc_function="ashare_yahoo_indices_v15", state_dir=tmp_path,
+        proxy="http://private-user:secret-password@proxy",
+        fc_endpoint="fc.example",
+        fc_function="ashare_yahoo_indices_v15",
+        state_dir=tmp_path,
     )
     assert await cli.run(args) == 1
     output = capsys.readouterr().out

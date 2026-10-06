@@ -65,6 +65,29 @@ async def test_domestic_minute_parser_receives_native_raw_and_source_empty(empty
 
 
 @pytest.mark.asyncio
+async def test_domestic_hour_uses_distinct_native_capability_and_real_hour_rows():
+    chart = json.loads(source())
+    result = chart["chart"]["result"][0]
+    result["meta"]["dataGranularity"] = "1h"
+    result["timestamp"] = [1791244800, 1791248400]
+    raw = json.dumps(chart)
+    calls = []
+
+    def invoke(payload):
+        calls.append(payload)
+        validate_request(payload)
+        return response(payload, raw)
+
+    client = FCYahooIntradayIndexClient("fc.example", invoke=invoke)
+    fetched = await client.fetch(
+        "KOSPI-10.KS", "KR", start=1791244800, end=1791252000, interval="1h"
+    )
+    assert calls[0]["capability"] == "hour_history"
+    assert {point["data_kind"] for point in fetched["points"]} == {"hour_bar"}
+    assert [point["ts"] for point in fetched["points"]] == [1791244800000, 1791248400000]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("field,value", [("end", 1791246000), ("interval", "5m"), ("start", True)])
 async def test_another_window_or_interval_cannot_be_accepted(field, value):
     client = FCYahooIntradayIndexClient(

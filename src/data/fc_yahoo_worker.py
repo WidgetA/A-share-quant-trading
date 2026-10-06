@@ -44,11 +44,17 @@ def validate_request(event: bytes | bytearray | str | Mapping[str, Any]) -> dict
     start = request["start"]
     if start is not None and (type(start) is not int or start < 0):
         raise FCYahooRequestError("start must be null or nonnegative integer epoch seconds")
-    if request["capability"] not in ("daily_history", "snapshot_only", "minute_history"):
+    if request["capability"] not in (
+        "daily_history",
+        "snapshot_only",
+        "minute_history",
+        "hour_history",
+    ):
         raise FCYahooRequestError("Unsupported acquisition capability")
     fields = list(REQUEST_FIELDS)
-    if request["capability"] == "minute_history":
-        if request.get("interval") not in ("1m", "5m"):
+    if request["capability"] in ("minute_history", "hour_history"):
+        intervals = ("1h",) if request["capability"] == "hour_history" else ("1m", "5m")
+        if request.get("interval") not in intervals:
             raise FCYahooRequestError("Unsupported minute interval")
         end = request.get("end")
         if start is None or type(end) is not int or end <= start:
@@ -66,15 +72,20 @@ async def fetch_envelope(
 ) -> dict[str, Any]:
     """Fetch one requested period and return original source bytes as UTF-8 JSON."""
     request = validate_request(request)
-    if request["capability"] == "minute_history":
+    if request["capability"] in ("minute_history", "hour_history"):
         source = await yahoo.fetch(
-            request["symbol"], request["market"], start=request["start"],
-            end=request["end"], interval=request["interval"],
+            request["symbol"],
+            request["market"],
+            start=request["start"],
+            end=request["end"],
+            interval=request["interval"],
         )
     else:
         source = await yahoo.fetch(
-            request["symbol"], request["market"],
-            start=request["start"], capability=request["capability"],
+            request["symbol"],
+            request["market"],
+            start=request["start"],
+            capability=request["capability"],
         )
     raw = source.get("raw_json")
     digest = source.get("payload_sha256")
@@ -117,7 +128,9 @@ class FCYahooWorker:
     """One warm instance keeps its own event loop, HTTP pool and 429 cooldown."""
 
     def __init__(
-        self, *, client_factory: Callable[..., YahooIndexClient] = YahooIndexClient,
+        self,
+        *,
+        client_factory: Callable[..., YahooIndexClient] = YahooIndexClient,
         intraday_client_factory: Callable[..., YahooIntradayIndexClient] = YahooIntradayIndexClient,
     ):
         self._loop = asyncio.new_event_loop()
@@ -132,13 +145,15 @@ class FCYahooWorker:
             # No configured or environment proxy is used for US FC egress.
             self._yahoo = self._client_factory(proxy=None)
         source_client = self._yahoo
-        if request["capability"] == "minute_history":
+        if request["capability"] in ("minute_history", "hour_history"):
             if self._intraday is None:
                 self._intraday = self._intraday_client_factory(transport=self._yahoo)
             source_client = self._intraday
         return await fetch_envelope(
-            request, yahoo=source_client,
-            fc_request_id=context.request_id, region=os.environ["FC_REGION"],
+            request,
+            yahoo=source_client,
+            fc_request_id=context.request_id,
+            region=os.environ["FC_REGION"],
         )
 
     def invoke(self, event: bytes | bytearray | str | Mapping[str, Any], context: Any) -> str:

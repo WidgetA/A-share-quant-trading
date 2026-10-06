@@ -70,6 +70,38 @@ def test_real_minute_times_fields_and_source_finality_are_preserved():
     assert points[-1]["adjusted_close"] is None
 
 
+def test_real_hour_timestamps_and_prices_are_preserved_as_hour_bars():
+    payload = chart(interval="1h")
+    source = payload["chart"]["result"][0]
+    source["timestamp"] = [1728259200, 1728262800, 1728266400]
+    source["meta"]["regularMarketTime"] = 1728266460
+    source["meta"]["currentTradingPeriod"]["regular"] = {
+        "start": 1728259200,
+        "end": 1728280800,
+    }
+    _, points = parse(payload, interval="1h")
+    assert [point["ts"] for point in points] == [1728259200000, 1728262800000, 1728266400000]
+    assert [point["close"] for point in points] == [104, 105, 106]
+    assert {point["data_kind"] for point in points} == {"hour_bar"}
+    assert {point["interval"] for point in points} == {"1h"}
+    assert [point["is_final"] for point in points] == [True, True, False]
+
+
+def test_korean_hour_session_end_quote_does_not_become_a_bar_or_finalize_last_hour():
+    payload = old_window_with_aligned_latest_quote()
+    source = payload["chart"]["result"][0]
+    source["timestamp"][1] = source["timestamp"][0] + 3600
+    source["meta"]["dataGranularity"] = "1h"
+    _, points = parse(payload, interval="1h")
+    assert [point["data_kind"] for point in points] == [
+        "hour_bar",
+        "hour_bar",
+        "hour_quote_snapshot",
+    ]
+    assert points[-1]["ts"] == 1791266400000
+    assert points[-2]["is_final"] is None
+
+
 def test_missing_ohl_and_all_zero_ohl_preserve_actual_close_and_volume():
     payload = chart()
     values = payload["chart"]["result"][0]["indicators"]["quote"][0]
