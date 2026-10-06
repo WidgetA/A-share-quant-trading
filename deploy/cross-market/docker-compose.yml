@@ -1,29 +1,6 @@
 version: "3.7"
 
 services:
-  yahoo-index-proxy:
-    image: "${CROSS_MARKET_RUNTIME_IMAGE:?Set the immutable production v15 image ID}"
-    labels:
-      org.ashare.cross-market.source-revision: "${CROSS_MARKET_SOURCE_REVISION:?Set the collector source commit}"
-      org.ashare.cross-market.bundle-sha256: "${CROSS_MARKET_BUNDLE_SHA256:?Set the deployed runtime bundle SHA256}"
-    entrypoint: ["/usr/local/bin/mihomo"]
-    command: ["-d", "/tmp/mihomo", "-f", "/etc/mihomo/config.yaml"]
-    restart: unless-stopped
-    read_only: true
-    tmpfs:
-      - /tmp
-    volumes:
-      - type: bind
-        source: /opt/ashare-cross-market/proxy/mihomo
-        target: /usr/local/bin/mihomo
-        read_only: true
-      - type: bind
-        source: /opt/ashare-cross-market/proxy/config.yaml
-        target: /etc/mihomo/config.yaml
-        read_only: true
-    networks:
-      - production
-
   cross-market-collector:
     image: "${CROSS_MARKET_RUNTIME_IMAGE:?Set the immutable production v15 image ID}"
     labels:
@@ -32,8 +9,10 @@ services:
     working_dir: /collector
     entrypoint: ["python", "/collector/scripts/collect_cross_market_indices.py"]
     command:
-      - --proxy
-      - http://yahoo-index-proxy:17897
+      - --fc-endpoint
+      - "${CROSS_MARKET_FC_ENDPOINT:?Set the authenticated US FC endpoint}"
+      - --fc-function
+      - ashare_yahoo_indices_v15
       - --greptime-url
       - http://greptimedb:4000
       - --reference
@@ -51,8 +30,17 @@ services:
     environment:
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONUNBUFFERED: "1"
-    depends_on:
-      - yahoo-index-proxy
+      DEBUG: ""
+      PYTHONPATH: /collector/vendor:/collector
+      CROSS_MARKET_FC_REGION: us-west-1
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      ALL_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      all_proxy: ""
+    env_file:
+      - /opt/ashare-cross-market/fc.credentials.env
     restart: unless-stopped
     read_only: true
     tmpfs:
@@ -63,7 +51,7 @@ services:
         target: /collector
         read_only: true
       - type: bind
-        source: /opt/ashare-cross-market/state
+        source: /opt/ashare-cross-market/state-fc
         target: /state
     networks:
       - production

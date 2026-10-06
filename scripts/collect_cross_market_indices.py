@@ -19,6 +19,8 @@ from src.data.yahoo_indices import YahooIndexClient
 def arguments():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--proxy", default=os.environ.get("CROSS_MARKET_YAHOO_PROXY") or None)
+    parser.add_argument("--fc-endpoint", default=os.environ.get("CROSS_MARKET_FC_ENDPOINT") or None)
+    parser.add_argument("--fc-function", default=os.environ.get("CROSS_MARKET_FC_FUNCTION") or None)
     parser.add_argument(
         "--greptime-url",
         default=os.environ.get("CROSS_MARKET_GREPTIME_URL", "http://localhost:4000"),
@@ -57,6 +59,10 @@ def arguments():
     args = parser.parse_args()
     if not math.isfinite(args.loop_seconds) or args.loop_seconds < 0:
         parser.error("--loop-seconds must be zero or positive")
+    if args.fc_function and not args.fc_endpoint:
+        parser.error("--fc-function requires --fc-endpoint")
+    if args.fc_endpoint and args.proxy:
+        parser.error("FC collection and the local Yahoo proxy cannot be combined")
     return args
 
 
@@ -64,7 +70,19 @@ async def run(args):
     yahoo = None
     store = None
     try:
-        yahoo = YahooIndexClient(proxy=args.proxy)
+        endpoint = getattr(args, "fc_endpoint", None)
+        function = getattr(args, "fc_function", None)
+        if endpoint or function:
+            if not endpoint or args.proxy:
+                raise ValueError("FC collection needs an endpoint and cannot use a Yahoo proxy")
+            from src.data.fc_yahoo_indices import FC_FUNCTION_NAME, FC_REGION, FCYahooIndexClient
+
+            yahoo = FCYahooIndexClient(
+                endpoint, function or FC_FUNCTION_NAME,
+                region=os.environ.get("CROSS_MARKET_FC_REGION") or FC_REGION,
+            )
+        else:
+            yahoo = YahooIndexClient(proxy=args.proxy)
         store = CrossMarketStore(args.greptime_url, batch_size=args.batch_size)
         producer = CrossMarketIngestor(
             reference_path=args.reference,

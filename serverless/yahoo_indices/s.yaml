@@ -1,0 +1,23 @@
+edition: 3.0.0
+name: ashare-yahoo-indices
+access: ${env.CROSS_MARKET_FC_ACCESS}
+
+resources:
+  yahoo-indices:
+    component: fc3
+    props:
+      region: ${env.CROSS_MARKET_FC_REGION}
+      functionName: ${env.CROSS_MARKET_FC_FUNCTION_NAME}
+      description: Single industry-index Yahoo chart fetch through US native FC egress
+      runtime: python3.12
+      handler: handler.handler
+      code: ${env.CROSS_MARKET_FC_CODE_ZIP}
+      cpu: 0.35
+      memorySize: 512
+      diskSize: 512
+      timeout: 360
+      instanceConcurrency: 1
+      internetAccess: true
+      environmentVariables:
+        PYTHONDONTWRITEBYTECODE: "1"
+        PYTHONUNBUFFERED: "1"

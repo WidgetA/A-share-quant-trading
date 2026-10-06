@@ -584,6 +584,66 @@ async def test_cli_initialization_error_reports_type_without_secret(monkeypatch,
 
 
 @pytest.mark.asyncio
+async def test_cli_fc_collection_reuses_domestic_ingestion_without_local_yahoo(
+    references, tmp_path, monkeypatch, capsys
+):
+    from src.data import fc_yahoo_indices as fc_module
+
+    state_dir = tmp_path / "state"
+    constructed = []
+
+    class ClosingYahoo(FakeYahoo):
+        async def aclose(self):
+            constructed.append("yahoo_closed")
+
+    class ClosingStore(FakeStore):
+        async def aclose(self):
+            constructed.append("store_closed")
+
+    yahoo, store = ClosingYahoo(), ClosingStore(state_dir)
+
+    def fc_client(endpoint, function, *, region):
+        constructed.append((endpoint, function, region))
+        return yahoo
+
+    def local_yahoo(*, proxy):
+        raise AssertionError("FC mode must not construct the local Yahoo client")
+
+    monkeypatch.setattr(fc_module, "FCYahooIndexClient", fc_client)
+    monkeypatch.setattr(cli, "YahooIndexClient", local_yahoo)
+    monkeypatch.setattr(cli, "CrossMarketStore", lambda *args, **kwargs: store)
+    monkeypatch.setenv("CROSS_MARKET_FC_REGION", "us-west-1")
+    args = SimpleNamespace(
+        proxy=None, fc_endpoint="fcv3.us-west-1.aliyuncs.com", fc_function=None,
+        greptime_url="http://db", batch_size=100,
+        reference=references.reference, base_reference=references.base,
+        state_dir=state_dir, concurrency=2, loop_seconds=0,
+    )
+    assert await cli.run(args) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "verified" and len(store.mappings) == 268
+    assert {call[0] for call in yahoo.calls} == {"^SOX", "KOSPI-25.KS"}
+    assert constructed[0] == (
+        "fcv3.us-west-1.aliyuncs.com", "ashare_yahoo_indices_v15", "us-west-1"
+    )
+    assert constructed[-2:] == ["yahoo_closed", "store_closed"]
+
+
+@pytest.mark.asyncio
+async def test_cli_fc_proxy_conflict_fails_before_invocation_without_leaking_proxy(
+    monkeypatch, capsys, tmp_path
+):
+    args = SimpleNamespace(
+        proxy="http://private-user:secret-password@proxy", fc_endpoint="fc.example",
+        fc_function="ashare_yahoo_indices_v15", state_dir=tmp_path,
+    )
+    assert await cli.run(args) == 1
+    output = capsys.readouterr().out
+    assert json.loads(output)["error_type"] == "ValueError"
+    assert "private-user" not in output and "secret-password" not in output
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "field,value",
     [
