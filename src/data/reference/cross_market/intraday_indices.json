@@ -1,0 +1,4609 @@
+{
+  "schema_version": 1,
+  "checked_at": "2026-10-06T18:38:36.440161+00:00",
+  "base_reference_sha256": "8e14dd0f8346fae374dd8adaac3eb0a48254967b2dc82c5548635922b7c628e5",
+  "scope": "Existing adopted US131/KR39 INDEX instruments, locally verified before FC deployment",
+  "limits": {
+    "1m": {
+      "retention_seconds": 2592000,
+      "max_window_seconds": 691200
+    },
+    "5m": {
+      "retention_seconds": 5184000,
+      "max_window_seconds": 5184000
+    }
+  },
+  "limits_note": "Observed Yahoo source retention and per-request limits; not a user history cutoff. Collector preserves all source-available ranges and records expired ranges. No synthetic 2023 minute data.",
+  "indices": [
+    {
+      "index_id": "KR:YAHOO:KOSPI-10.KS",
+      "market": "KR",
+      "symbol": "KOSPI-10.KS",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "0164fc61fbdc4a297b0feddf4e487f91e0cbd59cd31ba4688ef6b8ec9764873f",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786214209,
+          "period2": 1786819009,
+          "raw_sha256": "6809fe2f538f62426b94574a54aedab225ac1c6f399e0e1f54a2d748ab6b24ab",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:KOSPI-11.KS",
+      "market": "KR",
+      "symbol": "KOSPI-11.KS",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "9225f3ea730dea53deedcc006ae4c8223ffae179cd0cdca9c79febbd1b00176a",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786214209,
+          "period2": 1786819009,
+          "raw_sha256": "3eb09cd952f149dc21769f70cdc5f3eea551210e302f54b6127e0bfb82d1e8e2",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:KOSPI-12.KS",
+      "market": "KR",
+      "symbol": "KOSPI-12.KS",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "c6fefafffe9d6a67d0a052a9c5f3ebdf6f2510a77abdabcab2c00d8954e9375a",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786214209,
+          "period2": 1786819009,
+          "raw_sha256": "b15b61a7d830fa83e89427bd184415d46326760cdb2503fd3f36ddcfd34ccb24",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:KOSPI-13.KS",
+      "market": "KR",
+      "symbol": "KOSPI-13.KS",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "7ce3b11f43815e4c4da81fed60720c821ad4eb3cd7d8e342f93b41629995733b",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786214209,
+          "period2": 1786819009,
+          "raw_sha256": "8c25aa2675eb4a49702f26674612d0655582c3371786caa70b5bc50b66896c7e",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:KOSPI-14.KS",
+      "market": "KR",
+      "symbol": "KOSPI-14.KS",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "d58d49444bed1bcb67eac058518900a358c320a2a4b632a7def864cffaa936d9",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786214209,
+          "period2": 1786819009,
+          "raw_sha256": "a94ac839cbc324bcaab1b2aada2f58947774c5821efe26587c106dd96facacab",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:KOSPI-15.KS",
+      "market": "KR",
+      "symbol": "KOSPI-15.KS",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "ce9d77ca5af09c21080ce0ebb56e9250ba81c7e95f0a722c4d8029f924c8876b",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786214209,
+          "period2": 1786819009,
+          "raw_sha256": "488883c3706bac9dd0a4eee0203f9fcb84c2d73e5d5ce007e5a97ed44d6768d6",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:KOSPI-16.KS",
+      "market": "KR",
+      "symbol": "KOSPI-16.KS",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "d5ddb6828e329b95c6a1500aea67e6d3bb2ca2098a23e8d5fd21006223ab4610",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786214209,
+          "period2": 1786819009,
+          "raw_sha256": "b5ea37016bfcca8b2cc6b3db89fbe17d814522a07b75b5db10b3beee5fa5d493",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:KOSPI-17.KS",
+      "market": "KR",
+      "symbol": "KOSPI-17.KS",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "0d24627a90d3b6bfa0cc0f74c89ae253c030ff2e83ce07e0259a478ad517e861",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786214209,
+          "period2": 1786819009,
+          "raw_sha256": "04fec5dcad1069c26670cd4f654c6ecc5d85b31a5d486a0e6b87980ab940022d",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:KOSPI-18.KS",
+      "market": "KR",
+      "symbol": "KOSPI-18.KS",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "9082eecf0f97031f77940eaba54db13ac6e3ee7758fa51c6b9b420f61d97edb7",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786214209,
+          "period2": 1786819009,
+          "raw_sha256": "f0af8a67a5c1a6048fa6ba13c724a6b4e36cde470de648901e61c55d6c87bcbd",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:KOSPI-19.KS",
+      "market": "KR",
+      "symbol": "KOSPI-19.KS",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "1db96c58c8434274bb2e2c450124f554067d20684ed2fd48d9d166d1317d3f91",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786214209,
+          "period2": 1786819009,
+          "raw_sha256": "a7e2be6849217a87a18621e06a12385653738648571f40cef86789cdb1714bce",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:KOSPI-20.KS",
+      "market": "KR",
+      "symbol": "KOSPI-20.KS",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "f04182ce2e6f26a690c471a3e8d2cdc9e16c1215f9e2fb47c5f21095067e4038",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786214209,
+          "period2": 1786819009,
+          "raw_sha256": "7082613cfc702b18b8a9b4c867160d31203497c984f9799ad5c5bcd4f592ee87",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:KOSPI-21.KS",
+      "market": "KR",
+      "symbol": "KOSPI-21.KS",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "d9f08329f9beccc108c4707481afce57c788fde721bb6a45af901fa3c6c7fe46",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786214209,
+          "period2": 1786819009,
+          "raw_sha256": "471e234ad46d4a92f0b21d11b440e360e15419f875ea95d3e6f209d95bf428b0",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:KOSPI-24.KS",
+      "market": "KR",
+      "symbol": "KOSPI-24.KS",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "15b64cbe40344bbfe85319aa41e82fc84d7c4a2956b356692c3b3dc1a8c199f2",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786214209,
+          "period2": 1786819009,
+          "raw_sha256": "f5250355acaf1673457f7ef4ac2cf181433f6c0013be1cc304c4a1654de7ccd8",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:KOSPI-25.KS",
+      "market": "KR",
+      "symbol": "KOSPI-25.KS",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "91414adc62226b0c5bb38cde65cae3fb052e695331b9fa36b1a0273f5b4ff02b",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786214209,
+          "period2": 1786819009,
+          "raw_sha256": "a0413ae48baf5a35ad7598e0e57bc455d3cb7942353fe160064a64ef028a5b22",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:KOSPI-26.KS",
+      "market": "KR",
+      "symbol": "KOSPI-26.KS",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "2dd527f4e5c0cdc11085429b2bd979a6eff2a7c01a78cdb2e26020b943479f46",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786214209,
+          "period2": 1786819009,
+          "raw_sha256": "22934f6159fdacaca8c2e904aa1573d8f249b8324d777049a84db14706380629",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:KOSPI-5.KS",
+      "market": "KR",
+      "symbol": "KOSPI-5.KS",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "0b9387e0ea6da9dec118f0bbaaf30e911cdf3183b7fe91a66f33dc0736cd24e9",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786214209,
+          "period2": 1786819009,
+          "raw_sha256": "b3c785be0a25f80a815dab59d2688913b33ddd95d98aea940417d5e6aee969e1",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:KOSPI-6.KS",
+      "market": "KR",
+      "symbol": "KOSPI-6.KS",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "6a93312ffa3763e6f385b64234a008f7412339d3b1346dc44c6775fd34e96f07",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "691be5e8ddaaf2ca0c34f63b758336a9a94a09fc8f6ae6dfb73d8402ef7081e6",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:KOSPI-7.KS",
+      "market": "KR",
+      "symbol": "KOSPI-7.KS",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "1fddff0551bc7fa55fe01ba060e52a60fac682ac940b6131983909dd48691a20",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "4b0f89a02639274d7e8e87d4eba00e3adabfae74e3c5a67fc25fd8e24bb22fd4",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:KOSPI-8.KS",
+      "market": "KR",
+      "symbol": "KOSPI-8.KS",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "4fb452b24076477b73954179d15b0113501b44a3dc44a124e7392ceec7739cb7",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "a8d77138d6f1eb30f358735d9a2e12665d7f457f5f56a150c611810144009608",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:KOSPI-9.KS",
+      "market": "KR",
+      "symbol": "KOSPI-9.KS",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "01701289f24cca0140acd4633feb38c1cd70c3f464d9d299b22296f0cbab4615",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "fc5415c2ab6eb98fd5ad7c653b6a5a08bf91f5c8f4788e4418c7eb7742fd0405",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:^KQ14",
+      "market": "KR",
+      "symbol": "^KQ14",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "a6da34ddba3e3c6b0b51a10ab1a6b8175d53b3bd147c7795291738fddd663da6",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "329eede2d7480ff006a496a5aab72ff014f504f8a3ee77d0657cd5990386616d",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:^KQ15",
+      "market": "KR",
+      "symbol": "^KQ15",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "195f0045f43d5cee09faaebf7029731544df3a658a9c515f0689752bdafc18b9",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "415730d8afb45f07b1240a1c589adbfddbb0de793185ddc07920d9281c8393aa",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:^KQ16",
+      "market": "KR",
+      "symbol": "^KQ16",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "897b1a4c4fb2f4bdc96b00a7ca1b1b55c37dd7448b717faa224d2ae3872f56d8",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "f8468a897c267d144e3982ce3d6f693c642bd6d1dbf8cb28aa1d05c8307eee9d",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:^KQ19",
+      "market": "KR",
+      "symbol": "^KQ19",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "ed94b57d23f76498d6273455b512d29121880e68cb19527654fe648e1ba0e87d",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "dba985cc492cc80b72729f126ec5c92ce1f7adf5c2905198ab048a1272a00548",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:^KQ20",
+      "market": "KR",
+      "symbol": "^KQ20",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "b5a8ca436e730d3f3f344823feb6c7de3c14820ce445aa51a7cfc211532de510",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "9e3c845b231a9de2e6604068de1403c4e730c7d8cd894bd1590c9c24088e65f0",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:^KQ21",
+      "market": "KR",
+      "symbol": "^KQ21",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "4580042c2ab75f1b95aaf7808f2b2ef42c31ec10c379c1b0016b8402d8159dfd",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "c50597303cbb13a128e958fcf291f6d9929a7ef33bc6d8ab06bf72b9c705c38b",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:^KQ22",
+      "market": "KR",
+      "symbol": "^KQ22",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "98c4d0ce8b693e4b744447fb469cf25777d3c745a7af87474c71f2f683f779a2",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "36a73e5e30937883e0335cb3d371be1c968cd1fbc78b31dffe3ca305cd8ab0c8",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:^KQ23",
+      "market": "KR",
+      "symbol": "^KQ23",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "00714cdca07fe446de297765ad0aa7d76c95e51beff322e0fb99967037cee7af",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "a03a7e057bb7a498e6389233e2a62c0cbee034a2e3f334e267ca059a01759b7b",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:^KQ24",
+      "market": "KR",
+      "symbol": "^KQ24",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "8999fea2d631cbe4c09989b06ecf436afe6346e63459b5658b5aa643a819f12d",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "3f3e3c05fbaa40b545ca3b055d6f2acf71198c6edaf314f0fec812800aea4163",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:^KQ25",
+      "market": "KR",
+      "symbol": "^KQ25",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "878dfa4322bfd6b7d167799220f56baf7f068aabcd48f52a27640ba035069e75",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "24e0dd4df13a51d52b0e3731f0e5ca4fb0a509bf41d2f424df9278b39dfccad1",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:^KQ26",
+      "market": "KR",
+      "symbol": "^KQ26",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "1f2f12d321becae7596067f7607493db131bbc547535ac80e4f18ae63dace592",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "b6ecfa287cda49e93040a819685ad2bd97380fba3afee67c45d20600fcae59d9",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:^KQ27",
+      "market": "KR",
+      "symbol": "^KQ27",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "317c895083356d44f3ba110ddbbb006310a2f552773437afd902c1c020ae676d",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "4deda998adc5d4ab3b8ef04fe82aa83433ca16f99ef409dd0773f25d5ee1d91a",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:^KQ28",
+      "market": "KR",
+      "symbol": "^KQ28",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "8fdddfa6d2555f395c8e3a5d7322991bbb578a8a62c6408eae57bf6c88ba2af1",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "546abb9a4b23937216202f88d178aa1687e4194edf31f08d8a9177ec3966d631",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:^KQ29",
+      "market": "KR",
+      "symbol": "^KQ29",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "f16283dc26a536ee97db4d642ac0b5459103bf9ec4ec1098cec531e2818cda65",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "7715f025cf02352ac5b3c33fca2aa7b72cfe2f5f4654dde47c8d5982861a9946",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:^KQ30",
+      "market": "KR",
+      "symbol": "^KQ30",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "578385a31a906d2087d03dd2af61650e0e2bc421470aa78fb9c3a5b4e65eb895",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "389ca6b38672de95e5819ae108ab3df4f92ac229556b4eaa56415c205ea92720",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:^KQ31",
+      "market": "KR",
+      "symbol": "^KQ31",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "7de7c59b0a9f92cb52847c5a6f8df28e46c3049d754d805f7bcf6de36802b033",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "935f77ab285ca3c716c63f4ff6300b1b3edbca7f9bcac5d342350e31f71ea5c0",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:^KQ32",
+      "market": "KR",
+      "symbol": "^KQ32",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "39e5a39f4da89fb0ed4fb33ad319f8408535d4e1638517299cbb7e4843b50bd1",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "2adf3cbe866a2910b5eeca84e5253625813faec77995dc229b00b63b52e6e92d",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:^KQ33",
+      "market": "KR",
+      "symbol": "^KQ33",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "b7e202914003e5e5fef8d56ec2844a32a8387112e7f59e3b460b34e717b8209e",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "44e4c669ddc46486f86f3171e8c34d1b89f3f101daad9929a38207ee1831d9bf",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "KR:YAHOO:^KQ51",
+      "market": "KR",
+      "symbol": "^KQ51",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788806209,
+          "period2": 1789411009,
+          "raw_sha256": "2671e89cccea4f81b24a5da172576f278a5ef46f2258ab578a52676911469d77",
+          "source_bar_count": 1800,
+          "first_source_ts_ms": 1788825600000,
+          "last_source_ts_ms": 1789365540000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "2c1e505e7bcd7c7a0b86f17ffab43e00a2df2be752316441119441d8ff427513",
+          "source_bar_count": 360,
+          "first_source_ts_ms": 1786320000000,
+          "last_source_ts_ms": 1786686900000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^BKX",
+      "market": "US",
+      "symbol": "^BKX",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "9e66c3d1ed1c70192b06daab32795e15c2ed7e081720cbde5d1f866292884514",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "1613220f8f0d7f4a45849d38708c91e099f00dcd363d9dd23204d93b0eb61c2b",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^DJUSAL",
+      "market": "US",
+      "symbol": "^DJUSAL",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "9fad81511f52fa66fc5acc37e810a52904cfcaeb375620ef52932f6b15829bc2",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "312c23647984923510f95549bf5e424ba3bed7614aaecd633134b3cd0a492ddc",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^DJUSCF",
+      "market": "US",
+      "symbol": "^DJUSCF",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "97e640d07d262c7505e40d5c32dd77b070d319f0808f9f024fb9471892290b35",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "75879ab9cbb664ffcf0c11ac4a4ab1fb0cd2baddbcf440a8165319909d048024",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^DJUSDB",
+      "market": "US",
+      "symbol": "^DJUSDB",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "6aa52aee0a7e9d1ead71108ba2cd7b888b418d13d6265868ba5d4407e21abeb1",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "a99284b8727c362b40da8e09965fc475b0d47ab68021df5848e5393d48bcfa8d",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^DJUSHD",
+      "market": "US",
+      "symbol": "^DJUSHD",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "ac9023f9692f35ca17256c4df3c81dc1896e5a17983c2a8bd32f06883cab65ac",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "d2276c7abc16f41b8740ef0a64fa34093e764abddf9787829f312b27668f226c",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^DJUSNF",
+      "market": "US",
+      "symbol": "^DJUSNF",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "8be524665b83d59f04e88129bb35ade9b0a009385f7d06c2fd4dd7747b424cbb",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "6efffe9f7cbadd221016007f7a4eadb8cadddadda101a97c263728af16c60e36",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^DRG",
+      "market": "US",
+      "symbol": "^DRG",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "5c3e2fe20f9223892ee306b902986cdc7ebff0c661351ed82cb34a9d2d067abb",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "214da79212cb8f5ee9dd463a2a713df1f3a27a9ea89b19053ef9ba815ddf8e4a",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^DWCFRP",
+      "market": "US",
+      "symbol": "^DWCFRP",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "38a76574b2e38890fd5d711983b493463f4a1900dc6bbff945afd90c51445e48",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "56f6eac5798747058a0d21bdbbb49facbf2c10263e7a168f29a6c1118e96b75a",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^HGX",
+      "market": "US",
+      "symbol": "^HGX",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "9607b94b1ede612c91d36a7170da968e0554deeceeee1920b813533172a98761",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "d7a17b141a9fbebbb4fe7964fae8b5cbcf54f3f82663369a89d18549446f7b91",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NBI",
+      "market": "US",
+      "symbol": "^NBI",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "5bacd8b7b644f5ae332c3b414f23ce857feb734f9ca79fa95de262340642fdca",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "ef32f0ea7f005726c5d92068b8983ac6d6e41ac8a88bfe7055b6e89018edd133",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB10101010",
+      "market": "US",
+      "symbol": "^NQUSB10101010",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "d2e51f2b12a547a92010249ab6a1c1fd47b8d1103e5f7403be503b9d99efa426",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "6f587012eecb52a8e711a77a1054a72ed89a1b97cc5454cb1fbe81ab59aa656c",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB10101015",
+      "market": "US",
+      "symbol": "^NQUSB10101015",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "47abaa741393e787f0210d3edd6b0d44241c12f696720dcfecb603ce2e0e635b",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "db114a7447a07f7beb0ff714850833a02234b900d4a3d044dfbc41a996226204",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB10101020",
+      "market": "US",
+      "symbol": "^NQUSB10101020",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "0569ddfa19ac0ce8a36df2aa7b15b8e273a130afbe36c997f8bd73fdfb66304d",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "d09c4faf6cbcfcce0ac1c397bac1b252d563dbe11301866f14bf7877ac1d826b",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB10102010",
+      "market": "US",
+      "symbol": "^NQUSB10102010",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "fb10df2afacf67d0185921e77e5f0045b0c5b8e34f6ef5551155fcd3e8cf7fa8",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "08e7a76342efa6eb950a8ac066930b7690bd096cdc8d84e4d0e1de6618ab0dd6",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB10102015",
+      "market": "US",
+      "symbol": "^NQUSB10102015",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "7a0468d54e649a62c8f0ced3fe298d978fc0093a8f9ce46750e0ee860fddb78c",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "961ae65389216bdbe97fc3dd2a7292c66b6ec739666cac7e12114fcd18461c6b",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB10102020",
+      "market": "US",
+      "symbol": "^NQUSB10102020",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "8ccf6b6da3f2aab39ad1ed997ed3f34e8a81f7704011d8aefb3b5b28fa3ca84a",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "1f4567f47ea539e863e69d22295f7f300461ea5fde8f113d0634350d6c1e22f2",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB10102030",
+      "market": "US",
+      "symbol": "^NQUSB10102030",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "d3f8ea81339693e8f8ce6620c8fafa78c08843dab323de77665933453e3e5a84",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "3be67cbde364712c228da4be4d44bb39f9c25a748f964763017cec9e1803ebe0",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB151010",
+      "market": "US",
+      "symbol": "^NQUSB151010",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "fd77d7182e15c62a225c2ec220ee3f305f72cb57b8849422f99d9ed976482145",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "fcf463e24fddb091a29ac3767c96231e1f11a2f7eba1040a3bdc0cf5a1f6ace4",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB15102010",
+      "market": "US",
+      "symbol": "^NQUSB15102010",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "269accfc7eaae2c0f40fc872b18353990fa228d6e08834bdc0b5842fc534d3a5",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "cf8af2ec862be8a35e6b9c7476a28dcb71924fffb9f5ddab4fbe2f1438748fb6",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB15102015",
+      "market": "US",
+      "symbol": "^NQUSB15102015",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "29c797afb790b36cb0dd486b5a1d8b58c4f0861e81ae139435064731fc5d695a",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "6126c7067295ef3b5d59d0c2d36668f33a242a043998be96a50121ffb5b50a4c",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB20101010",
+      "market": "US",
+      "symbol": "^NQUSB20101010",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "fb4cb486b3029354aeff5a092111f58060228674e20d870e45343fe9e3c1b04e",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "263e1398c88c675b3cf938b50e91a9599e3c189afae83f06c78c08641ed064bb",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB20101025",
+      "market": "US",
+      "symbol": "^NQUSB20101025",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "1c5b5f4a9e925fded36d71e9b6b2cb18a6563f2462880255fa3fd64d3e9777b9",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "d26dda65a99d6abfe190647160c56d05cb4bd2a763484e86c6a29301b74afcb9",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB20102010",
+      "market": "US",
+      "symbol": "^NQUSB20102010",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "9dc4eb5c31dad8ec01de48741900dae3225dee6e4957115dc44d0cc6732ba64a",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "9e2709f45efd82c2e766180bb5692ebeb44f9cee408f54f3e382afa22a09aa9d",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB20102015",
+      "market": "US",
+      "symbol": "^NQUSB20102015",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "10d4fa4930957769fae6e146fa44adc9f6a5b8f5c56878016e5e61e401d60f17",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "857cdc653584bbeea1b2749fe3ecdeee32d8d60bee7f1911b0ced4979b2304aa",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB20102020",
+      "market": "US",
+      "symbol": "^NQUSB20102020",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "5520daf63f32820700adf822949514bbb451761cc25b85826b07412f86144bbd",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "dce37b4e05b90dba7c6cad69f8b85c5b33c12db18508d4de5808f0ea7f2bc83a",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB20103010",
+      "market": "US",
+      "symbol": "^NQUSB20103010",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "c5ce6c695bef0929ef302880b836795eb75e162a318def34bdcdba0e1f36c2cc",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "5829cc381871faeeb4159bc3754bf47d72353882574a65ab89a76971b89046fa",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB20103015",
+      "market": "US",
+      "symbol": "^NQUSB20103015",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "e7f2f37f54ad2445d1967e7bd82717cc49fd3e0d8fa8265282def761192f1704",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "be65e6f9857ae04a1092e7a4f951f0644bcb6e0ee017b75f73958f11a1e84023",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB3010",
+      "market": "US",
+      "symbol": "^NQUSB3010",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "f8d0d3a0843f6ea9244bc4b7939460d8a10211be4b5f73f7a56b02256cc6fa84",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "5143ed58c3bf6cb91f292d5e2fae2c1e90fd74a7877387ad3ea5472f267f7275",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB30201020",
+      "market": "US",
+      "symbol": "^NQUSB30201020",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "2868f258ca47d414f494ba855944f9b920f87666c34ed51231c383f00c958ab5",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "7894f67fe40d1eaa8334ff2d9eefa499f6be0d9d1c906f5a963ccd05d29d3245",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB30201030",
+      "market": "US",
+      "symbol": "^NQUSB30201030",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "1b0960421047a2dd9dd97cf364484aa26245ebb8af253d003c3e6ac75d3ecbc1",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "1bc19cbe60fb0388a2f47f5f3c089e4c4c60b8dca925936e916760c9a2d80672",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB30202000",
+      "market": "US",
+      "symbol": "^NQUSB30202000",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "b3969efee83ae382435c85f057b079654b815dda828cd5c55efc63397b131301",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "a1acd3ec14038e57d6ffd254f607ebc4545a2cbf17a110c52a1d19d5ac5196c4",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB30202010",
+      "market": "US",
+      "symbol": "^NQUSB30202010",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "e9f938f2f2d74531ba7cacfabc7834ea770c20e89028eda1478d0001e9360bbb",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "5c8d518b6fe1cae1581adab266332265300ac5e3bdde3594c1c2ead46c01189b",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB30202015",
+      "market": "US",
+      "symbol": "^NQUSB30202015",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "11ef007a27a5319f55875d35214cb5da6421fc87e5f15e838ed45358318e99ac",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "822e10fc3250aedcc127fa0974744b7e1226bfd9e5be6fa81a97bded5b8283b9",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB303010",
+      "market": "US",
+      "symbol": "^NQUSB303010",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "437d636dce36e45196dcf38135f5e8081f82c0fd3afa9e39bf2ec45c2c1ad273",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "bc94bb49da4270915c586226ec15dfb870791b4dda499495a2a5b27531b826e2",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB30302010",
+      "market": "US",
+      "symbol": "^NQUSB30302010",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "4e2352d8f335cfb89972a34d15ff54942f6590711710c78c8aae21475e007bf3",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "ac9aabf6aadd26860d0a727616b000d139f9b2df21d336a942460285b62b9de5",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB30302025",
+      "market": "US",
+      "symbol": "^NQUSB30302025",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "f9a69b86b82e7b4ceb1316b0c52b0f79401760c548d41c86f3ea5dec2025aa0e",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "7c6185ade206280527df098c489b63e4fcad54dccce514d9b0a473d6cb3e9fe0",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB35101010",
+      "market": "US",
+      "symbol": "^NQUSB35101010",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "6f022d05d1d1fd4075de46654b0c3167d5de8675ce3774a37cfc85a259e49d8a",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "008d331c7d88ffb62c392707d319205240837f72bef1f28dced88c2aa1e537b6",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB35101015",
+      "market": "US",
+      "symbol": "^NQUSB35101015",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "8830e79029d5d4f091ae000295d618dc482fca37f17181bfbcdc4d3535624397",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "aa09ceb148af22a35253e63cda8ca888dca637e87aa1bef9459168bdedd47321",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB35102045",
+      "market": "US",
+      "symbol": "^NQUSB35102045",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "e7281f94417c11562d1960b888bf4bf7f979673cd23469ed00cbd32007d994a5",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "a3bbf7066d4709a3e69a77c27447449566e44431f01121f1f290d2c7040b4f7a",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB40101020",
+      "market": "US",
+      "symbol": "^NQUSB40101020",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "2e227bcda8a8e4a98afe5792849d0b1857559ba088df8033bf3a786a9cf8b88a",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "818064030f4b19e6f60a02744ae29ad0ed8f1743b0bc853aabba9eca629c1a55",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB40101025",
+      "market": "US",
+      "symbol": "^NQUSB40101025",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "610734e4a87e9889b8a491dbfb9bcb6d1cedcc6a7d5dc37d04638847027fcdd8",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "1327b1d645e748424720b896d951f74f9016a617005c5ead30c37d1dcd731d06",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB40201010",
+      "market": "US",
+      "symbol": "^NQUSB40201010",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "50e5c86e2f17b6cd50dd561cd75ab116a58d19a4fd4b71a0f65bb21f1946d65f",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "51ef0a950c689b2ae2d7cf9a9e9c23d5fc907e96b9e9f49e446148f2c34d0f5e",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB402020",
+      "market": "US",
+      "symbol": "^NQUSB402020",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "2cc0090af075e3295290e0240538fce5750f86a546b8a3a4e8cdb754a612c9b7",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "6fe2c40a6b09b7ed08ca0b036b149575207e0de18f438aae3c086140687910ae",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB40202010",
+      "market": "US",
+      "symbol": "^NQUSB40202010",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "edac4e6fd552364c76c6969f1a6e64fde7a12e5a23f450304b22eab88bab564e",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "96c9e88c434e69824d2b0323e9b80e2978bf7e82f4f602e1d00a36dfc5ff533c",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB40202015",
+      "market": "US",
+      "symbol": "^NQUSB40202015",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "730ac66fcbcd9a551d0ab6dc8767130d0107b2ef1bbc6be25132f2cc45ccbe99",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "46f59f8621b234bd311a2b5157e3407df0a0ca4ce2358844e9cc571285fff5ce",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB40202025",
+      "market": "US",
+      "symbol": "^NQUSB40202025",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "2c506026baf6c4a097b3df93b8f4667cdb09aee51d6807dc3b3162042beb428f",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "a3a22187406c57f0ac59f4062a1127f294221a8c51d6efe3f3e2e093a99fbe9a",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB40203010",
+      "market": "US",
+      "symbol": "^NQUSB40203010",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "f0b70b09a2c6537fc0e3eaec843db1dcc4d5ab162f228febdfd6fb984d702501",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "a29d59fb8528b3c2b8fd1fc09ffef583cc69d8f3a1a01cb0b00dfa651df10ddd",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB40203040",
+      "market": "US",
+      "symbol": "^NQUSB40203040",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "4d3d55774fe9c914f3a35d18584c6aadff5864a417483e51a49621017761430a",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "e55cd5d302470a7407a8470bfb2f4a26711fde19789a55e679d6f86d2d53eeb6",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB40203045",
+      "market": "US",
+      "symbol": "^NQUSB40203045",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "bffb9c1605bf48ab0df2594ca0372a19395e6bd00d132869e8c1784eb30da3ec",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "391e866943526b7178e307bf6cde5652ea3b4ca96e2b15857696e8d51302c44d",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB40203050",
+      "market": "US",
+      "symbol": "^NQUSB40203050",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "c0d35b90d1d2d3913ba7002cbce58b56163ccfba003cbefb3e113f7c5fc1038e",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "f373602e46f90c8bbc2045d9953c511291cb3c50d8b4a7a4c80b96fb9049e3f7",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB40203055",
+      "market": "US",
+      "symbol": "^NQUSB40203055",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "dce34556de80f1657b3b0a686166b60aa0d1fab1b8694389a8fc7c2582f53bf0",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "ce915a8a3159ac0b4c282e153333bdf0daa3dfd69e26c6650dd5c610375f5c90",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB40204020",
+      "market": "US",
+      "symbol": "^NQUSB40204020",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "b8ebbc225ca2f09c6d41e2a289bfb724523ac7aff163571872cc7d99c2b09254",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "340caf9df1a86259985e4c11494b8ffceb4ad55a9895bf2b23938adbdda6b4ce",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB40204025",
+      "market": "US",
+      "symbol": "^NQUSB40204025",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "eebddafa1869f92d40670221ac0543e3630567d9e8abf0d857a5f4244c2e70e7",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "7447f57efd9d8a9bcf1035b1391ad557d30f94d46aab7e372b065822598e8a21",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB40301010",
+      "market": "US",
+      "symbol": "^NQUSB40301010",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "fb2715fcddb420232ca78bb68e9e6689976ed088567673cbc04a524c604f0073",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "4971365ed00a40bb92f6c3053cd02411408db8ffe91a4697a46874a4377392ea",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB40301020",
+      "market": "US",
+      "symbol": "^NQUSB40301020",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "370f3038a6db37136e08c8ab55e66701656e250e60955e9252b815405649cf18",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "596ca39ce5594fb5e1138ecf134a38b9a3ef18b725660b71f061a7279af11f1d",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB40301030",
+      "market": "US",
+      "symbol": "^NQUSB40301030",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "be897246e546db5898cbc7feb87fc6d73bc6771d1e1eb6ed48a1b0f1eec953f9",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "7ab4ec11d58a322727a6691b39d30ae65e35bed8e1833a0e4010561f44e9ac32",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB40301035",
+      "market": "US",
+      "symbol": "^NQUSB40301035",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "30bc2bcfa54b20adc25799b23b1facc29e5892c50b7722040b3aee839951a21b",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "f7ba2b4c13b8161f4d4cf322b0c1f56299a76a711272d89d1cd640473fbbc939",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB40401010",
+      "market": "US",
+      "symbol": "^NQUSB40401010",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "50a85218a145d6c093a7bdad84fc3c0cb0e1f993496afd0c3df31212a6b1e6e9",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "6f73f6d8d8ac2228b41c18d5570b7abb8cb6dc7ca6dec1efe7180f82cf60fdd2",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB40401030",
+      "market": "US",
+      "symbol": "^NQUSB40401030",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "acbfe44296dacb91f5dc206f7268f186e83fc5a22268edf2b18af6212f45e047",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "e0f2df72abf65351b3d39792f45ee0d08f234421ccddf5fb55ac7d6c2ca20b51",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB40501010",
+      "market": "US",
+      "symbol": "^NQUSB40501010",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "896b937295419ae5c7a203eee0bcff80662fcae29645b8af7f462579dcdaa7c5",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "b7c16a0f5cade68ee29a622c3593908bd64f98824e7880e5ffbc515657f06065",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB40501015",
+      "market": "US",
+      "symbol": "^NQUSB40501015",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "35a420de53a6e41729ddfca3b2ccf784b9b002dbada7116279b2d597b162fe59",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "9dcaa56b8c60dcfa62d004ea2ec61d4d08496f1ae5262acb7fbac535f5dae456",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB40501020",
+      "market": "US",
+      "symbol": "^NQUSB40501020",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "63af792862b0a41373b5170e2b93090b27cbb2b17acf7ab2ac9d776a20eb63fb",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "ef9a92ff9070a4b654196fded40a21550ccf705eb3fe448001366e089a1624e5",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB40501025",
+      "market": "US",
+      "symbol": "^NQUSB40501025",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "389096a64728fc083ce7cff946823631f5fb067058a9ee8477a68b051c3df9d1",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "29eefb105eb94ef22b3f8f6699edb028e5924b136443420017906ab09b72f880",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB40501030",
+      "market": "US",
+      "symbol": "^NQUSB40501030",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "deeaac38ebfc3033bbd7eab74c0d4e9e2508df76ac75e934632dcd30be7ac450",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "80d9c6fa3d1c70f5bcd4dc9a71ceecab44cb7e218231941672bb7502535e8325",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB40501040",
+      "market": "US",
+      "symbol": "^NQUSB40501040",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "52d9a7565d3e966a5c41e6b90c683400a4ecdc9c6e58174dd59980811a7c07e2",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "29e1a8084afb052db060fa7a4262e83b414466c3bd3e29e831bc83899e3a7a2b",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB45101015",
+      "market": "US",
+      "symbol": "^NQUSB45101015",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "7dba7b882cdc1d118fd56d20d0464bcea50254eeeef5ce6dda56a359921a1137",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "5879d80a8525a1926d687d730f511da9460dc731a7ef2b87e58d299e263aa539",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB45101020",
+      "market": "US",
+      "symbol": "^NQUSB45101020",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "a9a988cbf97b31e53d5861aac6053fa63b5f01c7ab7c64e97bfefa0f89ce5009",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "2a173ddaa29390545d2426076b4803aed94a717d347576b88a826e053b41cb98",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB451020",
+      "market": "US",
+      "symbol": "^NQUSB451020",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "1980f275a24ac59660db3a0b63914d41a3dc926aa887e111099417a3adf2438e",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "537c96f1f6b81c7e2584d02bc6c438d384da7b1a7014de775f2408529cdca282",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB45102010",
+      "market": "US",
+      "symbol": "^NQUSB45102010",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "27f944997d7d296ddbc3858591c2d5f5f9ee393656ee6be71cb363529f2e51b0",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "2461d093c6e70238931d5ba2bfd79402efc34afc474a78f6d49891cc3fda3b5c",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB45102020",
+      "market": "US",
+      "symbol": "^NQUSB45102020",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "40c12350ebd3e05584ae49be29b61097c17af0872b6c358adca18c1701b50464",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "e7310104854b45e402fb2c6c5962d43807bbf3ef14d56c4342a0288a8bab068c",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB45201010",
+      "market": "US",
+      "symbol": "^NQUSB45201010",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "c8c69bd3b67ecefdff2a2128ac6a42950a28b33d55608453905038b4db8209a5",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "848db0db6cf388d1c6afad0532cab06ed1f61474b3a4f43adb315532d43c4d26",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB45201015",
+      "market": "US",
+      "symbol": "^NQUSB45201015",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "ac7c202d9cea455c0b8fb4db79efe04c4528bae682159f3714499f6a46c17bd4",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "30a8c57c6ea0b1d2cc0c3d87198c00e033300dde1d683f9a3704fdef9566294a",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB45201020",
+      "market": "US",
+      "symbol": "^NQUSB45201020",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "1f110f34ed89fd476a867fd2d4eb9f97c13c799945c83e2d91756caf44be84fd",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "1f9806690c4d66f8b54447e10a16e34a26be9b301aaef80964120394a880c021",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB45201030",
+      "market": "US",
+      "symbol": "^NQUSB45201030",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "1664deb0572bf8005c101f8fb80bbed39e490fbd2e0dafad331ec3d83453c774",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "a24980cd8e073ae2c3c1f0f80e577b256d568f49b314ffa69d372e5bf0c0448e",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB50101010",
+      "market": "US",
+      "symbol": "^NQUSB50101010",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "2abc2b78146578567e92a3112db07fc487c7f6b7bd61caef1fe12365b8c2a2a8",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "a0779747121382d8118e0dfa6c7b786d09547b29baaafeb55f1550dfae5587f4",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB50101015",
+      "market": "US",
+      "symbol": "^NQUSB50101015",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "05135d7b29ad3481fd4077c468ab5640e7ffcd2ad50845765ff0779081e2c57f",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "17c24c4cc8e77441ab6b2d8cb187d0256b4b0e3dcac7580fbd580a36a627b96d",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB50101020",
+      "market": "US",
+      "symbol": "^NQUSB50101020",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "78ab940a52cb1af60d99f68cb9767142579d56cee88a515c15a0fe5be9d0371d",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "dbc72abcb0bd7a80929a7b3271c3e2ab8ec6ba8c8d6250e4169d7393068dd874",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB50101025",
+      "market": "US",
+      "symbol": "^NQUSB50101025",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "1084b45ebcb4c75b8115918b19c99b23fe6f27055f789e8008feb9e80830b172",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "788f019fcdd3350eaa917d78800a3bfb830a5b4e0ac0d901dc95e505c0c80242",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB50101035",
+      "market": "US",
+      "symbol": "^NQUSB50101035",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "d6ab390420ce8c6085febaf5ee6ddcb8ec310f901dd09cb4307f6ce945a9ddcf",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "17ed9c1643507860242f47dafd0d0c8f19a31f55911b1e803e60de74f3891e5a",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB50201010",
+      "market": "US",
+      "symbol": "^NQUSB50201010",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "84d102d1bcd3c263605657a6c4bd08c6e238b6273dafb151a7400b72f75d1475",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "01e6b43d56786ce6a75213ce9e78e3916650e74e773ed4f551814c977e355be5",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB50201020",
+      "market": "US",
+      "symbol": "^NQUSB50201020",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "9a3a3ff658febb6427e22d8746370a63b24bf6171be7d305b314929664cb479e",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "e3084e7f91e6b745ad8e5f64c6c868281c605eeff48c047f6cc8da00c338fd8c",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB502020",
+      "market": "US",
+      "symbol": "^NQUSB502020",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "86041d8213762194e9e2f0dccdef225108f68bb32d43b2a8b6d3e86e8e33eab9",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "41e226296a645ce73d045ae51adecfdd77c791fa1057234382485821901e6466",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB50202010",
+      "market": "US",
+      "symbol": "^NQUSB50202010",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "0e00ae2387ae9ab5434d710ed9e8ec4220c01ac898c2b8fc5c9eaa468d043c2e",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "216442678ddd9906c2331985fe39efb8022745988ef3a12663a104fcdf87fcf8",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB50202020",
+      "market": "US",
+      "symbol": "^NQUSB50202020",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "ae7fabb9d78c2d3f03a9360debd3e240a269a30615895d1869ca783c8548911b",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "3b8ede29255c5512dc59b636176521a76216544aaad485e609e6986cef09f42c",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB50202025",
+      "market": "US",
+      "symbol": "^NQUSB50202025",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "cfba95e892fa8fd8fb8c99bb1e9bcbd9ddf0a31e29d61a4b85597d7b2320dbf5",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "92c4cb6664f334eedcf6829082f80ce93df71fe89c8b22fd3418eb48517dbe0b",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB50202040",
+      "market": "US",
+      "symbol": "^NQUSB50202040",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "f9a8e8b1c3b0c560efad5681bc84beb0afd9d9e51b17eda310376c2fba140b18",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "20c9d5a809ccd80306401c27840a0d87b57013240647caa5040edc5f179bac4c",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB502030",
+      "market": "US",
+      "symbol": "^NQUSB502030",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "5ac3f1a7517022218a493c991aafca5dfd6eddcfdc30642f5fe930a20713d341",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "697c12180dbfdcdce69d83920c4cc08c48e1dc0dd1f1ce072fbe1056183d3001",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB50203000",
+      "market": "US",
+      "symbol": "^NQUSB50203000",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "bf3249ede52fcd7058daf18aa8641070d5e49daca1626109544e7311c16b7727",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "df1769f08f3fa5aaf2423bbc6988757ec26633931f3c7f8b00028838bb16e0f7",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB50203010",
+      "market": "US",
+      "symbol": "^NQUSB50203010",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "c32181c1644419040c2bef38f8ba13db9312f956dd71780959f88ef9b34a390b",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "19e54ab6cc926e2cd9edfc968b135c1c37219cccc4fc83aaa3dd4afed8bd2299",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB50203030",
+      "market": "US",
+      "symbol": "^NQUSB50203030",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "4f7bf471df8795ae855d233ff85cbb552c4799db7c9d51b1655c38d8fd750a29",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "9d6b8adb9f8923dbdf21c17d8b27546619118c3cdbc515684f9850a2d448d4f3",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB50204000",
+      "market": "US",
+      "symbol": "^NQUSB50204000",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "6969e29add9aa6cfe072917db15c6c5993cbd458ff6d7480360f9e0d0bbfa25f",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "026c987a2eeb86622ed405c65a4081f8b167e1bfb2ca937560d381fc306969a2",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB50204010",
+      "market": "US",
+      "symbol": "^NQUSB50204010",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "227522a4981429518a158e32120e654172c74a6dbd1369f4a283506e46ee1bc0",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "d280ac289bbbe27e24072908a732b4adc72ea2f4bab3bdac49748dbc51eae708",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB50204020",
+      "market": "US",
+      "symbol": "^NQUSB50204020",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "2d76b7bb87708be57ccbf81bfb6f64ad5c7c5ed683f7d25ae5883650afe9ccbb",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "66f43bb093aaa86083753b7fb022b65f45bd0994e9022112389c472b66b784fe",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB50204050",
+      "market": "US",
+      "symbol": "^NQUSB50204050",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "bd708aa15ebb9cce51ae8a88ef3ab86fa84ae3c70b018b193fe07bd122119b8d",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "4d02650203142e87837ee1f6ad6fdd915ef10e59153a66aee8214349fc99672b",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB50205015",
+      "market": "US",
+      "symbol": "^NQUSB50205015",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "4aba42863d1387c6945dd2ec43031018b295621638fed38fc5cd67db85adc2cc",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "f9b1cefa9942da9c5612626118bee23afe37986660cc60b4a2911f45f8899383",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB50205020",
+      "market": "US",
+      "symbol": "^NQUSB50205020",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "8d1c2fbb87f6ff96a14fdca896fd0f33c59ab9811b9a62427eef37f84f79325f",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "df459addde9c2da89e18751dd00780259aad9d7219a7ddf45b565b6576be1528",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB50205025",
+      "market": "US",
+      "symbol": "^NQUSB50205025",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "5f89b8edceaaac79b8381cf33d86d34bd0a903296f806ffa62d86f062f1fcd06",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "dfe7872cf99a8e2bf259d91284289f3fac18300107c4205e27a4508018e31678",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB50205030",
+      "market": "US",
+      "symbol": "^NQUSB50205030",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "4b6adb321602d54077c8f6e990dd03f3339efc92af7c1c5ef65c7f0281f1b949",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "13f19b87f8261de32af7e7c53c6072342b170462cd980044fd7c7958decafd52",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB50206010",
+      "market": "US",
+      "symbol": "^NQUSB50206010",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "f3b3ba1af2ba2b8a3f914b2a99b3cec1e74df372b69d66f9a4074b3f163dd7df",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "20aeefc951e481340ccc1b83b15309d27fced12f59ba81cc8a63d52100cb48aa",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB50206015",
+      "market": "US",
+      "symbol": "^NQUSB50206015",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "41c247c39f6ee2f7a5c3638c850c5cf99a60b1cd2cb3e34f65ffe57a464fb3dd",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "2c21a6d516d6b252f46406aacf81caa3ed2b58789f5644ab4bb04dbf0ce8ca52",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB50206020",
+      "market": "US",
+      "symbol": "^NQUSB50206020",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "4aafe9f9ad98aa6e9f5e19ff7ea57a3ca9e29e19d4ba094045bdb7e2e4847d7a",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "701d134e29e1ca9bd7ab4aab92fa4310955bebc866703294b4ca6b55cd3508b3",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB50206025",
+      "market": "US",
+      "symbol": "^NQUSB50206025",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "669df3f08a7f0ed36dc39ae8891aa930b4159f63e020d2502e1e2f6986f79432",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "e475548b01faba014e88fcf0b47b04af1af7a1c4ec19c54b213ef4b88a640bd1",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB50206030",
+      "market": "US",
+      "symbol": "^NQUSB50206030",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "a3a14d80aebed16a17410a8990da405277d395f80bc502a8c62614baeb929870",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "0efd6fe720a3a57481a98d24ddf73cb1ef638758da35a717b9e399d619744191",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB50206040",
+      "market": "US",
+      "symbol": "^NQUSB50206040",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "b0d4e0a8b091d5ec7582cb3a36d5af8c75da90644d99997219454f839f87c9d5",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "d587e1ece9e401bb127ea3707fdb5fbdc394fd8388495e0665a9897fdac6c0f9",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB50206050",
+      "market": "US",
+      "symbol": "^NQUSB50206050",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "ad8cb9b04b31750598cabb4f4b2d6e688e9b966f9927a4831eef70940c7c8893",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "e9edd8a31ea2e3632a6060570949d27e5d63ad47a0701057c6f66b8257d7bd63",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB50206060",
+      "market": "US",
+      "symbol": "^NQUSB50206060",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "6f6e9b9b864969327c0676367f9579c10d1fa20f6d7235b4d9b7ff54b16de1af",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "dfcf36e1e2cd0db000d3d2e5ee86ac6c52e6a73b520833a3a05ec2d9a94df512",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB55101015",
+      "market": "US",
+      "symbol": "^NQUSB55101015",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "d83dcdd5129451e3065b374943f7312f7c716ab94c0838e1c539c5c6c8b839fc",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "95439eeb59dd97d303e9c4798490d691bf86423beaa2ae595213f4d69f1840f9",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB55102000",
+      "market": "US",
+      "symbol": "^NQUSB55102000",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "2cb3be0852fddbf1bfe379d675ad239f69093c5a6e9e12d26af8b802883185cc",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "50942c776e563cb9a13b1a17eeb44f68aec65af687f595b3ca364b80d114632d",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB55102010",
+      "market": "US",
+      "symbol": "^NQUSB55102010",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "1169e63b9d5f0db1f89bd1a887847fed90404527a4069e65772c72d59724c282",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "b1b8420c0ef663ec73d887bc0b0f4ba3381eab98af98d41d72103aec55db937f",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB55102015",
+      "market": "US",
+      "symbol": "^NQUSB55102015",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "7de2d67a542d16a93355e1974dd2b08496228184eaaa2fdc41245c64dea4d46c",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "25eaea4bb93cfa627190750cede20d4d36e38be4dd568628f542934236629ff4",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB55103025",
+      "market": "US",
+      "symbol": "^NQUSB55103025",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "454e5f02de2bc09ddb09005d0a30a8645fb04d0513d762bcb2de1af1d0832c6f",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "38ad6c502d4c66150738f4cfbaeaed4a8c0dde379e06877bf068ef363be41f5b",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB55201000",
+      "market": "US",
+      "symbol": "^NQUSB55201000",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "74e189aafc975536b256a21c483d74dcbc8294d263c8e7b53445070700835085",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "b976ae85f6614e5490efd3db27b435a410101fb1d00a0d3a4de60ad44d369ee7",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB55201015",
+      "market": "US",
+      "symbol": "^NQUSB55201015",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "10dacac6b9102d5f96961c3a924fd60217b3b5d460096317a27e97820ea876cc",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "89337419f83db99a3e7f94a972d297c0eef62b6cf842e18e479bdde3725d4970",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB55201020",
+      "market": "US",
+      "symbol": "^NQUSB55201020",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "90eda8fc83bee5eac9838a63a069f269a71b4a12168f773f684c986f7d4f0cec",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "e777cc4ff1ea8a7a25649f136353710fe135985707ff02ccd8b39007d05910c0",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB60101000",
+      "market": "US",
+      "symbol": "^NQUSB60101000",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "1e5ea6a88376a60bb50d4f2d46423e5361a9fc5e58e91a951d29e33e212e53ae",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "ecf5125ec4042eb116fe10a1d94ff61b77fba691cd12d7fdf019acd0f41e7cae",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB60101010",
+      "market": "US",
+      "symbol": "^NQUSB60101010",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "8856675a4c6c5a14e9d738148266653854fc76c2df40ee3cb4137238b5a9a34e",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "831f3b3036cb7f4da9a68a59b5994b11afda6cd62a61d439c78c4141f48272b2",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB60101015",
+      "market": "US",
+      "symbol": "^NQUSB60101015",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "9b40b075cde7c3ab65973e12510dca3c0faa6da46773ffc0d816dc7f0e037fe0",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "4f0c80ada3e4cd4ef3f7763339f1aec8165a86fa092de986c8bcb7e6c5c51607",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB60101020",
+      "market": "US",
+      "symbol": "^NQUSB60101020",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "bece870f66c5860eb94d34ddf0e8707e1e3d72ee43b61ad44e4d20648de05e58",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "aeb543eac24a40ac08b824744354de858a5f67c6ce3ba4d30afecb0fcefab84e",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB60101030",
+      "market": "US",
+      "symbol": "^NQUSB60101030",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "3766c4e971b9d5ed10f2185d0caa5733cda163f88253ee4175ed095dc5a28ea3",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "3448f0480f39297e63db147fdc0b3da9b1e49d34060ef3c22a32c30aa9539222",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB60101040",
+      "market": "US",
+      "symbol": "^NQUSB60101040",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "f1adbde7cce49f3b5f0e7d2f90337c8e7bb575639207b83b7efdc031c691cb76",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "b7dfd02116e10f56ea3e796d530cc373b1a3a553467fa2abda1e3a438f86ddb7",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB60102010",
+      "market": "US",
+      "symbol": "^NQUSB60102010",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "042308ccb64efff5ec23fc0a127db2119487da41ea36ad4cdd92592a4530e7ab",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "e77698091a35909d63ef96c035bc36760336b7a8225a975ff4628e3430696c6a",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB60102020",
+      "market": "US",
+      "symbol": "^NQUSB60102020",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "8b0bdf8be93f872405a98bcbb5e161d072926ff5cfb8ec8aeb3e8a93407c0a5a",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "d598849d148c3ad4b2d123a1e051bfd0c6097bce1ed59c1caf71963ba0a67d5d",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB65101010",
+      "market": "US",
+      "symbol": "^NQUSB65101010",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "b965444b6a617f22a6bf7877dcd984b8429ea6f1edf10e7c81859947c87437f8",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "27adf3ee690ed6ba5e8f7fa1b4dd421fd2d486e11433c6495722cd1ffaf3f698",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB65101015",
+      "market": "US",
+      "symbol": "^NQUSB65101015",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "c4cd93646a203298ffeb31aa5102711d1ee72947b8af95b896a7b933bf4acdf1",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "47fcb4136b5c14dc2c9b45426abf9f641fd9a210ea589e67cbedb305a2c298f8",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB65102000",
+      "market": "US",
+      "symbol": "^NQUSB65102000",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "b342225c7b3fc7385c9b806d4813587a71ef3d4b9c57aed638406c952936bad6",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "a6664904dce0cbab839d6f0bd419e6a8dcc43b15aaae091322bbc6c780ca72d8",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB65102020",
+      "market": "US",
+      "symbol": "^NQUSB65102020",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "a4b2a418cfbd682c99252404e099ee6a6c55c675436f04d5b3262a954bd4c5bd",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "a5ebd5531bbcb76558cd5094c3ff189a7daf4ebf38309f18510f8d6ba78d1228",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB65102030",
+      "market": "US",
+      "symbol": "^NQUSB65102030",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "8a7ce825ec928426c8fdf379048def0088a03a07edd7127e5746f7dcc83a8d7d",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "b2d7126b54c355da6c44bd62549aa14b96994c16640b0cf37e3eb99c34f364c6",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^NQUSB651030",
+      "market": "US",
+      "symbol": "^NQUSB651030",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "f837ec919f033aa7376559b6c559eea6db3f60e6dd4c54e08ee7fb022b735cbe",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "ec2897d8f0280fd6e1f4c801da26dd38e75bd1ef0b6b22d51067e1d5493a98c5",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^OSX",
+      "market": "US",
+      "symbol": "^OSX",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "ec876486fc332c0b59bb2af67b842bd965d40835fd86ad185c9906777ad2aaf9",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "577f10c66b65fccf02304be84dcb42f728e82d3bd6ea65762937ea79622b338e",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^SOX",
+      "market": "US",
+      "symbol": "^SOX",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "fd11ca658cc68d137421499b7d10d7e5f56ff7b7a6ff27832bf0fd59256441f6",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "00700eda9f4c90e93ed5b743ac0c0d35681c27d89f5327029d011efc62023a53",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    },
+    {
+      "index_id": "US:YAHOO:^XAU",
+      "market": "US",
+      "symbol": "^XAU",
+      "intervals": [
+        "1m",
+        "5m"
+      ],
+      "local_source_evidence": {
+        "1m": {
+          "period1": 1788804992,
+          "period2": 1789409792,
+          "raw_sha256": "69c0bcb136a5b34e3f3c6bcf4315259a9d4af186b88c4b2a37ab9d65f6f635cc",
+          "source_bar_count": 1846,
+          "first_source_ts_ms": 1788874200000,
+          "last_source_ts_ms": 1789409700000
+        },
+        "5m": {
+          "period1": 1786213665,
+          "period2": 1786818465,
+          "raw_sha256": "f11caa828fca4f8184dcb3a37450d3c783aad1556d744a451742cd9e2cd3ec78",
+          "source_bar_count": 390,
+          "first_source_ts_ms": 1786368600000,
+          "last_source_ts_ms": 1786737300000
+        }
+      }
+    }
+  ]
+}

@@ -262,16 +262,10 @@ class FCYahooIndexClient:
             source = json.loads(raw)
             if not isinstance(source, dict):
                 raise ValueError("Source is not a JSON object")
-            metadata, points = parse_chart(
-                source,
-                symbol=payload["symbol"],
-                market=payload["market"],
-                fetched_at=fetched_at,
-                capability=payload["capability"],
-            )
+            metadata, points = self._parse_source(source, payload, fetched_at)
         except (ValueError, TypeError, AttributeError, KeyError, YahooIndexError):
             raise FCYahooIndexError("FC raw Yahoo source failed local validation") from None
-        return {
+        decoded = {
             "metadata": metadata,
             "points": points,
             "missing_close_timestamps": [point["ts"] for point in points if point["close"] is None],
@@ -282,6 +276,18 @@ class FCYahooIndexClient:
             "request_id": payload["request_id"],
             "runtime": runtime,
         }
+        if payload["capability"] == "minute_history":
+            decoded["source_empty"] = not points
+            decoded["requested_range"] = {
+                "start": payload["start"], "end": payload["end"], "interval": payload["interval"],
+            }
+        return decoded
+
+    def _parse_source(self, source: dict, payload: dict, fetched_at: int):
+        return parse_chart(
+            source, symbol=payload["symbol"], market=payload["market"],
+            fetched_at=fetched_at, capability=payload["capability"],
+        )
 
     async def fetch(
         self,
@@ -307,6 +313,9 @@ class FCYahooIndexClient:
             "start": start,
             "capability": capability,
         }
+        return await self._fetch_payload(payload)
+
+    async def _fetch_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         for attempt in range(self._max_attempts):
             await self._wait_cooldown()
             try:

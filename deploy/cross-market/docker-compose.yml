@@ -56,6 +56,63 @@ services:
     networks:
       - production
 
+  cross-market-intraday-collector:
+    image: "${CROSS_MARKET_RUNTIME_IMAGE:?Set the immutable production v15 image ID}"
+    labels:
+      org.ashare.cross-market.source-revision: "${CROSS_MARKET_SOURCE_REVISION:?Set the collector source commit}"
+      org.ashare.cross-market.bundle-sha256: "${CROSS_MARKET_BUNDLE_SHA256:?Set the deployed runtime bundle SHA256}"
+    working_dir: /collector
+    entrypoint: ["python", "/collector/scripts/collect_cross_market_intraday.py"]
+    command:
+      - --fc-endpoint
+      - "${CROSS_MARKET_FC_ENDPOINT:?Set the authenticated US FC endpoint}"
+      - --fc-function
+      - ashare_yahoo_indices_v15
+      - --greptime-url
+      - http://greptimedb:4000
+      - --reference
+      - /collector/src/data/reference/cross_market/industry_indices.json
+      - --base-reference
+      - /collector/src/data/reference/cross_market/industry_boards.json
+      - --capability-reference
+      - /collector/src/data/reference/cross_market/intraday_indices.json
+      - --state-dir
+      - /state
+      - --concurrency
+      - "${CROSS_MARKET_INTRADAY_CONCURRENCY:-2}"
+      - --loop-seconds
+      - "${CROSS_MARKET_INTRADAY_LOOP_SECONDS:-300}"
+      - --batch-size
+      - "${CROSS_MARKET_INTRADAY_BATCH_SIZE:-1000}"
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+      DEBUG: ""
+      PYTHONPATH: /collector/vendor:/collector
+      CROSS_MARKET_FC_REGION: us-west-1
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      ALL_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      all_proxy: ""
+    env_file:
+      - /opt/ashare-cross-market/fc.credentials.env
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - type: bind
+        source: /opt/ashare-cross-market/runtime
+        target: /collector
+        read_only: true
+      - type: bind
+        source: /opt/ashare-cross-market/state-intraday-fc
+        target: /state
+    networks:
+      - production
+
 networks:
   production:
     external: true

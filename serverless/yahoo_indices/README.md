@@ -13,6 +13,7 @@ handler.py                         # 本目录 handler.py
 src/__init__.py                    # 空文件
 src/data/__init__.py               # 空文件
 src/data/yahoo_indices.py
+src/data/yahoo_intraday_indices.py
 src/data/fc_yahoo_worker.py
 httpx/                            # requirements.txt 的依赖安装结果
 httpcore/
@@ -29,7 +30,7 @@ build_root=$(mktemp -d)
 package="$build_root/package"
 mkdir -p "$package/src/data"
 cp serverless/yahoo_indices/handler.py "$package/handler.py"
-cp src/data/yahoo_indices.py src/data/fc_yahoo_worker.py "$package/src/data/"
+cp src/data/yahoo_indices.py src/data/yahoo_intraday_indices.py src/data/fc_yahoo_worker.py "$package/src/data/"
 : > "$package/src/__init__.py"
 : > "$package/src/data/__init__.py"
 python3.12 -m pip install --only-binary=:all: --target "$package" -r serverless/yahoo_indices/requirements.txt
@@ -86,6 +87,8 @@ CROSS_MARKET_FC_CODE_ZIP=<构建ZIP的绝对路径>
 `market` 为 `US` 或 `KR`；`capability` 为 `daily_history` 或 `snapshot_only`；`start` 为 `null` 或非负整数秒。`null` 对应源端完整可用历史起点，不设固定一个月业务范围。Yahoo 请求使用显式 `period1/period2` 和 `interval=1d`，并验证实际返回粒度；`range=max` 可能被源端转为月线，不能只按请求参数声称拿到日线。
 
 响应完整回显请求，并追加下列字段：
+
+分钟请求使用同一个函数和签名入口，`capability` 改为 `minute_history`，并传入非空整数 `start`、整数 `end > start` 和 `interval: "1m"` 或 `"5m"`。函数逐字段回显完整窗口，返回原始源数据；国内重新解析，识别追加实时快照并核验窗口。分钟客户端借用同一实例的 HTTP transport 和 429 冷却，旧日线六字段请求及响应契约保持兼容。
 
 ```json
 {

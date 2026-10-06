@@ -2,7 +2,7 @@
 
 国内采集器通过阿里云官方 FC SDK 同步调用美国 `us-west-1` 的独立函数 `ashare_yahoo_indices_v15`。美国函数直接访问 Yahoo，返回完整原始响应；国内校验身份、SHA256 和源数据，再写入已有 GreptimeDB。映射、pending、成功游标和读回核验均在国内处理。FC 的构建和部署见 [`serverless/yahoo_indices/README.md`](../serverless/yahoo_indices/README.md)。
 
-部署定义为 [`deploy/cross-market/docker-compose.yml`](../deploy/cross-market/docker-compose.yml)，所有命令通过 `-p ashare-cross-market` 指定独立项目。生产主机现有工具为 `docker-compose 1.29.2`、Docker Engine `29.1.3`，没有 `docker compose` 插件；文件使用其支持的 `version: "3.7"` 格式。项目只运行 `cross-market-collector`，接入已有 `root_default` 网络，数据库地址为 `http://greptimedb:4000`，不发布宿主端口。已有交易服务和 GreptimeDB 容器不在该项目中。
+部署定义为 [`deploy/cross-market/docker-compose.yml`](../deploy/cross-market/docker-compose.yml)，所有命令通过 `-p ashare-cross-market` 指定独立项目。生产主机现有工具为 `docker-compose 1.29.2`、Docker Engine `29.1.3`，没有 `docker compose` 插件；文件使用其支持的 `version: "3.7"` 格式。项目运行 `cross-market-collector` 和 `cross-market-intraday-collector`，接入已有 `root_default` 网络，数据库地址为 `http://greptimedb:4000`，不发布宿主端口。已有交易服务和 GreptimeDB 容器不在该项目中。
 
 ## 宿主文件与依赖
 
@@ -14,15 +14,21 @@
   runtime/
     vendor/                         # 官方 FC SDK 及其 Linux 依赖
     scripts/collect_cross_market_indices.py
+    scripts/collect_cross_market_intraday.py
     src/__init__.py
     src/data/__init__.py
     src/data/yahoo_indices.py
+    src/data/yahoo_intraday_indices.py
     src/data/fc_yahoo_indices.py
+    src/data/fc_intraday_indices.py
     src/data/cross_market_store.py
     src/data/cross_market_ingest.py
+    src/data/cross_market_intraday_ingest.py
     src/data/reference/cross_market/industry_boards.json
     src/data/reference/cross_market/industry_indices.json
+    src/data/reference/cross_market/intraday_indices.json
   state-fc/                         # 当前 FC 采集状态
+  state-intraday-fc/                 # 每指数、分钟粒度独立的窗口状态
   state/                            # 原代理路线历史状态，保留
   proxy/                            # 原代理路线历史文件，保留
 ```
@@ -43,6 +49,9 @@ CROSS_MARKET_FC_ENDPOINT=https://<账号ID>.us-west-1.fc.aliyuncs.com
 CROSS_MARKET_CONCURRENCY=2
 CROSS_MARKET_LOOP_SECONDS=300
 CROSS_MARKET_BATCH_SIZE=100
+CROSS_MARKET_INTRADAY_CONCURRENCY=2
+CROSS_MARKET_INTRADAY_LOOP_SECONDS=300
+CROSS_MARKET_INTRADAY_BATCH_SIZE=1000
 ```
 
 `CROSS_MARKET_FC_ENDPOINT` 是已验证账号的 FC API 接入点，不是公开 HTTP 触发器。Compose 已指定函数名 `ashare_yahoo_indices_v15` 和区域 `us-west-1`。源提交和实际运行包摘要写入容器 labels，配合只读包核对部署版本。并发数、写库批量和循环等待时间是工程参数，不限制行业或行情样本；一次循环完成后才等待设定秒数。
@@ -57,6 +66,14 @@ ALIYUN_ACCESS_KEY_SECRET=<既有训练凭证的AccessKey Secret>
 该文件不进入仓库、镜像、FC ZIP 或日志。复用凭证只用于独立采集函数的签名调用，不启动、更新或改变训练函数。美国函数自身不需要国内数据库地址或这份签名凭证。
 
 ## 启动与检查
+
+分钟采集沿用全部已采用的美国 131、韩国 39 个行业指数，独立能力表 [`intraday_indices.json`](../src/data/reference/cross_market/intraday_indices.json) 绑定既有指数映射 SHA256。两个市场的每个指数均已用本机显式代理验证真实 `1m` 序列和旧 `5m` 序列，之后才部署 FC。原日线接口的 `snapshot_only` 只描述该接口日线历史，不限制分钟接口。
+
+源端实测限制为：`1m` 最近 30 天、单次最多 8 天；`5m` 最近 60 天。因此首次一分钟补灌分成最多 7 天的连续请求，五分钟覆盖更早可取历史；不能用 Yahoo 补出 2023 年分钟行情。起点随实际请求时间校正，已过保留期的范围记录在 `retention_unavailable_ranges`，不伪造覆盖。完成全轮后等待 300 秒自动续补，回取最新真实分钟前一小时并重试保留期内的源 NULL 缺口。300 秒是轮间等待，不代表每个指数固定五分钟内更新完。
+
+分钟容器的 `/state` 挂载 `state-intraday-fc`；日线状态仍在 `state-fc`。原始响应、请求窗口与完整解析点先原子落 pending，再写库并逐字段读回，成功才推进 `covered_until_s` 和删除 pending。覆盖游标使用已核验的请求窗口终点；实时追加报价不能推进历史覆盖。重启先回放已保存的原始窗口，即便该窗口现在已超出 Yahoo 保留期。
+
+库中 `interval='1m'/'5m'`、`data_kind='minute_bar'` 是真实分钟行情；源端追加最新报价单独标记 `minute_quote_snapshot`，保留原始时钟与数值。休市窗口只有经过身份、粒度、SHA 和原始空数组确认的 HTTP 200 回执才允许推进零行覆盖；404、报价单点和取数错误继续保留为失败。源 OHLC/成交量和缺值按实际返回保存，不能据指数 volume 推断股票成交量，也不合成源未发布的尾盘分钟。
 
 ```sh
 cd /opt/ashare-cross-market

@@ -154,8 +154,8 @@ def parse_chart(
     return meta, points
 
 
-class YahooIndexClient:
-    """Reusable async HTTP client with shared rate-limit cooldown and host failover."""
+class YahooChartTransport:
+    """Reusable chart HTTP requests with shared cooldown and host failover."""
 
     def __init__(self, *, proxy: str | None, client: httpx.AsyncClient | None = None):
         self.client = client or httpx.AsyncClient(
@@ -174,13 +174,7 @@ class YahooIndexClient:
         while (remaining := self._cooldown_until - time.monotonic()) > 0:
             await asyncio.sleep(min(remaining, 30))
 
-    async def fetch(
-        self, symbol: str, market: str, *, start: int | None = None,
-        capability: str | None = None,
-    ) -> dict:
-        params = {"interval": "1d"}
-        # range=max silently returns monthly data even with interval=1d.
-        params.update(period1=str(0 if start is None else start), period2=str(int(time.time())))
+    async def fetch_chart(self, symbol: str, params: dict[str, str]) -> dict:
         last_error = None
         for attempt in range(4):
             await self._wait_cooldown()
@@ -215,13 +209,8 @@ class YahooIndexClient:
                 except ValueError as exc:
                     raise YahooIndexError("Yahoo returned non-JSON content") from exc
                 fetched_at = int(datetime.now(UTC).timestamp() * 1000)
-                metadata, points = parse_chart(
-                    payload, symbol=symbol, market=market, fetched_at=fetched_at,
-                    capability=capability,
-                )
                 return {
-                    "metadata": metadata, "points": points,
-                    "missing_close_timestamps": [p["ts"] for p in points if p["close"] is None],
+                    "payload": payload,
                     "raw_json": response.text,
                     "payload_sha256": hashlib.sha256(response.content).hexdigest(),
                     "url": str(response.url), "fetched_at": fetched_at,
@@ -230,3 +219,25 @@ class YahooIndexClient:
                 last_error = exc
                 await asyncio.sleep(min(2 ** attempt, 8))
         raise YahooIndexError(f"Request failed for {symbol}: {last_error}") from last_error
+
+
+class YahooIndexClient(YahooChartTransport):
+    """Daily/quote charts using the shared transport and unchanged daily parser."""
+
+    async def fetch(
+        self, symbol: str, market: str, *, start: int | None = None,
+        capability: str | None = None,
+    ) -> dict:
+        params = {"interval": "1d"}
+        # range=max silently returns monthly data even with interval=1d.
+        params.update(period1=str(0 if start is None else start), period2=str(int(time.time())))
+        source = await self.fetch_chart(symbol, params)
+        metadata, points = parse_chart(
+            source.pop("payload"), symbol=symbol, market=market,
+            fetched_at=source["fetched_at"], capability=capability,
+        )
+        return {
+            "metadata": metadata, "points": points,
+            "missing_close_timestamps": [p["ts"] for p in points if p["close"] is None],
+            **source,
+        }
