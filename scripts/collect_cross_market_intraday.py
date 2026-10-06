@@ -75,6 +75,7 @@ async def run(args):
             yahoo=yahoo,
             store=store,
             concurrency=args.concurrency,
+            progress=lambda item: print(json.dumps(item, ensure_ascii=False), flush=True),
         )
         while True:
             try:

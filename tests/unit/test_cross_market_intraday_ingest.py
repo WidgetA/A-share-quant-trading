@@ -151,7 +151,7 @@ class Yahoo:
                 rows = [point(index, interval, NOW + 1, kind="minute_quote_snapshot")]
             else:
                 step = 60 if interval == "1m" else 300
-                first = (start // step + 1) * step
+                first = ((start + step - 1) // step) * step
                 last = (end // step - 1) * step
                 rows = [
                     point(index, interval, first),
@@ -240,7 +240,7 @@ async def test_full_retention_partition_parallel_intervals_and_quote_cursor(refs
     assert yahoo.max_active == 2
     for interval, retention in (("1m", 30 * DAY_SECONDS), ("5m", 60 * DAY_SECONDS)):
         calls = [c for c in yahoo.calls if c[0] == "^SOX" and c[4] == interval]
-        assert calls[0][2] == NOW - retention + 300
+        assert calls[0][2] == NOW - retention + (60 if interval == "1m" else 300)
         assert calls[-1][3] == NOW
         assert all(left[3] == right[2] for left, right in zip(calls, calls[1:]))
         assert all(
@@ -270,7 +270,7 @@ async def test_partial_ack_pending_replays_before_network_and_preserves_history_
     state = tmp_path / "state-intraday"
     events = []
     yahoo, store = Yahoo(refs.indices, events), Store(state, events)
-    start = NOW - 30 * DAY_SECONDS + 300
+    start = NOW - 30 * DAY_SECONDS + 60
     store.fail_ts = (start + 14 * DAY_SECONDS - 60) * 1000
     job = producer(refs, state, yahoo, store)
     result = await job._collect(entity(refs), refs.capability["limits"]["1m"], NOW)
@@ -298,7 +298,7 @@ async def test_partial_ack_pending_replays_before_network_and_preserves_history_
 async def test_readback_failure_does_not_advance_and_quote_only_does_not_complete(refs, tmp_path):
     state = tmp_path / "state-intraday"
     yahoo, store = Yahoo(refs.indices), Store(state)
-    start = NOW - 30 * DAY_SECONDS + 300
+    start = NOW - 30 * DAY_SECONDS + 60
     store.mismatch_ts = (start + 7 * DAY_SECONDS - 60) * 1000
     job = producer(refs, state, yahoo, store)
     result = await job._collect(entity(refs), refs.capability["limits"]["1m"], NOW)
@@ -372,7 +372,7 @@ async def test_null_gap_retained_recovered_and_long_stop_records_unavailable_ran
     restarted = producer(refs, state, yahoo, store, now=later)
     result = await restarted._collect(index, refs.capability["limits"]["1m"], later)
     assert result["retention_unavailable_ranges"]
-    assert yahoo.calls[0][2] == later - 30 * DAY_SECONDS + 300
+    assert yahoo.calls[0][2] == later - 30 * DAY_SECONDS + 60
     assert result["covered_until_s"] == later
 
 
@@ -404,7 +404,7 @@ async def test_queue_delay_rechecks_rolling_retention_before_fetch(
     yahoo, store = Yahoo(refs.indices), Store(state)
     job = producer(refs, state, yahoo, store, now=NOW + 600)
     result = await job._collect(entity(refs, interval), refs.capability["limits"][interval], NOW)
-    assert yahoo.calls[0][2] == NOW + 600 - retention + 300
+    assert yahoo.calls[0][2] == NOW + 600 - retention + (60 if interval == "1m" else 300)
     assert all(
         call[3] - call[2] <= refs.capability["limits"][interval]["max_window_seconds"]
         for call in yahoo.calls
@@ -436,3 +436,47 @@ async def test_next_cycle_rewinds_real_bar_one_hour_instead_of_quote_or_request_
     assert yahoo.calls[0][2] == NOW - 60 - 3600
     assert yahoo.calls[-1][3] == NOW + 3600
     assert result["covered_until_s"] == NOW + 3600
+
+
+@pytest.mark.asyncio
+async def test_five_minute_non_grid_cutoff_keeps_next_available_bar(refs, tmp_path):
+    state = tmp_path / "state-intraday"
+    yahoo, store = Yahoo(refs.indices), Store(state)
+    now = NOW + 61
+    job = producer(refs, state, yahoo, store, now=now)
+    index = entity(refs, "5m")
+    result = await job._collect(index, refs.capability["limits"]["5m"], now)
+    cutoff = now - 60 * DAY_SECONDS
+    next_grid = NOW - 60 * DAY_SECONDS + 300
+    assert yahoo.calls[0][2] == next_grid
+    assert yahoo.calls[0][2] < cutoff + 300
+    assert any(
+        row["data_kind"] == "minute_bar" and row["ts"] == next_grid * 1000
+        for row in store.rows.values()
+    )
+    initial_guard = result["request_boundary_guard_ranges"][0]
+    assert initial_guard["source_grid_bar_count"] == 0
+    assert initial_guard["unguaranteed_boundary_bar_timestamps_s"] == []
+
+
+def test_exact_grid_boundary_records_one_unassured_bar():
+    start = CrossMarketIntradayIngestor._safe_start(NOW, "5m")
+    guard = CrossMarketIntradayIngestor._guard_record(NOW, start, "5m", "boundary")
+    assert start == NOW + 300
+    assert guard["unguaranteed_boundary_bar_timestamps_s"] == [NOW]
+    assert guard["source_grid_bar_count"] == 1
+    assert guard["source_bar_loss"] == "boundary_bar_availability_unverified"
+
+
+@pytest.mark.asyncio
+async def test_progress_emits_each_finished_series_without_raw_or_exception_text(refs, tmp_path):
+    state = tmp_path / "state-intraday"
+    yahoo, store = Yahoo(refs.indices), Store(state)
+    job = producer(refs, state, yahoo, store)
+    progress = []
+    job.progress = progress.append
+    result = await job.run_once()
+    assert len(progress) == result["series_count"] == 4
+    assert all(item["event"] == "intraday_series_finished" for item in progress)
+    assert all(item["status"] == "verified" for item in progress)
+    assert all("raw_json" not in item and "url" not in item for item in progress)

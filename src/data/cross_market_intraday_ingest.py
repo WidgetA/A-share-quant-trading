@@ -82,6 +82,7 @@ class CrossMarketIntradayIngestor:
         store: Any,
         concurrency: int = 2,
         clock: Callable[[], float] = time.time,
+        progress: Callable[[dict], None] | None = None,
     ):
         _integer(concurrency, "concurrency", minimum=1)
         self.reference_path = Path(reference_path)
@@ -90,6 +91,7 @@ class CrossMarketIntradayIngestor:
         self.state_dir = Path(state_dir)
         self.yahoo, self.store = yahoo, store
         self.concurrency, self.clock = concurrency, clock
+        self.progress = progress
 
     @staticmethod
     def _identity(index: Mapping[str, Any]) -> dict:
@@ -99,6 +101,29 @@ class CrossMarketIntradayIngestor:
         raw = json.dumps(self._identity(index), sort_keys=True).encode()
         key = hashlib.sha256(raw).hexdigest()
         return self.state_dir / f"{key}.state.json", self.state_dir / f"{key}.pending.json"
+
+    @staticmethod
+    def _safe_start(cutoff: int, interval: str) -> int:
+        # A non-grid prefix contains no interval bar. At an exact grid boundary,
+        # the boundary bar can expire during request transit, so use the next.
+        step = INTERVAL_SECONDS[interval]
+        return (cutoff // step + 1) * step
+
+    @staticmethod
+    def _guard_record(start: int, end: int, interval: str, reason: str) -> dict:
+        step = INTERVAL_SECONDS[interval]
+        first_grid = ((start + step - 1) // step) * step
+        grids = list(range(first_grid, end, step))
+        return {
+            "start_s": start,
+            "end_s": end,
+            "reason": reason,
+            "source_grid_bar_count": len(grids),
+            "unguaranteed_boundary_bar_timestamps_s": grids,
+            "source_bar_loss": "boundary_bar_availability_unverified"
+            if grids
+            else ("prefix_has_no_interval_grid_timestamp"),
+        }
 
     def _state(self, index: Mapping[str, Any], path: Path) -> dict:
         if not path.exists():
@@ -250,14 +275,15 @@ class CrossMarketIntradayIngestor:
             if state["backfill_complete_until_s"] is None:
                 start = state["covered_until_s"]
                 if start is None:
-                    start = max(0, run_end - retention + 300)
+                    initial_cutoff = max(0, run_end - retention)
+                    start = self._safe_start(initial_cutoff, index["interval"])
                     state["request_boundary_guard_ranges"].append(
-                        {
-                            "start_s": max(0, run_end - retention),
-                            "end_s": start,
-                            "reason": "initial_request_boundary_guard",
-                            "source_bar_loss": "unverified",
-                        }
+                        self._guard_record(
+                            initial_cutoff,
+                            start,
+                            index["interval"],
+                            "initial_request_boundary_guard",
+                        )
                     )
                     _atomic_json(state_path, state)
             else:
@@ -276,7 +302,7 @@ class CrossMarketIntradayIngestor:
                 # outlive the initial guard while the provider's horizon slides.
                 now = int(self.clock())
                 cutoff = max(0, now - retention)
-                safe_start = cutoff + 300
+                safe_start = self._safe_start(cutoff, index["interval"])
                 if start < safe_start:
                     expired_end = min(cutoff, run_end)
                     if start < expired_end:
@@ -291,12 +317,12 @@ class CrossMarketIntradayIngestor:
                     guard_start, guard_end = max(start, cutoff), min(safe_start, run_end)
                     if guard_start < guard_end:
                         state["request_boundary_guard_ranges"].append(
-                            {
-                                "start_s": guard_start,
-                                "end_s": guard_end,
-                                "reason": "rolling_request_boundary_guard",
-                                "source_bar_loss": "unverified",
-                            }
+                            self._guard_record(
+                                guard_start,
+                                guard_end,
+                                index["interval"],
+                                "rolling_request_boundary_guard",
+                            )
                         )
                     _atomic_json(state_path, state)
                     start = safe_start
@@ -371,7 +397,30 @@ class CrossMarketIntradayIngestor:
 
         async def collect(index):
             async with semaphore:
-                return await self._collect(index, reference["limits"][index["interval"]], run_end)
+                result = await self._collect(index, reference["limits"][index["interval"]], run_end)
+                if self.progress is not None:
+                    self.progress(
+                        {
+                            "event": "intraday_series_finished",
+                            **self._identity(index),
+                            **{
+                                field: result.get(field)
+                                for field in (
+                                    "status",
+                                    "stage",
+                                    "error_type",
+                                    "rows",
+                                    "replayed_rows",
+                                    "covered_until_s",
+                                    "backfill_complete_until_s",
+                                    "last_source_bar_ms",
+                                )
+                            },
+                            "gap_count": len(result.get("gap_timestamps", [])),
+                            "pending_retained": result.get("pending_retained", False),
+                        }
+                    )
+                return result
 
         results = await asyncio.gather(*(collect(index) for index in reference["indices"]))
         status = (
