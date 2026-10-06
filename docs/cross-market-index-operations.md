@@ -123,4 +123,6 @@ docker-compose -p ashare-cross-market --env-file .env -f docker-compose.yml up -
 
 源交易时段证据决定行情是否最终确认，`is_final` 可为 `False` 或空值，抓取发生在收盘后不能单独证明最终确认。`ts` 保存源时间毫秒，`fetched_at` 保存取回时间；接口延迟不冒充新行情。Yahoo 可能在同一交易日修改未结束的日线点及其源时间，库按实际 `ts` 保存观测，`trade_date` 保存交易所当地日期；总行数不等于独立交易日数。
 
-2026-10-06 的 [真实 FC 调用记录](../dev-tools/cross-market-yahoo/production_probe/fc_worker_deployment.json) 已确认 SOX 全历史日线 8161 点、BKX 全历史日线 8464 点、`KOSPI-10.KS` 快照 1 点完整回传，三项源 SHA256 均核验一致。其请求使用 `start: null`，日线实际粒度为 `1d`，不是用一个月试验窗口代表完整历史。另有 [云端 ZIP 读回记录](../dev-tools/cross-market-yahoo/production_probe/fc_cloud_artifact_readback.json) 确认部署包字节一致且原训练函数未变。这些证据证明上述美国出口和响应传输，不代替 FC 路线全部 170 指数、268 映射行、Greptime 逐字段读回、后续轮次及重启的验收。Yahoo 接口的持续可用性以实际每轮源/库记录核验。
+2026-10-06 的[生产验收记录](cross-market-fc-verification.json)确认美国 FC 路线完整执行全部 170 指数；国内无代理，Greptime 中 268 条完整映射 JSON 与正式参考一致，170 个最新源键独立读回通过。真实中断的 SOX 8161 点待写窗口在重启后整批重放成功；随后更新至 `07ee8a6ae767f4617a36478983faf01d01b120c3`，新完整轮次仍无失败和 pending。154 项行为测试通过，原训练函数与原交易、数据库服务保留原版本和运行状态。
+
+保存的 SOX 8161 点与 XAU 10783 点原始响应经过 SHA 校验和逐点重新解析，与原 pending 完全一致；库内全部源键存在，分别 8159、10781 个未被增量更新的历史行全部 18 字段一致。各窗口最近两个源行后来正常刷新，记录保留了实际字段差异，并未把原窗口价格改成新期望值。XAU 原始响应为 1,122,244 字节，实际完整回传；不据此推断平台未核实的统一响应上限。历史来源原有的 8 个空收盘点仍按原始源时间保留。行情总行数包含实际同日不同源时间的观测，不等于独立交易日数。Yahoo 接口的持续可用性由每轮实际源/库记录核验。

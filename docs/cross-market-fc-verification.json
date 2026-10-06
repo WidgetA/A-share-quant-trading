@@ -1,0 +1,218 @@
+{
+  "schema_version": 1,
+  "verified_at": "2026-10-06T14:15:52.225719+00:00",
+  "result": "US native FC fetch -> domestic authenticated invocation without proxy -> persistent pending -> Greptime full-field verification -> checkpoint, deployed and exercised",
+  "production_v15_baseline": {
+    "git_commit": "921b273b971383ce98776119f5af5fd716bacca4",
+    "git_branch": "refactor/cleanup-v15-only",
+    "build_time": "2026-09-19T23:23:07+08:00"
+  },
+  "collector_source_revision": "07ee8a6ae767f4617a36478983faf01d01b120c3",
+  "runtime_bundle_sha256": "3fcce87eac5badd4a3bda88f7e0d4efbe6d5613fc1c532825f524aa4ab5acf79",
+  "runtime_files_verified": 1680,
+  "function": {
+    "name": "ashare_yahoo_indices_v15",
+    "region": "us-west-1",
+    "runtime": "python3.12",
+    "handler": "handler.handler",
+    "timeout_seconds": 360,
+    "configured_instance_concurrency": 1,
+    "read_back_instance_concurrency": null,
+    "note": "GetFunction did not return instanceConcurrency. The handler also serializes invocations within a worker instance; no unsupported actual concurrency claim is made.",
+    "code_zip_sha256": "7102f6a499e447a6aa23acc2d3c00d4ee19bc161a064f225ac3b1967012a8866",
+    "code_zip_read_back_identically": true
+  },
+  "scope": {
+    "classification": "SW2021 L2",
+    "industries": 134,
+    "mapping_rows": 268,
+    "indices": 170,
+    "US": 131,
+    "KR": 39,
+    "daily_history_indices": 7,
+    "snapshot_only_indices": 163,
+    "reference_sha256": "8e14dd0f8346fae374dd8adaac3eb0a48254967b2dc82c5548635922b7c628e5",
+    "counterpart_gaps_retained": true
+  },
+  "database": {
+    "price_table": "cross_market_index_prices",
+    "mapping_table": "cross_market_industry_indices",
+    "mapping_full_json_verified": 268,
+    "latest_new_fc_source_keys_verified": 170,
+    "latest_source_keys_and_fetch_times_exactly_match_fc_states": 170,
+    "stored_source_observations_at_verification": 59633,
+    "observation_count_is_not_independent_trading_days": true,
+    "pending_files_at_verification": []
+  },
+  "lifecycle": {
+    "first_complete_cycle": {
+      "verified_indices": 170,
+      "replayed_sox_history_points": 8161,
+      "source_evidence_kind": "Root visible tool-output summary, explicitly retained separately from the overwritten full live-status file"
+    },
+    "final_code_complete_cycle": {
+      "verified_indices": 170,
+      "new_source_points_this_cycle": 14755,
+      "failed_indices": 0,
+      "retained_source_gap_count": 8
+    },
+    "persistent_state_directory": "/opt/ashare-cross-market/state-fc",
+    "collector_restart_policy": "unless-stopped",
+    "real_pending_interruption_and_replay_verified": true
+  },
+  "saved_history_readback": [
+    {
+      "identity": {
+        "index_id": "US:YAHOO:^SOX",
+        "market": "US",
+        "symbol": "^SOX"
+      },
+      "raw_sha_verified": true,
+      "raw_bytes": 817636,
+      "points_reparsed_identically": 8161,
+      "all_source_keys_found": 8161,
+      "fields_compared": 18,
+      "all_fields_exact_unchanged_history_rows": 8159,
+      "later_updated_source_rows": [
+        {
+          "ts": 1791207000000,
+          "trade_date": "2026-10-05",
+          "changed_fields": [
+            "fetched_at"
+          ],
+          "old_source_fetched_at": 1791295059758,
+          "new_source_fetched_at": 1791295677796
+        },
+        {
+          "ts": 1791293400000,
+          "trade_date": "2026-10-06",
+          "changed_fields": [
+            "high",
+            "close",
+            "adjusted_close",
+            "fetched_at"
+          ],
+          "old_source_fetched_at": 1791295059758,
+          "new_source_fetched_at": 1791295677796
+        }
+      ],
+      "errors": [],
+      "runtime": {
+        "fc_request_id": "1-6ac4fe53-0bd352-6eab992d8355",
+        "region": "us-west-1"
+      },
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/%5ESOX?interval=1d&period1=0&period2=1791295059",
+      "payload_sha256": "609e182eca0d89f9a3b07e3628a4c8a1338ee58897cf0fbf32fb3d6798b0b0b2"
+    },
+    {
+      "identity": {
+        "index_id": "US:YAHOO:^XAU",
+        "market": "US",
+        "symbol": "^XAU"
+      },
+      "raw_sha_verified": true,
+      "raw_bytes": 1122244,
+      "points_reparsed_identically": 10783,
+      "all_source_keys_found": 10783,
+      "fields_compared": 18,
+      "all_fields_exact_unchanged_history_rows": 10781,
+      "later_updated_source_rows": [
+        {
+          "ts": 1791207000000,
+          "trade_date": "2026-10-05",
+          "changed_fields": [
+            "fetched_at"
+          ],
+          "old_source_fetched_at": 1791295165860,
+          "new_source_fetched_at": 1791295676985
+        },
+        {
+          "ts": 1791293400000,
+          "trade_date": "2026-10-06",
+          "changed_fields": [
+            "low",
+            "close",
+            "adjusted_close",
+            "fetched_at"
+          ],
+          "old_source_fetched_at": 1791295165860,
+          "new_source_fetched_at": 1791295676985
+        }
+      ],
+      "errors": [],
+      "runtime": {
+        "fc_request_id": "1-6ac4febd-0b8404-93079cac6f1a",
+        "region": "us-west-1"
+      },
+      "url": "https://query1.finance.yahoo.com/v8/finance/chart/%5EXAU?interval=1d&period1=0&period2=1791295165",
+      "payload_sha256": "3d6f9b95c8ed3d2903d5748299dc1fba8e41bef0ca2110f66c893f44c6f1c771"
+    }
+  ],
+  "deployment": {
+    "credentials_source": "Existing training get_s3_config() reused in private collector env file",
+    "private_credential_file_mode": "0600",
+    "proxy_environment_variables_cleared": 6,
+    "sdk_debug_disabled": true,
+    "old_proxy_still_stopped": true,
+    "existing_trading_and_greptime_services_unchanged": true,
+    "existing_training_function_unchanged": true,
+    "git_push_performed": false
+  },
+  "evidence_digests": {
+    "fc_first_cycle_tool_excerpt.json": {
+      "sha256": "5061e47398f3ff899c938a52843f94c85d2ff996f8906bcff66edddcd63e62e5",
+      "checked_at": "2026-10-06T14:04:47.959268+00:00",
+      "kind": "Root visible tool-output summary"
+    },
+    "fc_worker_deployment.json": {
+      "sha256": "7577bfed9482e980e9b489d89863864bd9e2c0c17622cbffd61e4f24e328a77c",
+      "checked_at": "2026-10-06T13:50:03.036057+00:00",
+      "kind": "actual collected evidence"
+    },
+    "fc_cloud_artifact_readback.json": {
+      "sha256": "308b32b52efcb63049e94cd65c349a038289521fa17746d7809a1f155a79ea62",
+      "checked_at": "2026-10-06T14:13:17.944718+00:00",
+      "kind": "actual collected evidence"
+    },
+    "fc_domestic_deployment.json": {
+      "sha256": "b1265cefc6941f9210d55e045765c5f7a7f976685ca85478116c413b24d2b081",
+      "checked_at": "2026-10-06T14:07:37.441351+00:00",
+      "kind": "actual collected evidence"
+    },
+    "fc_domestic_dependency_probe.json": {
+      "sha256": "955480f45d4f31d5ab0a21221441948c80016b22f6989eefaa146ac8a86cbedf",
+      "checked_at": "2026-10-06T13:52:40.577654+00:00",
+      "kind": "actual collected evidence"
+    },
+    "fc_lifecycle_interruption.json": {
+      "sha256": "8b2cd25380c3c2ba6aec254f2031740582957feb420461d9a58a16182d588db8",
+      "checked_at": "2026-10-06T13:59:08.319054+00:00",
+      "kind": "actual collected evidence"
+    },
+    "fc_live_collection_status.json": {
+      "sha256": "350a8486e8526ce7f2ae4f738f1df868f7c8149bf18aeef3a5d2152ed71ce321",
+      "checked_at": "2026-10-06T14:10:45.567912+00:00",
+      "kind": "actual collected evidence"
+    },
+    "fc_production_readback.json": {
+      "sha256": "af1a01b9a1b39a4bc56c6d01ea3b0df23a6139efb59f2be69aaba31b97de2a76",
+      "checked_at": "2026-10-06T14:12:58.601880+00:00",
+      "kind": "actual collected evidence"
+    },
+    "fc_saved_history_readback.json": {
+      "sha256": "9dae653ee52889da02cbd7f12bdd8bc4ec990913b4de112a81bd0af8f2149a16",
+      "checked_at": "2026-10-06T14:10:26.229684+00:00",
+      "kind": "actual collected evidence"
+    },
+    "fc_final_runtime_check.json": {
+      "sha256": "de6473878ca55499eb64767c4e16609cdbc2adaa9fb27d21d008262fc7fcee26",
+      "checked_at": "2026-10-06T14:12:49.186681+00:00",
+      "kind": "actual collected evidence"
+    }
+  },
+  "validation": {
+    "behavior_tests_passed": 154,
+    "coverage": "Real SDK finite transport timeout retries, worker/source/envelope validation, ingest pending/checkpoints, full-field Greptime checks and CLI compatibility",
+    "ruff": "passed"
+  }
+}

@@ -114,7 +114,7 @@ CROSS_MARKET_FC_CODE_ZIP=<构建ZIP的绝对路径>
 
 ## 已有实测与后续验收
 
-2026-10-06 [真实部署与调用记录](../../dev-tools/cross-market-yahoo/production_probe/fc_worker_deployment.json) 已确认：
+2026-10-06 的[生产验收记录](../../docs/cross-market-fc-verification.json)保存了真实调用和验收证据摘要。初始完整出口调用已确认：
 
 | 请求 | 源观测 | 原始响应字节 | FC 响应字节 | 源 SHA256 |
 | --- | ---: | ---: | ---: | --- |
@@ -122,6 +122,6 @@ CROSS_MARKET_FC_CODE_ZIP=<构建ZIP的绝对路径>
 | `^BKX`，US，完整日线 | 8464 | 868605 | 869221 | 一致 |
 | `KOSPI-10.KS`，KR，快照 | 1 | 1262 | 1879 | 一致 |
 
-三项均为同步调用 HTTP 200、无函数错误、`instrumentType=INDEX`，运行区域为 `us-west-1`。日线实际 `dataGranularity=1d`，请求 `start:null`。[云端代码包读回](../../dev-tools/cross-market-yahoo/production_probe/fc_cloud_artifact_readback.json) 确认 ZIP 字节与上传包一致，SHA256 为 `7102f6a499e447a6aa23acc2d3c00d4ee19bc161a064f225ac3b1967012a8866`，原训练函数未变。记录中的响应长度证明这些实际完整响应可回传，不据此推断未验证的统一响应大小上限。
+三项均为同步调用 HTTP 200、无函数错误、`instrumentType=INDEX`，运行区域为 `us-west-1`。日线实际 `dataGranularity=1d`，请求 `start:null`。云端代码包下载读回确认 ZIP 字节与上传包一致，SHA256 为 `7102f6a499e447a6aa23acc2d3c00d4ee19bc161a064f225ac3b1967012a8866`，原训练函数未变。后续生产完整回传并核验 XAU 10783 点、原始响应 1,122,244 字节。记录中的响应长度证明这些实际完整响应可回传，不据此推断未验证的统一响应大小上限。
 
-行为检查可运行 `python -m pytest tests/unit/test_fc_yahoo_worker.py tests/unit/test_fc_yahoo_indices.py -q`；新构建包的实际云端运行、身份、源时钟、完整响应与摘要仍需核查。上述三项出口实测不代表国内 FC 路线全部 170 指数、268 映射行、Greptime 逐字段读回、连续轮次和重启验收已经完成。
+国内 FC 路线已完成全部 170 指数的完整生产轮次、268 映射 JSON 与 170 最新源键的独立库内读回、真实 pending 中断及 8161 点重启重放。SDK 超时修复版 `07ee8a6ae767f4617a36478983faf01d01b120c3` 更新后再次完整核验，未删除持久状态。源码与部署标签、1680 个运行包文件及云端 ZIP 均已核对。行为检查可运行 `python -m pytest tests/unit/test_fc_yahoo_worker.py tests/unit/test_fc_yahoo_indices.py -q`；以后更换构建包或配置时须重新核查受影响的实际云端运行与入库结果。
