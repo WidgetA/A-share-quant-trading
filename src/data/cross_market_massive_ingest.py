@@ -182,6 +182,76 @@ class CrossMarketMassiveIngestor:
             raise MassiveIndexError("pending_source_values_mismatch")
         return parsed
 
+    def _save_delayed_receipt(self, directory, receipt):
+        fetched, window = receipt["fetched"], receipt["window"]
+        filename = (
+            f"{window['start_date']}_{window['end_date']}_{fetched['fetched_at']}_"
+            f"{fetched['payload_sha256'][:16]}.json"
+        )
+        path = directory / "delayed_receipts" / filename
+        if not path.exists():
+            _atomic_json(path, {**receipt, "status": "source_delayed"})
+        return path
+
+    def _reopen_old_delayed(self, directory, index, state):
+        """Repair the prior version's completed DELAYED windows from actual RAW."""
+        if state.get("coverage_status_policy") == 1:
+            return
+        delayed, cut = [], None
+        for position, summary in enumerate(state["verified_windows"]):
+            window = {k: summary[k] for k in ("start_date", "end_date")}
+            path = (
+                directory
+                / "receipts"
+                / (f"{window['start_date']}_{window['end_date']}.verified.json")
+            )
+            receipt = _read_json(path)
+            if json.loads(receipt["fetched"]["raw_json"]).get("status") != "DELAYED":
+                continue
+            if receipt.get("identity") != self._identity(index):
+                raise MassiveIndexError("pending_identity_mismatch")
+            parsed = self._validate_fetched(index, window, receipt["fetched"])
+            if summary["payload_sha256"] != receipt["fetched"]["payload_sha256"] or receipt[
+                "verified_rows"
+            ] != len(parsed["points"]):
+                raise MassiveIndexError("old_delayed_receipt_mismatch")
+            self._save_delayed_receipt(directory, {**receipt, "migrated_from_completed": True})
+            delayed.append(path)
+            cut = position if cut is None else min(cut, position)
+        if cut is not None:
+            reopened = [
+                {k: w[k] for k in ("start_date", "end_date")}
+                for w in state["verified_windows"][cut:]
+            ]
+            state["verified_windows"] = state["verified_windows"][:cut]
+            state["verified_rows"] = sum(w["verified_rows"] for w in state["verified_windows"])
+            state["covered_until_exclusive"] = reopened[0]["start_date"]
+            state["todo"] = reopened + state["todo"]
+            state.pop("requested_complete_until", None)
+            state["reopened_delayed_windows"] = reopened
+        state["coverage_status_policy"] = 1
+        _atomic_json(directory / "state.json", state)
+        # Each source RAW already has a durable delayed receipt before its old
+        # completed label is removed. Repeating migration after a crash is safe.
+        for path in delayed:
+            path.unlink(missing_ok=True)
+        if cut is not None:
+            self._emit(index, status="old_delayed_windows_reopened", windows=len(delayed))
+
+    def _delayed_result(self, index, state, rows, replayed):
+        delayed = state["last_delayed"]
+        return {
+            "index_id": index["index_id"],
+            "status": "source_delayed",
+            "classification": "source_delayed",
+            "verified_rows": rows + delayed["verified_rows"],
+            "source_first_date": state["source_first_date"],
+            "source_last_date": state["source_last_date"],
+            "covered_until_exclusive": state["covered_until_exclusive"],
+            "delayed_window": delayed,
+            "replayed": replayed,
+        }
+
     async def _commit(self, directory, index, state, pending):
         window, fetched = pending["window"], pending["fetched"]
         if pending.get("identity") != self._identity(index):
@@ -199,6 +269,33 @@ class CrossMarketMassiveIngestor:
             "written_rows": written,
             "verified_rows": verified,
         }
+        if json.loads(fetched["raw_json"]).get("status") == "DELAYED":
+            path = self._save_delayed_receipt(directory, receipt)
+            state["last_delayed"] = {
+                **window,
+                "fetched_at": fetched["fetched_at"],
+                "payload_sha256": fetched["payload_sha256"],
+                "verified_rows": verified,
+                "source_first_date": parsed["source_first_date"],
+                "source_last_date": parsed["source_last_date"],
+                "receipt_path": str(path),
+            }
+            for key, choose in (("source_first_date", min), ("source_last_date", max)):
+                value = parsed[key]
+                if value is not None:
+                    state[key] = value if state[key] is None else choose(value, state[key])
+            state["last_failure"] = None
+            _atomic_json(directory / "state.json", state)
+            (directory / "pending.json").unlink()
+            self._emit(
+                index,
+                status="source_delayed",
+                **window,
+                rows=verified,
+                source_last_date=parsed["source_last_date"],
+                replayed=pending.get("replayed", False),
+            )
+            return None
         receipt_name = f"{window['start_date']}_{window['end_date']}.verified.json"
         _atomic_json(directory / "receipts" / receipt_name, receipt)
         stop = (date.fromisoformat(window["end_date"]) + timedelta(days=1)).isoformat()
@@ -217,6 +314,7 @@ class CrossMarketMassiveIngestor:
                     "payload_sha256": fetched["payload_sha256"],
                     "source_first_date": parsed["source_first_date"],
                     "source_last_date": parsed["source_last_date"],
+                    "raw_status": "OK",
                 }
             )
             for key, choose in (("source_first_date", min), ("source_last_date", max)):
@@ -224,6 +322,7 @@ class CrossMarketMassiveIngestor:
                 if value is not None:
                     state[key] = value if state[key] is None else choose(value, state[key])
             state["last_failure"] = None
+            state.pop("last_delayed", None)
             _atomic_json(directory / "state.json", state)
         # A crash after the state commit but before this unlink replays the same
         # source rows. The stop<=covered branch keeps counters idempotent.
@@ -262,14 +361,19 @@ class CrossMarketMassiveIngestor:
                 "source_last_date": None,
                 "last_failure": None,
                 "reference_sha256": self.reference["reference_sha256"],
+                "coverage_status_policy": 1,
             }
             _atomic_json(state_path, state)
         rows, replayed = 0, False
         try:
+            self._reopen_old_delayed(directory, index, state)
             if pending_path.exists():
                 pending = _read_json(pending_path)
                 pending["replayed"] = True
-                rows += await self._commit(directory, index, state, pending)
+                count = await self._commit(directory, index, state, pending)
+                if count is None:
+                    return self._delayed_result(index, state, rows, True)
+                rows += count
                 replayed = True
             tail = (
                 date.fromisoformat(state["todo"][-1]["end_date"]) + timedelta(days=1)
@@ -322,7 +426,10 @@ class CrossMarketMassiveIngestor:
                 # Complete source bytes and all expected fields reach stable
                 # storage before the first possibly partial database write.
                 _atomic_json(pending_path, pending)
-                rows += await self._commit(directory, index, state, pending)
+                count = await self._commit(directory, index, state, pending)
+                if count is None:
+                    return self._delayed_result(index, state, rows, replayed)
+                rows += count
             state["requested_complete_until"] = (stop - timedelta(days=1)).isoformat()
             _atomic_json(state_path, state)
             return {
@@ -368,15 +475,23 @@ class CrossMarketMassiveIngestor:
                 if result.get("classification") == "authentication_denied":
                     break
         failed = [x for x in results if x["status"] == "failed"]
-        complete = len(results) == len(self.reference["indices"]) and not failed
+        delayed = [x for x in results if x["status"] == "source_delayed"]
+        complete = len(results) == len(self.reference["indices"]) and not failed and not delayed
         return {
             "provider": "massive",
-            "status": "verified" if complete else "partial_failure",
+            "status": (
+                "verified"
+                if complete
+                else "source_delayed"
+                if delayed and not failed
+                else "partial_failure"
+            ),
             "start_date": start_date,
             "end_date": end_date,
             "reference_sha256": self.reference["reference_sha256"],
             "verified_rows": sum(x.get("verified_rows", 0) for x in results),
             "results": results,
             "failed": failed,
+            "source_delayed": delayed,
             "unattempted": len(self.reference["indices"]) - len(results),
         }

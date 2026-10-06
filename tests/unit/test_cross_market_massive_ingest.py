@@ -259,3 +259,94 @@ async def test_same_identity_reference_metadata_change_is_explicit_not_a_new_fet
     assert result["current_reference_sha256"] != old_sha
     assert result["reference_changed_same_identity"] is True
     assert result["coverage_kind"] == "verified_requested_windows_not_calendar_bar_completeness"
+
+
+@pytest.mark.asyncio
+async def test_delayed_values_persist_but_late_ok_bars_finish_window_without_double_count(
+    tmp_path,
+    index,
+):
+    class LatePublication(Source):
+        async def fetch(self, item, **window):
+            fetched = await super().fetch(item, **window)
+            raw = json.loads(fetched["raw_json"])
+            if len(self.calls) == 1:
+                raw["status"] = "DELAYED"
+            else:
+                # The formerly unpublished requested day now supplies real bars.
+                raw["results"].extend(
+                    [dict(bar, t=bar["t"] + 86400000) for bar in list(raw["results"])]
+                )
+                raw["queryCount"] = 20
+            fetched["raw_json"] = json.dumps(raw)
+            fetched["payload_sha256"] = hashlib.sha256(fetched["raw_json"].encode()).hexdigest()
+            fetched["source_payload_sha256"] = fetched["payload_sha256"]
+            return fetched | parse_aggregates(
+                raw,
+                item,
+                **window,
+                fetched_at=fetched["fetched_at"],
+            )
+
+    source, store = LatePublication(), Store()
+    collector = producer(tmp_path, index, source, store)
+    first = await collector.run_once(start_date="2026-10-01", end_date="2026-10-02")
+    directory = collector.series_dir(index)
+    state = json.loads((directory / "state.json").read_text())
+    assert first["status"] == "source_delayed"
+    assert first["results"][0]["classification"] == "source_delayed"
+    assert len(store.writes[0]) == len(store.verifies[0]) == 2
+    assert state["covered_until_exclusive"] == "2026-10-01"
+    assert state["verified_windows"] == [] and state["verified_rows"] == 0
+    assert state["todo"] == [{"start_date": "2026-10-01", "end_date": "2026-10-02"}]
+    assert not (directory / "pending.json").exists()
+    delayed = list((directory / "delayed_receipts").glob("*.json"))
+    assert len(delayed) == 1
+    receipt = json.loads(delayed[0].read_text())
+    assert receipt["status"] == "source_delayed" and receipt["verified_rows"] == 2
+    assert receipt["fetched"]["fetched_at"] == 1791310000000
+    assert receipt["fetched"]["payload_sha256"]
+    # Same state, fresh source request; this is not replaying the old delayed RAW.
+    second = await collector.run_once(start_date="2026-10-01", end_date="2026-10-02")
+    state = json.loads((directory / "state.json").read_text())
+    assert second["status"] == "verified" and len(source.calls) == 2
+    assert len(store.writes[1]) == 4 and len(store.verifies[1]) == 4
+    assert state["covered_until_exclusive"] == "2026-10-03" and state["todo"] == []
+    assert state["verified_rows"] == 4 and len(state["verified_windows"]) == 1
+    assert state["source_last_date"] == "2026-10-02"
+
+
+@pytest.mark.asyncio
+async def test_old_completed_delayed_raw_reopens_window_but_keeps_saved_values(tmp_path, index):
+    source, store = Source(), Store()
+    collector = producer(tmp_path, index, source, store)
+    await collector.run_once(start_date="2026-10-01", end_date="2026-10-02")
+    directory = collector.series_dir(index)
+    receipt_path = directory / "receipts/2026-10-01_2026-10-02.verified.json"
+    receipt = json.loads(receipt_path.read_text())
+    raw = json.loads(receipt["fetched"]["raw_json"])
+    raw["status"] = "DELAYED"
+    receipt["fetched"]["raw_json"] = json.dumps(raw)
+    sha = hashlib.sha256(receipt["fetched"]["raw_json"].encode()).hexdigest()
+    receipt["fetched"]["payload_sha256"] = receipt["fetched"]["source_payload_sha256"] = sha
+    receipt_path.write_text(json.dumps(receipt), encoding="utf8")
+    state_path = directory / "state.json"
+    state = json.loads(state_path.read_text())
+    state["verified_windows"][0]["payload_sha256"] = sha
+    state.pop("coverage_status_policy", None)  # actual prior-version state format
+    state_path.write_text(json.dumps(state), encoding="utf8")
+    assert state["covered_until_exclusive"] == "2026-10-03" and state["verified_rows"] == 2
+    # A new request fails. Merely retaining the old successful cursor would hide
+    # the late-day gap forever; old source values must still be preserved.
+    retry = Source(failure="transport_failure")
+    restarted = producer(tmp_path, index, retry, Store())
+    result = await restarted.run_once(start_date="2026-10-01", end_date="2026-10-02")
+    state = json.loads(state_path.read_text())
+    assert result["status"] == "partial_failure" and len(retry.calls) == 1
+    assert state["covered_until_exclusive"] == "2026-10-01"
+    assert state["verified_windows"] == [] and state["verified_rows"] == 0
+    assert state["todo"] == [{"start_date": "2026-10-01", "end_date": "2026-10-02"}]
+    delayed = list((directory / "delayed_receipts").glob("*.json"))
+    assert len(delayed) == 1
+    saved = json.loads(delayed[0].read_text())
+    assert saved["fetched"] == receipt["fetched"] and saved["verified_rows"] == 2
