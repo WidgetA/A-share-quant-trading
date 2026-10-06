@@ -125,6 +125,50 @@ def parse_intraday_chart(
         return _number(array[index]) if array is not None else None
 
     quote_time = meta.get("regularMarketTime")
+    tail = timestamps[-1]
+    published_ends = [
+        session["end"]
+        for group in (meta.get("tradingPeriods") or [])
+        if isinstance(group, list)
+        for session in group
+        if isinstance(session, dict) and type(session.get("end")) is int
+    ]
+    published_close_clock = (
+        type(quote_time) is int
+        and bool(published_ends)
+        and max(published_ends) == tail
+        and quote_time >= tail
+        and datetime.fromtimestamp(quote_time, timezone).date()
+        == datetime.fromtimestamp(tail, timezone).date()
+    )
+
+    def latest_quote_shape() -> bool:
+        latest_close = value("close", len(timestamps) - 1)
+        latest_price = _number(meta.get("regularMarketPrice"))
+        # Observed KR session-close quotes encode metadata's decimal latest
+        # price as float32 OHLC. This is a source encoding, not an epsilon.
+        price_matches = latest_price is not None and latest_close == latest_price
+        if latest_price is not None and not price_matches:
+            try:
+                price_matches = (
+                    latest_close == struct.unpack("!f", struct.pack("!f", latest_price))[0]
+                )
+            except (OverflowError, struct.error) as exc:
+                raise YahooIndexError("Invalid latest intraday metadata price") from exc
+        return (
+            price_matches
+            and latest_close is not None
+            and all(
+                value(field, len(timestamps) - 1) == latest_close
+                for field in ("open", "high", "low")
+            )
+            and value("volume", len(timestamps) - 1) == 0
+        )
+
+    # The observed KR closing quote remains a quote when a wider request
+    # contains it. This inside-window pattern has not been established for US.
+    if market == "KR" and not appended_quote and published_close_clock and latest_quote_shape():
+        appended_quote = True
     if start is not None:
         outside = [
             index
@@ -135,45 +179,10 @@ def parse_intraday_chart(
             if outside != [len(timestamps) - 1]:
                 raise YahooIndexError("Intraday history is outside the requested window")
             if not appended_quote:
-                tail = timestamps[-1]
-                latest_close = value("close", len(timestamps) - 1)
-                latest_price = _number(meta.get("regularMarketPrice"))
-                published_ends = [
-                    session["end"]
-                    for group in (meta.get("tradingPeriods") or [])
-                    if isinstance(group, list)
-                    for session in group
-                    if isinstance(session, dict) and type(session.get("end")) is int
-                ]
                 source_clock = type(quote_time) is int and (
-                    quote_time == tail
-                    or (
-                        published_ends
-                        and max(published_ends) == tail
-                        and quote_time >= tail
-                        and datetime.fromtimestamp(quote_time, timezone).date()
-                        == datetime.fromtimestamp(tail, timezone).date()
-                    )
+                    quote_time == tail or published_close_clock
                 )
-                # Observed archive tails encode the decimal metadata price as
-                # a float32 OHLC value. Match that encoding, not a broad epsilon.
-                price_matches = latest_price is not None and latest_close == latest_price
-                if latest_price is not None and not price_matches:
-                    try:
-                        price_matches = (
-                            latest_close == struct.unpack("!f", struct.pack("!f", latest_price))[0]
-                        )
-                    except (OverflowError, struct.error) as exc:
-                        raise YahooIndexError("Invalid latest intraday metadata price") from exc
-                flat_quote = (
-                    latest_close is not None
-                    and all(
-                        value(field, len(timestamps) - 1) == latest_close
-                        for field in ("open", "high", "low")
-                    )
-                    and value("volume", len(timestamps) - 1) == 0
-                )
-                if not (source_clock and price_matches and flat_quote):
+                if not (source_clock and latest_quote_shape()):
                     raise YahooIndexError("Unproven latest point outside the requested window")
                 appended_quote = True
     bar_times = timestamps[:-1] if appended_quote else timestamps

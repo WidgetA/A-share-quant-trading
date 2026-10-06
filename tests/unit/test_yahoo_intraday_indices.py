@@ -155,12 +155,49 @@ def test_archive_grid_aligned_latest_quote_is_not_a_current_minute_bar(interval)
     assert points[-2]["is_final"] is None
 
 
+@pytest.mark.parametrize("interval", ["1m", "5m"])
+def test_korean_published_session_close_quote_stays_snapshot_inside_current_window(interval):
+    payload = old_window_with_aligned_latest_quote(interval)
+    source = payload["chart"]["result"][0]
+    source["timestamp"][:2] = [1791244800, 1791244800 + (60 if interval == "1m" else 300)]
+    _, points = parse_intraday_chart(
+        payload,
+        symbol="KOSPI-25.KS",
+        market="KR",
+        fetched_at=1791331200000,
+        interval=interval,
+        start=1791200000,
+        end=1791310000,
+    )
+    assert points[-1]["data_kind"] == "minute_quote_snapshot"
+    assert points[-1]["ts"] == 1791266400000 and points[-1]["is_final"] is None
+    assert points[-2]["is_final"] is None
+
+
+def test_unobserved_us_aligned_close_pattern_keeps_existing_inside_bar_semantics():
+    payload = old_window_with_aligned_latest_quote()
+    source = payload["chart"]["result"][0]
+    source["meta"].update(symbol="^SOX", currency="USD", exchangeTimezoneName="America/New_York")
+    source["timestamp"][:2] = [1791244800, 1791245100]
+    _, points = parse_intraday_chart(
+        payload,
+        symbol="^SOX",
+        market="US",
+        fetched_at=1791331200000,
+        interval="5m",
+        start=1791200000,
+        end=1791310000,
+    )
+    assert points[-1]["data_kind"] == "minute_bar"
+
+
 def test_real_flat_bar_and_boundary_overlap_are_preserved_as_bars():
     payload = chart()
     source = payload["chart"]["result"][0]
     for field in ("open", "high", "low", "close"):
         source["indicators"]["quote"][0][field][-1] = 106
     source["meta"]["regularMarketPrice"] = 106
+    source["meta"]["tradingPeriods"] = [[{"start": 1791207000, "end": 1791207180}]]
     _, points = parse_intraday_chart(
         payload,
         symbol="KOSPI-25.KS",
