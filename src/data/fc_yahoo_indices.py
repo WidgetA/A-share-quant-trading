@@ -276,7 +276,7 @@ class FCYahooIndexClient:
             "request_id": payload["request_id"],
             "runtime": runtime,
         }
-        if payload["capability"] == "minute_history":
+        if payload["capability"] in ("minute_history", "hour_history"):
             decoded["source_empty"] = not points
             decoded["requested_range"] = {
                 "start": payload["start"],

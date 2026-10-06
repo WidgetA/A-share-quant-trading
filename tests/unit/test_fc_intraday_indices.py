@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from src.data.cross_market_intraday_ingest import CrossMarketIntradayIngestor
 from src.data.fc_intraday_indices import FCYahooIntradayIndexClient
 from src.data.fc_yahoo_indices import FCYahooIndexError
 from src.data.fc_yahoo_worker import FCYahooRequestError, fetch_envelope, validate_request
@@ -85,6 +86,38 @@ async def test_domestic_hour_uses_distinct_native_capability_and_real_hour_rows(
     assert calls[0]["capability"] == "hour_history"
     assert {point["data_kind"] for point in fetched["points"]} == {"hour_bar"}
     assert [point["ts"] for point in fetched["points"]] == [1791244800000, 1791248400000]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("empty", [False, True])
+async def test_hour_adapter_receipt_can_enter_real_ingestor_source_validation(empty):
+    chart = json.loads(source(empty))
+    result = chart["chart"]["result"][0]
+    result["meta"]["dataGranularity"] = "1h"
+    if not empty:
+        result["timestamp"] = [1791244800, 1791248400]
+    raw = json.dumps(chart)
+    client = FCYahooIntradayIndexClient("fc.example", invoke=lambda p: response(p, raw))
+    start, end = 1791244800, 1791252000
+    fetched = await client.fetch("KOSPI-10.KS", "KR", start=start, end=end, interval="1h")
+    index = {
+        "index_id": "KR:YAHOO:KOSPI-10.KS",
+        "market": "KR",
+        "symbol": "KOSPI-10.KS",
+        "interval": "1h",
+        "currency": "KRW",
+        "exchange_timezone": "Asia/Seoul",
+        "yahoo_names": ["KOSPI Non-metallic Mineral Prod"],
+    }
+
+    accepted = CrossMarketIntradayIngestor._source(index, fetched, start, end)
+    assert accepted["requested_range"] == {"start": start, "end": end, "interval": "1h"}
+    assert accepted["source_empty"] is empty
+    assert accepted["raw_json"] == raw
+    assert accepted["points"] == fetched["points"]
+    assert len(accepted["points"]) == (0 if empty else 2)
+    with pytest.raises(ValueError, match="Source receipt differs from the requested window"):
+        CrossMarketIntradayIngestor._source(index, fetched, start, end + 3600)
 
 
 @pytest.mark.asyncio
