@@ -1,5 +1,6 @@
 """FC source transport, complete stream validation and retry behavior."""
 
+import asyncio
 import copy
 import hashlib
 import io
@@ -302,3 +303,74 @@ def test_credentialed_endpoint_is_rejected_without_printing_its_secret():
     with pytest.raises(ValueError) as failure:
         FCYahooIndexClient("https://private-user:secret-password@fc.example", invoke=lambda _: None)
     assert "private-user" not in str(failure.value) and "secret-password" not in str(failure.value)
+
+
+@pytest.mark.parametrize("recover", [False, True])
+def test_real_sdk_timeout_context_retries_finitely_with_stable_request(monkeypatch, recover):
+    pytest.importorskip("alibabacloud_fc20230330")
+    requests = pytest.importorskip("requests")
+    calls, sleeps = [], []
+    monkeypatch.setenv("ALIYUN_ACCESS_KEY_ID", "offline-dummy-access-key")
+    monkeypatch.setenv("ALIYUN_ACCESS_KEY_SECRET", "offline-dummy-secret")
+    for key in (
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "DEBUG",
+    ):
+        monkeypatch.setenv(key, "")
+
+    async def sleep(delay):
+        sleeps.append(delay)
+
+    def send(session, prepared, **options):
+        assert options["proxies"] == {}
+        assert prepared.headers["x-fc-invocation-type"] == "Sync"
+        assert prepared.headers.get("Authorization")
+        payload = json.loads(prepared.body)
+        calls.append(payload)
+        if not recover or len(calls) == 1:
+            # Exercise the actual SDK IOError -> RetryError -> Unretryable chain.
+            raise requests.ReadTimeout("http://private-user:secret-password@proxy")
+        result = requests.Response()
+        result.status_code = 200
+        result.reason = "OK"
+        result.headers = {"content-type": "application/json"}
+        result._content = json.dumps(envelope(payload), ensure_ascii=False).encode("utf-8")
+        return result
+
+    monkeypatch.setattr(fc_module.asyncio, "sleep", sleep)
+    monkeypatch.setattr(requests.Session, "send", send)
+    adapter = FCYahooIndexClient("offline.us-west-1.fc.aliyuncs.com", max_attempts=3)
+    if recover:
+        result = asyncio.run(adapter.fetch("^SOX", "US", capability="daily_history"))
+        assert result["request_id"] == calls[0]["request_id"]
+        assert len(result["points"]) == 2 and len(calls) == 2
+        assert sleeps == [1]
+    else:
+        with pytest.raises(FCYahooIndexError) as failure:
+            asyncio.run(adapter.fetch("^SOX", "US", capability="daily_history"))
+        assert len(calls) == 3 and sleeps == [1, 2]
+        assert "private-user" not in str(failure.value)
+        assert "secret-password" not in str(failure.value)
+    assert all(call == calls[0] for call in calls)
+
+
+def test_sdk_http_status_is_not_overridden_by_transport_context():
+    exceptions = pytest.importorskip("darabonba.exceptions")
+    requests = pytest.importorskip("requests")
+    failure = exceptions.DaraException({"code": "AccessDenied", "data": {"statusCode": 403}})
+    failure.__context__ = requests.ReadTimeout("private text")
+    assert fc_module._root_error(failure) is failure
+    assert not fc_module._transient(fc_module._root_error(failure))
+
+
+def test_non_transport_sdk_context_and_similar_error_text_never_create_retries():
+    exceptions = pytest.importorskip("darabonba.exceptions")
+    failure = exceptions.RetryError("ReadTimeout HTTP 503, this is only text")
+    failure.__context__ = ValueError("not a network error")
+    assert fc_module._root_error(failure) is failure
+    assert not fc_module._transient(fc_module._root_error(failure))

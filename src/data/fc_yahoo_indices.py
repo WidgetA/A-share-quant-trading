@@ -132,7 +132,19 @@ def _root_error(exc: Exception) -> Exception:
     seen = set()
     while id(exc) not in seen:
         seen.add(id(exc))
+        if _status(exc) is not None:
+            break
         inner = getattr(exc, "inner_exception", None)
+        if (
+            not isinstance(inner, Exception)
+            and type(exc).__module__ == "darabonba.exceptions"
+            and type(exc).__name__ == "RetryError"
+        ):
+            context = exc.__context__
+            # SDK 1.0.9 wraps requests IOError in RetryError but retains its
+            # real exception here. Only that proven transport type is usable.
+            if isinstance(context, Exception) and _transient(context):
+                inner = context
         if not isinstance(inner, Exception):
             break
         exc = inner
