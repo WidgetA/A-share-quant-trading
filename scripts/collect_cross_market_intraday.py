@@ -66,7 +66,9 @@ async def run(args):
             args.fc_function,
             region=os.environ.get("CROSS_MARKET_FC_REGION", "us-west-1"),
         )
-        store = CrossMarketStore(args.greptime_url, batch_size=args.batch_size)
+        # Initial minute backfill can overlap Greptime flush/compaction. Keep
+        # the durable pending window and allow its SQL acknowledgement time.
+        store = CrossMarketStore(args.greptime_url, batch_size=args.batch_size, timeout=120.0)
         producer = CrossMarketIntradayIngestor(
             reference_path=args.reference,
             base_reference_path=args.base_reference,
