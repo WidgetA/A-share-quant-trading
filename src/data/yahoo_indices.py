@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import math
+import struct
 import time
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -117,6 +118,30 @@ def parse_chart(
         if close is not None and close <= 0:
             raise YahooIndexError("Invalid index close")
         ohl = [value(key, index) for key in ("open", "high", "low")]
+        volume = value("volume", index)
+        trade_date = datetime.fromtimestamp(stamp, timezone).date()
+        if (
+            capability == "daily_history"
+            and index == len(timestamps) - 1
+            and close is not None
+            and ohl == [0.0, 0.0, 0.0]
+            and volume == 0
+            and stamp == current_start
+            and isinstance(quote_time, int)
+            and quote_time >= stamp
+            and trade_date == quote_date
+        ):
+            # DRG publishes a real daily timestamp/close with zero OHL. The
+            # session timestamp and same-day latest quote/float32 price prove
+            # this is the current daily observation, not fabricated history.
+            latest_price = _number(meta.get("regularMarketPrice"))
+            if latest_price is not None:
+                try:
+                    latest_float32 = struct.unpack("!f", struct.pack("!f", latest_price))[0]
+                except (OverflowError, struct.error):
+                    latest_float32 = None
+                if latest_float32 == close:
+                    ohl = [None, None, None]
         if not snapshot and any(item is not None and item <= 0 for item in ohl):
             raise YahooIndexError("Invalid OHLC; zero placeholders are not historical bars")
         opening, high, low = ohl
@@ -124,13 +149,11 @@ def parse_chart(
             bounds = [item for item in (opening, close, low) if item is not None]
             if not snapshot and (high < max(bounds) or low > min(bounds)):
                 raise YahooIndexError("Inconsistent OHLC")
-        volume = value("volume", index)
         if volume is not None and volume < 0:
             raise YahooIndexError("Negative volume")
         adj = _number(adjusted[index]) if adjusted is not None else None
         if adj is not None and adj <= 0:
             raise YahooIndexError("Invalid adjusted close")
-        trade_date = datetime.fromtimestamp(stamp, timezone).date()
         # A later source session establishes that older bars are historical.
         # Wall-clock session end alone cannot prove a delayed latest bar is final.
         final = None

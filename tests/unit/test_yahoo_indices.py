@@ -181,6 +181,87 @@ def test_single_missing_daily_close_is_retained_as_an_explicit_gap():
     assert points[0]["ts"] == 1791207000000
 
 
+def drg_latest_close_only_chart():
+    """Minimal fields from the actual DRG daily response observed 2026-10-07."""
+    payload = chart("^DRG")
+    result = payload["chart"]["result"][0]
+    result["meta"].update(
+        shortName="NYSE Arca Pharmaceutical Index",
+        regularMarketTime=1791317115,
+        regularMarketPrice=1215.579,
+        currentTradingPeriod={"regular": {"start": 1791293400, "end": 1791316800}},
+    )
+    result["timestamp"] = [1791207000, 1791293400]
+    result["indicators"] = {
+        "quote": [
+            {
+                "open": [1212.81005859375, 0.0],
+                "high": [1215.8900146484375, 0.0],
+                "low": [1198.97998046875, 0.0],
+                "close": [1206.02001953125, 1215.5789794921875],
+                "volume": [0, 0],
+            }
+        ],
+        "adjclose": [{"adjclose": [1206.02001953125, 1215.5789794921875]}],
+    }
+    return payload
+
+
+def test_proven_latest_daily_close_is_preserved_when_provider_publishes_zero_ohl():
+    payload = drg_latest_close_only_chart()
+    original = copy.deepcopy(payload)
+    _, points = parse_chart(
+        payload,
+        symbol="^DRG",
+        market="US",
+        fetched_at=1791332469000,
+        capability="daily_history",
+    )
+    assert len(points) == 2 and payload == original
+    assert points[0]["open"] == 1212.81005859375
+    tail = points[-1]
+    assert tail["ts"] == 1791293400000
+    assert (tail["interval"], tail["data_kind"]) == ("1d", "daily_bar")
+    assert tail["trade_date"] == "2026-10-06"
+    assert tail["close"] == tail["adjusted_close"] == 1215.5789794921875
+    assert [tail[k] for k in ("open", "high", "low")] == [None, None, None]
+    assert tail["volume"] == 0 and tail["is_final"] is None
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "historical_row",
+        "wrong_session",
+        "different_quote_day",
+        "wrong_latest_price",
+        "positive_volume",
+        "unproven_daily",
+    ],
+)
+def test_daily_zero_ohl_without_latest_source_evidence_still_fails(case):
+    payload = drg_latest_close_only_chart()
+    result = payload["chart"]["result"][0]
+    capability = "daily_history"
+    if case == "historical_row":
+        for key in ("open", "high", "low"):
+            result["indicators"]["quote"][0][key][0] = 0
+    elif case == "wrong_session":
+        result["meta"]["currentTradingPeriod"]["regular"]["start"] += 86400
+    elif case == "different_quote_day":
+        result["meta"]["regularMarketTime"] += 86400
+    elif case == "wrong_latest_price":
+        result["meta"]["regularMarketPrice"] += 1
+    elif case == "positive_volume":
+        result["indicators"]["quote"][0]["volume"][-1] = 1
+    else:
+        capability = None
+    with pytest.raises(YahooIndexError, match="placeholders"):
+        parse_chart(
+            payload, symbol="^DRG", market="US", fetched_at=1791332469000, capability=capability
+        )
+
+
 @pytest.mark.asyncio
 async def test_transient_host_failure_retries_another_host():
     hosts = []
