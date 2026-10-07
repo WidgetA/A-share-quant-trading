@@ -3,6 +3,11 @@
 <style>body{font:14px system-ui;margin:24px}table{border-collapse:collapse}
 th,td{border:1px solid #ccd;padding:7px;text-align:left}th{background:#eee}</style>
 <h1>原指数历史取数与入库结果</h1>
+<p>当前生产基础设施版本：<code>a2c89213b526278847a2e6d362fcea75bc1b4896</code>。
+实际验收时间为 2026-10-07T08:40:45Z，新容器两轮完整日线和日内采集、268 条纠正后的行业映射均已核实。
+2026-10-07T08:27:49Z 至 08:28:08Z 的原生 SQL 再次核实 124 个美股原指数共 8,854,906 条历史五分钟线。
+全部美股原指数从 2023 年起的历史仍未齐：7 项尚无采用的历史源，铁路设备指数另缺 2023—2024 年实际数据。
+同一持久限频队列补测旧 api.polygon.io：DJUSAL 的 2023 窗口仍为权限拒绝，SOX 同窗口实际返回 158 条；其余五个候选未逐一测试旧域名。</p>
 <p>仅已保存源与写库读回证据。请求截至日不是源最新日；空窗不伪造价格。
 DELAYED 为源状态。美国原131项中124项已写入真实历史，另7项历史分钟仍未完成；韩国39项另有已验证Yahoo730天小时线。未使用ETF或其他指数补位。</p>
 <p>实际首次与最新日期来自源bars。Yahoo未来分钟增量按独立provider保存。</p>

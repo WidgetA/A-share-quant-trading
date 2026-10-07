@@ -1,302 +1,962 @@
 {
   "schema_version": 1,
-  "record_generated_at_utc": "2026-10-07T02:20:06.806112+00:00",
-  "status": "verified_recorded_037_collection_and_adopted_massive_backfill_scope",
-  "scope": "Historical acceptance observations for deployed 037 Yahoo collection and completed124 adopted same-index Massive request windows; not a live status endpoint or all170 original indices available from Massive.",
-  "revision": "037f306d7b3b6957e33011e40744f755151a7b49",
+  "record_generated_at_utc": "2026-10-07T08:53:02.135596+00:00",
+  "status": "verified_actual_current_a2_production_original_US2023_history_incomplete",
+  "scope": "Actual deployed a2 reference correction and automatic collection acceptance. Earlier037/hour seed/Massive backfill observations retain their original versions and dates. Not a live status endpoint or all131 US2023 history completion.",
+  "revision": "a2c89213b526278847a2e6d362fcea75bc1b4896",
   "branch": "refactor/cleanup-v15-only",
-  "ci": {
-    "run_id": 37553331701,
-    "release_job_id": 112574435038,
-    "url": "https://github.com/WidgetA/A-share-quant-trading/actions/runs/37553331701",
-    "conclusion": "success",
-    "completed_success_utc": "2026-10-07T00:51:16Z"
-  },
-  "deployment": {
-    "entities_checked_at_utc": "2026-10-07T00:57:33.411847+00:00",
-    "two_collectors_actual_running_same_revision": true,
-    "fc_actual_revision": "037f306d7b3b6957e33011e40744f755151a7b49",
-    "collectors_without_proxy": true,
-    "runtime_source_and_reference_file_count": 18,
-    "runtime_total_files_including_vendor": 1068,
-    "runtime_bundle_sha256": "b0a6a691e11feeda238f2f71ea3830a8942018d0b00894d2c4b9742dd5dac7c9",
-    "runtime_archive_sha256": "71b9fc9b1d2a57b7c1a2254626fbac19b57ab14cc001586e2ba64bee04d7341f",
-    "compose_sha256": "b3e38b453bfd167b7abb89c4ce2e29a54b7c22013cd2feab4ace6b659f26ea43",
-    "cloud_worker_total_files": 817,
-    "cloud_worker_zip_sha256": "01022d680b2e5a96c86bc7699e9cda407e3e122f2050a820d49f7561f91200ae",
-    "cloud_zip_exact_uploaded_bytes": true,
-    "actual_runtime_and_cloud_files_match_committed_revision": true,
-    "runtime_source_files_sha256": {
-      "src/data/yahoo_indices.py": "4ee26b3f5bdc0c59c1dc1f03ff94e76108871dbfcc5317fa1f091d431edd51ec",
-      "src/data/yahoo_intraday_indices.py": "239d76740d23ad72ceb68784d1c02264452dd22f9f2044e8616e1f2dad2409b8",
-      "src/data/fc_yahoo_indices.py": "64f93d0e7726f48a3f01d463d319a45844f61e99a7430070d2fa7ddd7e33f698",
-      "src/data/fc_intraday_indices.py": "6efe0ac84e308b5867776aac3ea7c61ef915bf4a3ff211df528f3a44a3382ba7",
-      "src/data/cross_market_store.py": "453c93f457c754876eec4e5a7dc87d7d4a6e9d3eb6899ebea04934946d7abf8c",
-      "src/data/cross_market_ingest.py": "dec0cc37d404db5dbc84586d2c6675528b97f7c77c7f426d94b0f6188426925c",
-      "src/data/cross_market_intraday_ingest.py": "2297a93af233f17c499724cf2b0e15177d802bb8c84e4f8fc9e1dc2e54c47c1b",
-      "src/data/massive_indices.py": "6fa59500406427dfd9a365779aba5d2571c1ddeadb5b76b94daf3c7de1e298c3",
-      "src/data/cross_market_massive_ingest.py": "d67194cfb8549e6f65b664c82c598af09a304a2531dc1c4b1b6c5d46f392e3b3",
-      "scripts/collect_cross_market_indices.py": "ec207b626f7f01afd024ff448afbb416aa35a472979c777b41475ddc2bd7ad6f",
-      "scripts/collect_cross_market_intraday.py": "c111a8f9a3d37d753ff4b3ad79d87d290607cbd9680537fdae9787c9a6607641",
-      "scripts/backfill_cross_market_massive.py": "cf559db00144b6f1d1465b369d66e061df4f280b8d3b1440128a27dce4af7169",
-      "src/data/reference/cross_market/industry_boards.json": "498f0bb1d9217ac78d6ce80d4891f4c1ca810502a41b30a5209e8006d8b5a2d7",
-      "src/data/reference/cross_market/industry_indices.json": "8e14dd0f8346fae374dd8adaac3eb0a48254967b2dc82c5548635922b7c628e5",
-      "src/data/reference/cross_market/intraday_indices.json": "b082bac9f9cfa667834960f8c1236d34ab1445a5ce8d37684bb0e1e80583c252",
-      "src/data/reference/cross_market/massive_indices.json": "d0a539a77f34d767d718eae1baea96d9e802ce574877c3feef18cd9010026948",
-      "src/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "src/data/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  "overall_requested_goal_status": "incomplete_original_US2023_history_and_temporary_environment_cleanup",
+  "current_production_acceptance": {
+    "schema_version": 1,
+    "checked_at_utc": "2026-10-07T08:40:45.064572+00:00",
+    "scope": "Independent actual a2 release acceptance after correcting original DRG reference; not completion of all original-US2023 history.",
+    "revision": "a2c89213b526278847a2e6d362fcea75bc1b4896",
+    "status": "verified_actual_new_release_and_two_new_cycles",
+    "checks": {
+      "actual_full_source_runtime_cloud_verified": true,
+      "training_fullconfig_unchanged": true,
+      "database_baseline_unchanged": true,
+      "all_new_cycles_conditions": true,
+      "current_containers_same_before_after_logs": true,
+      "log_container_ids_equal_actual_runtime_read": true,
+      "all_logged_containers_actual_revision": true,
+      "pending_zero": true,
+      "mapping268_business_fields_exact": true,
+      "latest170_keys_all18_columns_metadata": true,
+      "hour39_archive_and_state_original_bytes": true,
+      "fresh_ci_all_success_training_skipped": true
     },
-    "worker_source_files_sha256": {
-      "handler.py": "66258ea8d101f583c0a0bdaed8d5ad037ac9b6aa9d5f95a9243afa0c87f03c8b",
-      "src/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "src/data/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "src/data/yahoo_indices.py": "4ee26b3f5bdc0c59c1dc1f03ff94e76108871dbfcc5317fa1f091d431edd51ec",
-      "src/data/yahoo_intraday_indices.py": "239d76740d23ad72ceb68784d1c02264452dd22f9f2044e8616e1f2dad2409b8",
-      "src/data/fc_yahoo_worker.py": "183455f32ae3550801dd77e637a7d1cbf58b167b2a4b0b516a51a1ddccdf9601"
+    "reference_sha256": "1be0ecb79e37bb45bb710afa41f016fcad08efc47ce6f3d740ef58076af38161",
+    "capability_sha256": "c269b63a809db900b07d5f54c538f1c0e36fb9e690ef37b411f10394a4c911cc",
+    "bundle_sha256": "113d412aaa4343dfadb859484e7d84b5538188b0db5805696aeb7bcd17330a7c",
+    "cloud_zip_sha256": "01022d680b2e5a96c86bc7699e9cda407e3e122f2050a820d49f7561f91200ae",
+    "runtime_file_count": 1068,
+    "worker_files_count": 817,
+    "cycles": {
+      "ashare-cross-market_cross-market-collector_1": [
+        {
+          "logged_at_utc": "2026-10-07T08:27:18.290299006Z",
+          "status": "verified",
+          "series_count": 170,
+          "checks": {
+            "two_complete_cycles": true,
+            "after_actual_new_container_start": true,
+            "exact_series_set_and_no_duplicates": true,
+            "failures_zero": true,
+            "new_reference_sha": true
+          },
+          "replayed_rows": 0
+        },
+        {
+          "logged_at_utc": "2026-10-07T08:34:14.187785365Z",
+          "status": "verified",
+          "series_count": 170,
+          "checks": {
+            "two_complete_cycles": true,
+            "after_actual_new_container_start": true,
+            "exact_series_set_and_no_duplicates": true,
+            "failures_zero": true,
+            "new_reference_sha": true
+          },
+          "replayed_rows": 0
+        }
+      ],
+      "ashare-cross-market_cross-market-intraday-collector_1": [
+        {
+          "logged_at_utc": "2026-10-07T08:27:32.699554296Z",
+          "status": "verified_with_gaps",
+          "series_count": 379,
+          "checks": {
+            "two_complete_cycles": true,
+            "after_actual_new_container_start": true,
+            "exact_series_set_and_no_duplicates": true,
+            "failures_zero": true,
+            "new_reference_sha": true,
+            "new_capability_sha": true,
+            "hour39_skip_no_new_source_rows": true,
+            "minute340_all_reach_real_new_target": true
+          },
+          "replayed_rows": 0,
+          "run_end_s": 1791361478,
+          "continuing_minutes": 340,
+          "hour_previously_verified": 39
+        },
+        {
+          "logged_at_utc": "2026-10-07T08:34:44.393749910Z",
+          "status": "verified_with_gaps",
+          "series_count": 379,
+          "checks": {
+            "two_complete_cycles": true,
+            "after_actual_new_container_start": true,
+            "exact_series_set_and_no_duplicates": true,
+            "failures_zero": true,
+            "new_reference_sha": true,
+            "new_capability_sha": true,
+            "hour39_skip_no_new_source_rows": true,
+            "minute340_all_reach_real_new_target": true
+          },
+          "replayed_rows": 0,
+          "run_end_s": 1791361953,
+          "continuing_minutes": 340,
+          "hour_previously_verified": 39
+        }
+      ]
     },
-    "fc_instance_concurrency_readback": null,
-    "requested_fc_instance_concurrency": 1,
-    "requested_concurrency_not_independently_confirmed": true,
-    "fc_function_name": "ashare_yahoo_indices_v15",
-    "fc_runtime": "python3.12"
-  },
-  "actual_037_cycles": {
-    "daily_series": 170,
-    "daily_completed_utc": [
-      "2026-10-07T00:50:37.217505327Z",
-      "2026-10-07T00:57:14.263990332Z"
+    "new_container_public_facts": [
+      {
+        "name": "ashare-cross-market_cross-market-collector_1",
+        "id": "2f109f55afac0e7529d418e5cc679b10ff273edfbdee150a0e9607b4ede77f28",
+        "started_at": "2026-10-07T08:24:25.330932527Z",
+        "source_revision": "a2c89213b526278847a2e6d362fcea75bc1b4896",
+        "proxy_and_debug_empty": true
+      },
+      {
+        "name": "ashare-cross-market_cross-market-intraday-collector_1",
+        "id": "64119aec6c6560a987701718dda713af2b13b68b739e7c7fff84bfdc3354dc33",
+        "started_at": "2026-10-07T08:24:25.332033069Z",
+        "source_revision": "a2c89213b526278847a2e6d362fcea75bc1b4896",
+        "proxy_and_debug_empty": true
+      }
     ],
-    "intraday_series": 379,
-    "intraday_completed_utc": [
-      "2026-10-07T00:50:43.063589120Z",
-      "2026-10-07T00:57:55.116895008Z"
-    ],
-    "continuous_minute_series": 340,
-    "hour_history_seed_series": 39,
-    "two_cycles_each_independently_validated": true,
-    "all39_hour_seed_status_each_cycle": "previously_verified",
-    "minutes_advance_to_each_real_cycle_target": true,
-    "source_gaps_retained": true,
-    "daily_cycle_statuses": [
-      "verified",
-      "verified"
-    ],
-    "intraday_cycle_statuses": [
-      "verified_with_gaps",
-      "verified_with_gaps"
-    ],
-    "intraday_cycle_target_s": [
-      1791334071,
-      1791334543
-    ],
-    "intraday_replayed_source_rows": [
-      74,
-      0
-    ]
-  },
-  "independent_database_readback": {
-    "mapping_business_json_and_keys_exact_rows": 268,
-    "price_columns_per_key": 18,
-    "daily_latest_source_keys_exact": 170,
-    "intraday_latest_source_keys_exact": 379,
-    "source_null_values_retained_not_zero_filled": true,
-    "actual_drg_native_source_nonfetch_fields_exact": 17,
-    "drg_fetched_at_retains_each_actual_fetch_time": true,
-    "observation_stage": "Original 037 acceptance before 04:00 UTC; the later midnight DRG RAW/SQL proof is recorded separately below."
-  },
-  "kr_hour_history_seed": {
-    "market": "KR",
-    "original_source_observed_revision": "b07d77308f744ca36357ede6afa4761adb1c5406",
-    "preservation_checked_at_utc": "2026-10-07T00:48:44.193317+00:00",
-    "preservation_running_revision": "037f306d7b3b6957e33011e40744f755151a7b49",
-    "index_count": 39,
-    "requested_retention_days": 730,
-    "update_mode": "history_seed",
-    "source_point_keys": 113763,
-    "hour_bar_keys": 113724,
-    "hour_quote_snapshot_keys": 39,
-    "null_hour_close_keys": 434,
-    "all_keys_and_all18fields_exact": true,
-    "direct_raw_ohlcv_fields_compared": 568815,
-    "first_actual_trade_date": "2024-10-07",
-    "last_actual_trade_date": "2026-10-06",
-    "first_bar_ms": 1728259200000,
-    "last_bar_ms": 1791262800000,
-    "original_archive_files_copied_and_sha_verified": 39,
-    "tail_quotes_kept_separate": true,
-    "all39_source_archives_and_seed_states_byte_identical": true,
-    "completed_seed_not_fetched_again_each_cycle": true,
-    "original_source_time_and_coverage_target_preserved": true,
-    "all10_runtime_files_byte_identical_prior_bd41": true,
-    "9_runtime_files_byte_identical_original_b07": true,
-    "shared_hourly_dependency_ast_identical_original_b07": {
-      "YahooIndexError": true,
-      "_number": true,
-      "YahooChartTransport": true,
-      "all_outside_daily_parse_and_new_struct_import_identical": true
+    "training_configuration_sha256": "aebb943a8d5acb1774bc0d40d4e7a423de8419a20878b412b23f141ddf80c829",
+    "pending_at_latest_log_read": {
+      "state-fc": 0,
+      "state-intraday-fc": 0
     },
-    "pending_count_at_preservation_read_only": 0,
-    "backtest_bar_data_kind": "hour_bar"
-  },
-  "original_services": {
-    "training_full_configuration_sha256_unchanged": "aebb943a8d5acb1774bc0d40d4e7a423de8419a20878b412b23f141ddf80c829",
-    "greptime_image_started_at_restart_count_unchanged": true
-  },
-  "boundaries": [
-    "Old3 daily pending RAW were not retained; no claim of retrospective full-field equality to those original batches.",
-    "4 daily source-gap series and minute/hour source NULL points retained; successful cycles do not mean provider has no gaps.",
-    "FC instance_concurrency readback null; requested1 not independently confirmed.",
-    "At the original 00:57 UTC acceptance, NY-midnight metadata rollover had not yet been observed. The later 04:03 production cycle and 04:05 native RAW now prove one actual rollover with provider-filled OHLC; no future SLA or old zero-OHL guard acceptance for a rolled old day is claimed.",
-    "Original hourly RAW/SQL acceptance belongs to b07; later preservation and cycles retain their own observed revisions.",
-    "Source NULL values are not replaced with zero or invented bars; real quote snapshots are distinct from hour/minute bars.",
-    "No claim of exchange-calendar every-minute/every-hour completeness, 2023 Yahoo minute/hour coverage or future availability. Massive completion is the124 adopted original-price indices and requested windows with actual source dates;6 candidate403/price-basis-pending indices and unmatched DRG/KR are not filled by substitutes.",
-    "Current Basic retry:18 aggregate windows and one grouped snapshot denied for the6 Dow candidates, despite official Basic-list inclusion; same-account SOX2023 actual158 bars. Four current original-DRG name searches returned200 empty. Seven original-US historical-minute gaps remain; no automatic paid upgrade or substitutes."
-  ],
-  "original_evidence_index": {
-    "production_037_summary": {
-      "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/037f306_production_final_acceptance.json",
-      "sha256": "e88780dd357489f9e07ecdb35b7fddd7a6c20a2eb09e671745ba191a09b49974",
-      "storage": "local_ignored_original_evidence"
-    },
-    "hour_037_preservation_summary": {
-      "path": "dev-tools/cross-market-yahoo/kr_probe/review/hour_037_current_preservation_acceptance_v1.json",
-      "sha256": "d75fa814cffb8aa618fd04d66e691441581913b3d17e89195151661381b32b06",
-      "storage": "local_ignored_original_evidence"
-    },
+    "mapping_full_actual_rows_sha256": "f75008dbda5f57c2a28dd28e49a8500460c711d380aa339c215d0c963fc2f3cb",
+    "fetched_at_boundary": "All mapping business fields and complete keys match new reference; fetched_at is independently validated actual engineering clock, not replaced with audit-now. Daily SQL checks latest keys/18-column metadata; full source-array equality is producer cycle evidence, not reconstructed unavailable original RAW.",
+    "hour_original_source_boundary": "Original b07 730d RAW/full18field SQL proof is inherited only because all39 archive and seed state bytes remain equal to pre-release; no730d refetch or largeSQL.",
     "ci": {
-      "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/037f306_ci_final.json",
-      "sha256": "4b8ec5e9453fa3de4e3fe748a79078ba03db44aff39418c3d7ced2c83dff2748",
-      "storage": "local_ignored_original_evidence"
+      "id": 37592996598,
+      "head_sha": "a2c89213b526278847a2e6d362fcea75bc1b4896",
+      "status": "completed",
+      "conclusion": "success",
+      "updated_at": "2026-10-07T08:28:13Z"
     },
-    "entities": {
-      "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/actual_037f306_final_release.json",
-      "sha256": "bae939b29ccfc585dfe7565a088639c19006c86d030af01f0c3a15026100bdea",
-      "storage": "local_ignored_original_evidence"
-    },
-    "new_cycles": {
-      "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/037f306_two_cycles_validated.json",
-      "sha256": "cb3444aed9db0b7c41f4c407a20c88494d02ad099b896ed31924060983cda83e",
-      "storage": "local_ignored_original_evidence"
-    },
-    "timestamped_safe_cycles": {
-      "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/037f306_safe_cycles.json",
-      "sha256": "c329c7327fc080a613556ddd7a3461e339eedeaa79f562bab16f143a56fdd5b5",
-      "storage": "local_ignored_original_evidence"
-    },
-    "latest_daily_all18": {
-      "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/037f306_daily_final_readback.json",
-      "sha256": "68145246a16e421d9705527a4f268ad365154740206f1dbf5622a7a157f37da5",
-      "storage": "local_ignored_original_evidence"
-    },
-    "formal_readback_after_two": {
-      "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/037f306_formal_readback_after_two_cycles.json",
-      "sha256": "f15723bef0bfa5a903ab416a4874956efbfdcead217607617a89c24d80159744",
-      "storage": "local_ignored_original_evidence"
-    },
-    "drg_source_and_db": {
-      "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/037f306_drg_native_to_db_comparison.json",
-      "sha256": "18875879f53c4cd14b5f28e2a454031d7308ce97abed06fa4137db9132d0da40",
-      "storage": "local_ignored_original_evidence"
-    },
-    "runtime_byte_lineage": {
-      "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/bd_to_037_runtime_byte_lineage.json",
-      "sha256": "c3cb8aedf2077600a6f8fa1aa96a0e3fa275cf2dfca9669ff40563bfaf4e6259",
-      "storage": "local_ignored_original_evidence"
-    },
-    "current_037_readonly_preservation": {
-      "path": "dev-tools/cross-market-yahoo/kr_probe/review/hour_final_preservation_20261007T004844193531Z.json",
-      "sha256": "0ffa05fdbcb83754d0c7de30dfcfb2f882a9fd5975ca6688fa522c5093ae7119",
-      "storage": "local_ignored_original_evidence"
-    },
-    "prior_bd41_actual_hour_acceptance": {
-      "path": "dev-tools/cross-market-yahoo/kr_probe/review/hour_bd41_final_acceptance_v1.json",
-      "sha256": "423b24b8aaa5f034643936a221ae178fd7107bc3edffc4e290b4331d4a3910ee",
-      "storage": "local_ignored_original_evidence"
-    },
-    "original_b07_source_to_db": {
-      "path": "dev-tools/cross-market-yahoo/kr_probe/review/hour_production_20261006T235153691530Z/hour_source_db_readback.json",
-      "sha256": "569be0d7c1ea904dfb382da3f718f68916677e555f01ffc1430091982819f027",
-      "storage": "local_ignored_original_evidence"
-    },
-    "ny_midnight_acceptance": {
-      "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/037_midnight_final_acceptance.json",
-      "sha256": "c7d0f47f5b0b777888b58dc488fbf09f4903ff1337b32c2b730dd7a74ea63cdc",
-      "storage": "local_ignored_original_evidence"
-    },
-    "ny_midnight_037_drg_post_midnight_20261007T0404.json": {
-      "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/037_drg_post_midnight_20261007T0404.json",
-      "sha256": "790ea1bd4bf040771ca7a56b8271c5c5241aef47ad513a415b0ed5208c30fdfe",
-      "storage": "local_ignored_original_evidence"
-    },
-    "ny_midnight_037_drg_midnight_actual_raw_and_db.json": {
-      "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/037_drg_midnight_actual_raw_and_db.json",
-      "sha256": "04a92696f774e2e367fca87e7059bb1bd4c18d3eb883d02835782bf78d2ff862",
-      "storage": "local_ignored_original_evidence"
-    },
-    "ny_midnight_drg_daily_native_midnight_20261007T0405_yahoo.body": {
-      "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/drg_daily_native_midnight_20261007T0405_yahoo.body",
-      "sha256": "9a08b487c8b5f8c9eca4820e3348ad7341b33d7f95755674ffdf20f32bbaaaf4",
-      "storage": "local_ignored_original_evidence"
-    },
-    "ny_midnight_drg_daily_native_midnight_20261007T0405.response": {
-      "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/drg_daily_native_midnight_20261007T0405.response",
-      "sha256": "b79a47fd4b827772a68f442e86e10bfacecbd4b93bf10735c7e92cc719e8064b",
-      "storage": "local_ignored_original_evidence"
-    },
-    "ny_midnight_037_drg_pre_midnight_20261007T0345.json": {
-      "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/037_drg_pre_midnight_20261007T0345.json",
-      "sha256": "a773281660eb8628cfd3c0004010b24d3b56d28db063452505c21f1f1ac548cf",
-      "storage": "local_ignored_original_evidence"
-    },
-    "massive_strict_final_audit": {
-      "path": "dev-tools/cross-market-yahoo/us_probe/review/massive_history_final_20261007T065601978957Z.json",
-      "sha256": "5115f6a88cd434aaa69bd067523b48b2a52ad411bfe8993bb531bf7f1f207aed",
-      "storage": "local_ignored_original_evidence",
-      "sha_scope": "Actual local audit bytes observed during this documentation update; future finalized audit changes require a new hash."
-    },
-    "massive_root_raw_numeric_sample_readback": {
-      "path": "dev-tools/cross-market-yahoo/root_history_final_sample_readback.json",
-      "sha256": "61c3c12c56b0a059bd40e95c7bbfa9b414e3998a63c570c0afe6cbd5f6004136",
-      "storage": "local_ignored_original_evidence"
-    },
-    "massive_run5_runtime_metadata": {
-      "path": "D:/CodexBuild/cross-market-fc-v15/massive-history-run5.runtime.json",
-      "sha256": "4189bc5e1d338d4685be41ea3fa07936e90bf089f6c988d1413ccee0962e4069",
-      "storage": "local_build_evidence_outside_repository"
+    "original_requested_goal_status": "not_complete_US131_from2023_history",
+    "remaining_scope": "7 originalUS have no adopted minute history; Railroad Equipment within124 first has2025-03-24 source (8 originals without2023 bars).123 source starts2023-02-15. Temporary environment deletion is separate and has not been performed by this reviewer.",
+    "actions": "Only trusted SSH/file/container logs/SQL SELECT and FC GetFunction/GetFunctionCode reads; no source invocation, Massive API/Key, production/state/source writes, installs or new environment. Original project.venv used.",
+    "evidence": {
+      "prebaseline": {
+        "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/pre_drg_correction_actual_baseline.json",
+        "sha256": "c8368fd1716731ec35adf57dbd4cc86b0dcf337cb2b796d31041f0cdd279b90c"
+      },
+      "actual_release": {
+        "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/a2c8921_actual_release.json",
+        "sha256": "f563732f98612277048371a8a387fc5a44eb276a811568333e01fd93cd432fdf"
+      },
+      "ci": {
+        "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/a2c8921_ci_final.json",
+        "sha256": "296124ff0695033e28efad382fce60b9ae029d573de345cdaa48ad78ca2e56a8"
+      },
+      "latest_keys_and_mapping": {
+        "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/a2c8921_daily_mapping_and_new_cycles.json",
+        "sha256": "45b4a7c09a68fa801a7c2dad40b6761e4c6b03e82c6d7cc21bf93e6634409645"
+      },
+      "new_cycles": {
+        "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/a2c8921_new_cycle_observation.json",
+        "sha256": "e5a1a0c59109aa99658e4de65b7403ca1a4314755f4716c4f6d693f4ef6ccbc2"
+      },
+      "hour_after_two": {
+        "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/a2c8921_hour_preservation_after_two_cycles.json",
+        "sha256": "89283e481d1826af97c665d0c70a7352c355d49242971dd52366991643d600e3"
+      }
     }
   },
-  "evidence_index_note": "Paths are relative to the repository and point to local ignored original evidence retained on this machine. SHA256 binds the originals; this committed summary contains no RAW price arrays or credentials.",
-  "record_updated_at_utc": "2026-10-07T08:18:54.702708+00:00",
-  "ny_midnight_actual_verification": {
-    "daily_cycle_completed_utc": "2026-10-07T04:03:03.836877609Z",
-    "daily_complete_indices": 170,
-    "daily_failures": 0,
-    "production_drg_source_fetched_at_utc": "2026-10-07T04:01:44.054Z",
-    "production_source_sha256": "8fdfaab6df9fb7bb4f88348695850993f9e4cc8cafa88eb68c6ac5a3f9dfdf22",
-    "readonly_native_fetched_at_utc": "2026-10-07T04:05:32.982Z",
-    "readonly_native_raw_sha256": "9a08b487c8b5f8c9eca4820e3348ad7341b33d7f95755674ffdf20f32bbaaaf4",
-    "native_payload_sha_verified": true,
-    "native_request_same_start_as_production": true,
-    "current_regular_start_before": 1791293400,
-    "current_regular_start_after": 1791379800,
-    "meta_session_has_rolled": true,
-    "raw_latest_day_ohl": [
-      1206.02001953125,
-      1220.5999755859375,
-      1199.5
+  "current_reference_source_correction": {
+    "corrected_at_utc": "2026-10-07T08:18:53.587901+00:00",
+    "index_id": "US:YAHOO:^DRG",
+    "original_symbol_name_provider_and_selection_preserved": true,
+    "scope": "Original DRG2014 market-cap-weighted source replaces indirect DGE source and copied notes; no2026 membership or new historical availability claim.",
+    "actual_official_url": "https://www.ice.com/publicdocs/nyse/indices/nyse_arca_pharmaceutical_index.pdf",
+    "actual_official_sha256": "3a0dac40f42165a3e0469b02a4609614fa94c48c94065ebc0a76dff74e58d832",
+    "actual_official_http_status": 200,
+    "actual_official_requested_at_utc": "2026-10-07T08:04:51.783390+00:00",
+    "actual_official_retrieved_at_utc": "2026-10-07T08:04:54.381928+00:00",
+    "current_corrected_reference_file_sha256": {
+      "industry_indices.json": "1be0ecb79e37bb45bb710afa41f016fcad08efc47ce6f3d740ef58076af38161",
+      "intraday_indices.json": "c269b63a809db900b07d5f54c538f1c0e36fb9e690ef37b411f10394a4c911cc",
+      "massive_indices.json": "699292cad22e786e6265be60a56981b9199019fef2cb2b07b4338e79994c5ae2"
+    },
+    "previous_history_source_and_sql_reference_sha256_retained_as_actual_old_evidence": true,
+    "all170_originals_all379_intraday_identities_and124_massive_identities_state_paths_unchanged": true,
+    "existing124_history_source_states_preserved": {
+      "rows": 8854906,
+      "completed_windows": 1984,
+      "todo": 0,
+      "pending": 0,
+      "original_state_reference_sha256_retained": true
+    },
+    "reference_preservation_evidence": {
+      "path": "dev-tools/cross-market-yahoo/us_probe/review/drg_metadata_binding_review_20261007/final_ref_correction_preservation_v1.json",
+      "sha256": "4caa73c851c06f0849449af7a5e015270c9d06df80776596087d55bb0234e122"
+    },
+    "pre_release_actual_baseline": {
+      "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/pre_drg_correction_actual_baseline.json",
+      "sha256": "c8368fd1716731ec35adf57dbd4cc86b0dcf337cb2b796d31041f0cdd279b90c",
+      "actual_runtime_revision": "037f306d7b3b6957e33011e40744f755151a7b49"
+    },
+    "regression_check": {
+      "test": "test_original_drg_scope_uses_its_own_market_cap_methodology",
+      "failed_before_correction_on_wrong_DGE_url": true,
+      "reference_and_state_checks_passed_after_correction": 50,
+      "ruff_check_and_format": "passed"
+    },
+    "new_corrected_reference_deployment_status": "verified_actual_a2_production_and_two_new_full_cycles",
+    "actual_deployed_revision": "a2c89213b526278847a2e6d362fcea75bc1b4896",
+    "actual_production_acceptance": {
+      "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/a2c8921_drg_reference_production_final_acceptance.json",
+      "sha256": "4218ee91ba9b1dc948cfdce92c197e3bf4b6c2ac2dd2b92ec07e6ba47f2c112a",
+      "checked_at_utc": "2026-10-07T08:40:45.064572+00:00"
+    }
+  },
+  "current_history_database_readback": {
+    "checked_at_utc": "2026-10-07T08:27:49.805524+00:00",
+    "finished_at_utc": "2026-10-07T08:28:08.924349+00:00",
+    "scope": "Actual readonly native Greptime SELECT aggregates and18 previously RAW-verified source keys; no DDL/write/source API. Not new-production-cycle acceptance.",
+    "status": "current_database_counts_dates_and18_source_keys_all18_fields_exact",
+    "source_api_requests": 0,
+    "queries": 2,
+    "massive_original_indices": 124,
+    "massive_actual_database_rows": 8854906,
+    "sample_keys": 18,
+    "columns_per_key": 18,
+    "differences": [],
+    "original_evidence": {
+      "path": "dev-tools/cross-market-yahoo/root_current_gap_probe/current_history_sql_readback.json",
+      "sha256": "8fe9a8001b7113d58cf069ff0b03338a903af87d8032ba6ff71b1c1582388c8c"
+    }
+  },
+  "current_gap_verification": {
+    "checked_at_utc": "2026-10-07T07:54:21.706725+00:00",
+    "account_plan": "Indices Basic, user confirmed enabled before these requests",
+    "authenticated_requests": 24,
+    "minimum_request_spacing_seconds_observed": 13.001643896102905,
+    "maximum_requests_in_any_60_seconds_observed": 5,
+    "rate_limited_responses": 0,
+    "aggregate_permission_denied_requests": 18,
+    "snapshot_group_permission_denied_requests": 1,
+    "original_drg_fullname_catalog_queries": 4,
+    "original_drg_fullname_catalog_results": 0,
+    "sox_same_account_2023_positive_control": {
+      "actual_parsed_bars": 158,
+      "source_first_date": "2023-03-06",
+      "source_last_date": "2023-03-07",
+      "http_status": 200,
+      "raw_status": "OK",
+      "not_ingested_again": true
+    },
+    "official_basic_scope": {
+      "url": "https://massive.com/knowledge-base/article/are-all-indices-available-through-the-basic-subscription-tier",
+      "csv_url": "https://docs.google.com/spreadsheets/d/1nJtgUaHeqghPthhYUcNDBi_22lae3zPnOTWy3dCg0KM/export?format=csv&gid=0",
+      "saved_csv_sha256": "c013ef0c3ddb63da7e6cf130f89649cd068b902bb5f3c5e0cbf7a2fbc3a01238",
+      "exact_six_tickers_present": [
+        "I:DJUSAL",
+        "I:DJUSCF",
+        "I:DJUSDB",
+        "I:DJUSHD",
+        "I:DJUSNF",
+        "I:DWCFRP"
+      ]
+    },
+    "conclusion": "Current activated account denies these six candidate values, despite their inclusion in the official Basic list. Both historical aggregates and a grouped snapshot request were denied. Cause unresolved: no claim that buying/upgrading necessarily resolves it. The same account actually returned original SOX2023 five-minute bars.",
+    "drg_conclusion": "No exact match in the complete saved catalog or four current owner-fullname active/inactive queries. This is not permanent provider-unsupported proof. ICE original DRG is market-cap weighted; DGE is not a permitted substitute. No free authorized DRG2023 minute download demonstrated.",
+    "no_purchase_upgrade_or_substitution": true,
+    "requests": [
+      {
+        "label": "DJUSAL_2023",
+        "requested_at_utc": "2026-10-07T07:45:23.794892+00:00",
+        "completed_at_utc": "2026-10-07T07:45:24.422194+00:00",
+        "path": "/v2/aggs/ticker/I%3ADJUSAL/range/5/minute/2023-03-06/2023-03-07",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "d2d2a1e4132d00370ff956457df3a0419e7fd452c58990c0ad2ae0e2b6d9c81b",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:45:23 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSAL_2023.json",
+        "receipt_sha256": "073bd5c3b27316901e369b521d5d4824290e9d0fc86db94017e89de7ccbac3c5",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSAL_2023.body",
+        "raw_sha256": "d2d2a1e4132d00370ff956457df3a0419e7fd452c58990c0ad2ae0e2b6d9c81b"
+      },
+      {
+        "label": "DJUSAL_2024",
+        "requested_at_utc": "2026-10-07T07:45:36.806410+00:00",
+        "completed_at_utc": "2026-10-07T07:45:37.393761+00:00",
+        "path": "/v2/aggs/ticker/I%3ADJUSAL/range/5/minute/2024-06-03/2024-06-04",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "6d095fe64cd781b1a144df1d8324314d1b665016a45403011248d9402bc49bce",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:45:36 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSAL_2024.json",
+        "receipt_sha256": "1527404d5bd3e87cfc037af1b6acc89a8a60b29a2120da1ae3de98107ad28a85",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSAL_2024.body",
+        "raw_sha256": "6d095fe64cd781b1a144df1d8324314d1b665016a45403011248d9402bc49bce"
+      },
+      {
+        "label": "DJUSAL_recent",
+        "requested_at_utc": "2026-10-07T07:45:49.808054+00:00",
+        "completed_at_utc": "2026-10-07T07:45:50.447251+00:00",
+        "path": "/v2/aggs/ticker/I%3ADJUSAL/range/5/minute/2026-10-01/2026-10-02",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "265758dca562a306b32595ec8bc70fd8ad19cd3c3ab44f368c0edc8e75a5551e",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:45:49 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSAL_recent.json",
+        "receipt_sha256": "e43882408a2beb28f8b61732ccd8cae9b27c8cf5be5863f12c3ff04ebe481550",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSAL_recent.body",
+        "raw_sha256": "265758dca562a306b32595ec8bc70fd8ad19cd3c3ab44f368c0edc8e75a5551e"
+      },
+      {
+        "label": "DJUSCF_2023",
+        "requested_at_utc": "2026-10-07T07:46:02.810181+00:00",
+        "completed_at_utc": "2026-10-07T07:46:03.499260+00:00",
+        "path": "/v2/aggs/ticker/I%3ADJUSCF/range/5/minute/2023-03-06/2023-03-07",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "0e47d185506f0664b079b0e47ff52dff6da00ad6da9c3cfa257bfc680ea9224a",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:46:02 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSCF_2023.json",
+        "receipt_sha256": "f8aff94246f8272d2a705bdcd750976532b5a7bceb778b014529a5f6a3d7f29a",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSCF_2023.body",
+        "raw_sha256": "0e47d185506f0664b079b0e47ff52dff6da00ad6da9c3cfa257bfc680ea9224a"
+      },
+      {
+        "label": "DJUSCF_2024",
+        "requested_at_utc": "2026-10-07T07:46:15.820841+00:00",
+        "completed_at_utc": "2026-10-07T07:46:16.744058+00:00",
+        "path": "/v2/aggs/ticker/I%3ADJUSCF/range/5/minute/2024-06-03/2024-06-04",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "f6a0431402af0b05ac77f6d6294776d391976e9a5e0c046f56c67e3eec8cd39a",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:46:16 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSCF_2024.json",
+        "receipt_sha256": "12846067578a075d388fcf6cf7989551b8f6f6c9a1898a7dce08628927acbd7e",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSCF_2024.body",
+        "raw_sha256": "f6a0431402af0b05ac77f6d6294776d391976e9a5e0c046f56c67e3eec8cd39a"
+      },
+      {
+        "label": "DJUSCF_recent",
+        "requested_at_utc": "2026-10-07T07:46:28.831671+00:00",
+        "completed_at_utc": "2026-10-07T07:46:29.940622+00:00",
+        "path": "/v2/aggs/ticker/I%3ADJUSCF/range/5/minute/2026-10-01/2026-10-02",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "9bbcbbe75f155bd1f07b8e1109abe97305f806c6d9862ebd5753f716dab48bb1",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:46:29 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSCF_recent.json",
+        "receipt_sha256": "a6ae8f3967ddc280f66a4b0b127226179593a0550b474930e8ab45c6a3268430",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSCF_recent.body",
+        "raw_sha256": "9bbcbbe75f155bd1f07b8e1109abe97305f806c6d9862ebd5753f716dab48bb1"
+      },
+      {
+        "label": "DJUSDB_2023",
+        "requested_at_utc": "2026-10-07T07:46:41.844032+00:00",
+        "completed_at_utc": "2026-10-07T07:46:42.362031+00:00",
+        "path": "/v2/aggs/ticker/I%3ADJUSDB/range/5/minute/2023-03-06/2023-03-07",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "2de4a5399b33ae78c9bfd1d2cdff71e43a47a7202596120f195326f241aa9e64",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:46:41 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSDB_2023.json",
+        "receipt_sha256": "5b75efaf798135aeeb5ece3a5cb9f1740941d8c29b173566407517220e6a3774",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSDB_2023.body",
+        "raw_sha256": "2de4a5399b33ae78c9bfd1d2cdff71e43a47a7202596120f195326f241aa9e64"
+      },
+      {
+        "label": "DJUSDB_2024",
+        "requested_at_utc": "2026-10-07T07:46:54.858762+00:00",
+        "completed_at_utc": "2026-10-07T07:46:55.701262+00:00",
+        "path": "/v2/aggs/ticker/I%3ADJUSDB/range/5/minute/2024-06-03/2024-06-04",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "ab79a469c3872b0260a1d6db1b70671d4ac3873d60478ec22031c6800457a85b",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:46:55 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSDB_2024.json",
+        "receipt_sha256": "b98d855ef3847d7073e42ec1d0bf2b73bf61e410b4680ed2f807608409ab8884",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSDB_2024.body",
+        "raw_sha256": "ab79a469c3872b0260a1d6db1b70671d4ac3873d60478ec22031c6800457a85b"
+      },
+      {
+        "label": "DJUSDB_recent",
+        "requested_at_utc": "2026-10-07T07:47:07.870473+00:00",
+        "completed_at_utc": "2026-10-07T07:47:08.371989+00:00",
+        "path": "/v2/aggs/ticker/I%3ADJUSDB/range/5/minute/2026-10-01/2026-10-02",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "e94960a32675836dbbb9bd13581017fb3707681bcef77bc1b63c1eed4fb4501d",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:47:07 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSDB_recent.json",
+        "receipt_sha256": "00ff55f8a35a59b35076e39b127da7cc5b191b2745b43e7d0def277943e3a4f6",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSDB_recent.body",
+        "raw_sha256": "e94960a32675836dbbb9bd13581017fb3707681bcef77bc1b63c1eed4fb4501d"
+      },
+      {
+        "label": "DJUSHD_2023",
+        "requested_at_utc": "2026-10-07T07:47:20.877169+00:00",
+        "completed_at_utc": "2026-10-07T07:47:21.399595+00:00",
+        "path": "/v2/aggs/ticker/I%3ADJUSHD/range/5/minute/2023-03-06/2023-03-07",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "f2fe16ffc47970aa44f05239f396f40fd848ba5bbf46b8e2a50f9cc7a2a54977",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:47:20 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSHD_2023.json",
+        "receipt_sha256": "c2d353d63c6d1bbd1a255c855c69225caee45effd3276cfffcc0a8530dcc86c1",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSHD_2023.body",
+        "raw_sha256": "f2fe16ffc47970aa44f05239f396f40fd848ba5bbf46b8e2a50f9cc7a2a54977"
+      },
+      {
+        "label": "DJUSHD_2024",
+        "requested_at_utc": "2026-10-07T07:47:33.883477+00:00",
+        "completed_at_utc": "2026-10-07T07:47:34.820148+00:00",
+        "path": "/v2/aggs/ticker/I%3ADJUSHD/range/5/minute/2024-06-03/2024-06-04",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "72fe03187737c92979b970c948c1f6c8f330e43837e54b67ac56e6036340285f",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:47:34 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSHD_2024.json",
+        "receipt_sha256": "70261e949d457fee07661e3ec003dc0d8c1aa98b6050aa297385bb0527210d8c",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSHD_2024.body",
+        "raw_sha256": "72fe03187737c92979b970c948c1f6c8f330e43837e54b67ac56e6036340285f"
+      },
+      {
+        "label": "DJUSHD_recent",
+        "requested_at_utc": "2026-10-07T07:47:46.890948+00:00",
+        "completed_at_utc": "2026-10-07T07:47:47.799053+00:00",
+        "path": "/v2/aggs/ticker/I%3ADJUSHD/range/5/minute/2026-10-01/2026-10-02",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "2414b04ac495334a209ef2aadee7d172da55f1b48f13a5c22bb14d4175b625c5",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:47:47 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSHD_recent.json",
+        "receipt_sha256": "ea02147ece5a0ab4ee1b770563f9f13aabebfd1d0448762906bbd023e7c5ee9c",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSHD_recent.body",
+        "raw_sha256": "2414b04ac495334a209ef2aadee7d172da55f1b48f13a5c22bb14d4175b625c5"
+      },
+      {
+        "label": "DJUSNF_2023",
+        "requested_at_utc": "2026-10-07T07:47:59.899497+00:00",
+        "completed_at_utc": "2026-10-07T07:48:00.537739+00:00",
+        "path": "/v2/aggs/ticker/I%3ADJUSNF/range/5/minute/2023-03-06/2023-03-07",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "c8446d7b862171bc08e0a337ebbdd1d13d47114b5aa930e4f890fb75407d8b50",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:47:59 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSNF_2023.json",
+        "receipt_sha256": "13c0c4a4155bee2308d5c75703ad387f1cec7d2eab09b118328ed0b468399a42",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSNF_2023.body",
+        "raw_sha256": "c8446d7b862171bc08e0a337ebbdd1d13d47114b5aa930e4f890fb75407d8b50"
+      },
+      {
+        "label": "DJUSNF_2024",
+        "requested_at_utc": "2026-10-07T07:48:12.914129+00:00",
+        "completed_at_utc": "2026-10-07T07:48:13.747893+00:00",
+        "path": "/v2/aggs/ticker/I%3ADJUSNF/range/5/minute/2024-06-03/2024-06-04",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "d4514ed805a6e8b1994284de7adc43d289d8d4697dc1858b3bcb348b9ca2431f",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:48:13 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSNF_2024.json",
+        "receipt_sha256": "fd4229007397369d4c014fc2ac1bccc0d3e6777aa39eb5fe2a0ff5a315bed9c6",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSNF_2024.body",
+        "raw_sha256": "d4514ed805a6e8b1994284de7adc43d289d8d4697dc1858b3bcb348b9ca2431f"
+      },
+      {
+        "label": "DJUSNF_recent",
+        "requested_at_utc": "2026-10-07T07:48:25.923106+00:00",
+        "completed_at_utc": "2026-10-07T07:48:26.425863+00:00",
+        "path": "/v2/aggs/ticker/I%3ADJUSNF/range/5/minute/2026-10-01/2026-10-02",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "02d33ba21a743738093c40b0793cbeebf89328c0cf1ea20b34e008ce48d9e3c7",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:48:25 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSNF_recent.json",
+        "receipt_sha256": "b670cac1f82b3c00fd5af8d9a07133c3e587dd4d72659f6144cb32fa4b2f40a7",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSNF_recent.body",
+        "raw_sha256": "02d33ba21a743738093c40b0793cbeebf89328c0cf1ea20b34e008ce48d9e3c7"
+      },
+      {
+        "label": "DWCFRP_2023",
+        "requested_at_utc": "2026-10-07T07:48:38.929546+00:00",
+        "completed_at_utc": "2026-10-07T07:48:39.434379+00:00",
+        "path": "/v2/aggs/ticker/I%3ADWCFRP/range/5/minute/2023-03-06/2023-03-07",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "03394f0dadbb08714f6b3799ab71b682659cd69d124061d2b7dcd70a683dbd86",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:48:38 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DWCFRP_2023.json",
+        "receipt_sha256": "9c5def1295613f11d46e524bbc4e5be3ffd3881955e8f548e81d8ea419cbf102",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DWCFRP_2023.body",
+        "raw_sha256": "03394f0dadbb08714f6b3799ab71b682659cd69d124061d2b7dcd70a683dbd86"
+      },
+      {
+        "label": "DWCFRP_2024",
+        "requested_at_utc": "2026-10-07T07:48:51.931898+00:00",
+        "completed_at_utc": "2026-10-07T07:48:52.620487+00:00",
+        "path": "/v2/aggs/ticker/I%3ADWCFRP/range/5/minute/2024-06-03/2024-06-04",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "93bd66c3a7b2378087af21f8baa269ced830d31ae9e58aa60b0fa266482a8c14",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:48:51 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DWCFRP_2024.json",
+        "receipt_sha256": "0a4c1cac4f4f0fe4d636e885edbc534be3e1bc7d4ac5f73802488dfad4f7bb35",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DWCFRP_2024.body",
+        "raw_sha256": "93bd66c3a7b2378087af21f8baa269ced830d31ae9e58aa60b0fa266482a8c14"
+      },
+      {
+        "label": "DWCFRP_recent",
+        "requested_at_utc": "2026-10-07T07:49:04.941769+00:00",
+        "completed_at_utc": "2026-10-07T07:49:05.946989+00:00",
+        "path": "/v2/aggs/ticker/I%3ADWCFRP/range/5/minute/2026-10-01/2026-10-02",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "96ace1ace5a8631e293268eae73d4bc89d88c95cfaec5e67b1a931fa8079c8fc",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:49:05 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DWCFRP_recent.json",
+        "receipt_sha256": "ed6a06f505226df0c180d20fc49654b6a417641bb3cb2e4239c4aa06218d68db",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DWCFRP_recent.body",
+        "raw_sha256": "96ace1ace5a8631e293268eae73d4bc89d88c95cfaec5e67b1a931fa8079c8fc"
+      },
+      {
+        "label": "drg_fullname",
+        "requested_at_utc": "2026-10-07T07:49:17.953757+00:00",
+        "completed_at_utc": "2026-10-07T07:49:19.283385+00:00",
+        "path": "/v3/reference/tickers",
+        "params": {
+          "market": "indices",
+          "search": "NYSE Arca Pharmaceutical",
+          "active": "true",
+          "limit": 1000
+        },
+        "http_status": 200,
+        "status": "OK",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "empty",
+        "message": null,
+        "body_sha256": "89b32a36e4aad796b165704c8369442901812413c14adb814306befcd8cdef8f",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:49:18 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/drg_fullname.json",
+        "receipt_sha256": "113f57e0daad831ad4233cf5f6d1ebaeac2f56309e5380f8c20560fd3f847e37",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/drg_fullname.body",
+        "raw_sha256": "89b32a36e4aad796b165704c8369442901812413c14adb814306befcd8cdef8f"
+      },
+      {
+        "label": "drg_owner_fullname",
+        "requested_at_utc": "2026-10-07T07:49:30.962272+00:00",
+        "completed_at_utc": "2026-10-07T07:49:31.930132+00:00",
+        "path": "/v3/reference/tickers",
+        "params": {
+          "market": "indices",
+          "search": "Arca Pharmaceutical Index",
+          "active": "true",
+          "limit": 1000
+        },
+        "http_status": 200,
+        "status": "OK",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "empty",
+        "message": null,
+        "body_sha256": "7da2ca629f462df2f7f2710d9f4a0b61e5736634ed4242678e984d7b38f81ede",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:49:31 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/drg_owner_fullname.json",
+        "receipt_sha256": "ce83da03d23e75e37ed62e2bcf5cf856a8cdc2d30450066970c3bf2efb9e659e",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/drg_owner_fullname.body",
+        "raw_sha256": "7da2ca629f462df2f7f2710d9f4a0b61e5736634ed4242678e984d7b38f81ede"
+      },
+      {
+        "label": "drg_fullname_inactive",
+        "requested_at_utc": "2026-10-07T07:49:43.976222+00:00",
+        "completed_at_utc": "2026-10-07T07:49:44.962030+00:00",
+        "path": "/v3/reference/tickers",
+        "params": {
+          "market": "indices",
+          "search": "NYSE Arca Pharmaceutical",
+          "active": "false",
+          "limit": 1000
+        },
+        "http_status": 200,
+        "status": "OK",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "empty",
+        "message": null,
+        "body_sha256": "34373b1f15d826dfa285cce2fb6e9b66aa2b2e7aaa70524a5d00e25883127447",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:49:44 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/drg_fullname_inactive.json",
+        "receipt_sha256": "db62766559324f73affd8e10eb843b1ec29bb868dcbb7e829554a60c923deba8",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/drg_fullname_inactive.body",
+        "raw_sha256": "34373b1f15d826dfa285cce2fb6e9b66aa2b2e7aaa70524a5d00e25883127447"
+      },
+      {
+        "label": "drg_owner_fullname_inactive",
+        "requested_at_utc": "2026-10-07T07:49:56.980563+00:00",
+        "completed_at_utc": "2026-10-07T07:49:57.646978+00:00",
+        "path": "/v3/reference/tickers",
+        "params": {
+          "market": "indices",
+          "search": "Arca Pharmaceutical Index",
+          "active": "false",
+          "limit": 1000
+        },
+        "http_status": 200,
+        "status": "OK",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "empty",
+        "message": null,
+        "body_sha256": "b51a0c5d481dc727045cc35458250b20c378a9ec265617379ea4297f48bc3218",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:49:56 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/drg_owner_fullname_inactive.json",
+        "receipt_sha256": "2227560a72bad2807c491b45fdf5b76eca98b71ea0fb1c5ea90fa97375abb6c7",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/drg_owner_fullname_inactive.body",
+        "raw_sha256": "b51a0c5d481dc727045cc35458250b20c378a9ec265617379ea4297f48bc3218"
+      },
+      {
+        "label": "dow_snapshot_control",
+        "requested_at_utc": "2026-10-07T07:50:56.134620+00:00",
+        "completed_at_utc": "2026-10-07T07:50:57.192405+00:00",
+        "path": "/v3/snapshot/indices",
+        "params": {
+          "ticker.any_of": "I:DJUSAL,I:DJUSCF,I:DJUSDB,I:DJUSHD,I:DJUSNF,I:DWCFRP"
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "3d546f8efc5b137b63c6e9f2c91de540477f09a59018cf567cdd957617293f9e",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:50:56 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/dow_snapshot_control.json",
+        "receipt_sha256": "3ac33eaf6d9bad3801344e87cb19145a032237031d4948b32444da1ff5942569",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/dow_snapshot_control.body",
+        "raw_sha256": "3d546f8efc5b137b63c6e9f2c91de540477f09a59018cf567cdd957617293f9e"
+      },
+      {
+        "label": "sox_2023_positive_control",
+        "requested_at_utc": "2026-10-07T07:51:09.145548+00:00",
+        "completed_at_utc": "2026-10-07T07:51:10.604884+00:00",
+        "path": "/v2/aggs/ticker/I%3ASOX/range/5/minute/2023-03-06/2023-03-07",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 200,
+        "status": "OK",
+        "ticker": "I:SOX",
+        "results_count": 158,
+        "query_count": 782,
+        "classification": "data",
+        "message": null,
+        "body_sha256": "e91e962b1cfb09e2a9f2f83b18c1efcd12869a46d91431a20f267189252cc43c",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:51:09 GMT",
+        "count": 158,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/sox_2023_positive_control.json",
+        "receipt_sha256": "98a1db5a1aff0596f33da6c48d4ec727271a37243828a4a01bdb1b5d0dd5f11d",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/sox_2023_positive_control.body",
+        "raw_sha256": "e91e962b1cfb09e2a9f2f83b18c1efcd12869a46d91431a20f267189252cc43c"
+      }
     ],
-    "old_source_close": 1215.5789794921875,
-    "current_source_close": 1215.5799560546875,
-    "observed_close_revision": 0.0009765625,
-    "real_source_ts_ms_preserved": 1791293400000,
-    "current_raw17_non_fetch_fields_exact_db": true,
-    "volume": 0,
-    "is_final": null,
-    "drg_pending": false,
-    "drg_gaps": [],
-    "mechanism_boundary": "Actual provider filled OHLC and revised close when session metadata rolled. This is normal full-OHLC daily parsing; not proof the old zero-OHL guard accepts an old day with rolled metadata. No such source failure was observed.",
-    "revision": "037f306d7b3b6957e33011e40744f755151a7b49",
-    "observation_scope": "One real completed 170-index production cycle plus independent native source/DRG database proof across NY midnight; not a future SLA."
+    "source_data_and_database_counts_not_refreshed_by_this_permission_probe": true
+  },
+  "legacy_host_controls": {
+    "checked_at_utc": "2026-10-07T08:37:44.316754+00:00",
+    "api_host": "https://api.polygon.io",
+    "documented_legacy_alias": "https://www.massive.com/blog/polygon-is-now-massive",
+    "production_mutations": 0,
+    "results": [
+      {
+        "label": "legacy_DJUSAL_2023",
+        "requested_at_utc": "2026-10-07T08:37:30.346246+00:00",
+        "completed_at_utc": "2026-10-07T08:37:31.675690+00:00",
+        "path": "/v2/aggs/ticker/I%3ADJUSAL/range/5/minute/2023-03-06/2023-03-07",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "d601358d0126857db5903d5e3e8e3a8b69a5b8c34c1a0e38dd164e9314e91c80",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 08:37:30 GMT",
+        "count": null,
+        "next_url_present": false,
+        "api_host": "https://api.polygon.io",
+        "request_url": "https://api.polygon.io/v2/aggs/ticker/I%3ADJUSAL/range/5/minute/2023-03-06/2023-03-07"
+      },
+      {
+        "label": "legacy_SOX_2023",
+        "requested_at_utc": "2026-10-07T08:37:43.348340+00:00",
+        "completed_at_utc": "2026-10-07T08:37:44.281840+00:00",
+        "path": "/v2/aggs/ticker/I%3ASOX/range/5/minute/2023-03-06/2023-03-07",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 200,
+        "status": "OK",
+        "ticker": "I:SOX",
+        "results_count": 158,
+        "query_count": 782,
+        "classification": "data",
+        "message": null,
+        "body_sha256": "24592294aa6b81bce8768528b4e1f74c94390f1d6b0d3505d7ac61613d403b41",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 08:37:43 GMT",
+        "count": 158,
+        "next_url_present": false,
+        "api_host": "https://api.polygon.io",
+        "request_url": "https://api.polygon.io/v2/aggs/ticker/I%3ASOX/range/5/minute/2023-03-06/2023-03-07"
+      }
+    ],
+    "conclusion": "Official legacy route is currently working for SOX2023, while sampled original DJUSAL2023 remains permission denied. No migration-host workaround demonstrated; other five legacy candidates not individually re-tested.",
+    "original_evidence": {
+      "path": "dev-tools/cross-market-yahoo/root_current_gap_probe/legacy_controls_summary.json",
+      "sha256": "7fe15f469606e109c8e2295ae8add6f47e8323fad5c8a8f1a6d542a3e9164c9c"
+    }
   },
   "massive_history_backfill": {
     "status": "all124_adopted_same_price_indices_requested_windows_completed_and_verified",
@@ -454,14 +1114,14 @@
     "coverage_documents": {
       "json": {
         "path": "docs/cross-market-index-coverage.json",
-        "sha256": "dce84ffbcc8680b21f070f96d08f5f8d94a21b6d740e19ef21d5fc4a8b6415f3",
-        "bytes": 2791697,
+        "sha256": "14156a3e0d5e85dbf72d2b93338c4f43c85b08039590dbc2fe4fb4b5a6bf421d",
+        "bytes": 2795722,
         "storage": "tracked_delivery_artifact"
       },
       "html": {
         "path": "docs/cross-market-index-coverage.html",
-        "sha256": "09f15986aae83b738a44d85a601a4ea777513287ae81257fbf47e464455ca872",
-        "bytes": 483651,
+        "sha256": "6536d3a489a463fb77524ba6acba0c8dcea749edf303aa79cfbc8c9a1f1aab5e",
+        "bytes": 484329,
         "storage": "tracked_delivery_artifact"
       },
       "original_index_count": 170,
@@ -469,85 +1129,631 @@
     },
     "original_index_ids_symbols_and_original_provider_reference_preserved": true
   },
-  "overall_requested_goal_status": "incomplete_seven_original_us_historical_minute_gaps",
-  "current_history_gap_verification": {
-    "checked_at_utc": "2026-10-07T07:54:21.706725+00:00",
-    "account_plan": "Indices Basic, user confirmed enabled before these requests",
-    "authenticated_requests": 24,
-    "minimum_request_spacing_seconds_observed": 13.001643896102905,
-    "maximum_requests_in_any_60_seconds_observed": 5,
-    "rate_limited_responses": 0,
-    "aggregate_permission_denied_requests": 18,
-    "snapshot_group_permission_denied_requests": 1,
-    "original_drg_fullname_catalog_queries": 4,
-    "original_drg_fullname_catalog_results": 0,
-    "sox_same_account_2023_positive_control": {
-      "actual_parsed_bars": 158,
-      "source_first_date": "2023-03-06",
-      "source_last_date": "2023-03-07",
-      "http_status": 200,
-      "raw_status": "OK",
-      "not_ingested_again": true
+  "kr_hour_history_seed": {
+    "market": "KR",
+    "original_source_observed_revision": "b07d77308f744ca36357ede6afa4761adb1c5406",
+    "preservation_checked_at_utc": "2026-10-07T00:48:44.193317+00:00",
+    "preservation_running_revision": "037f306d7b3b6957e33011e40744f755151a7b49",
+    "index_count": 39,
+    "requested_retention_days": 730,
+    "update_mode": "history_seed",
+    "source_point_keys": 113763,
+    "hour_bar_keys": 113724,
+    "hour_quote_snapshot_keys": 39,
+    "null_hour_close_keys": 434,
+    "all_keys_and_all18fields_exact": true,
+    "direct_raw_ohlcv_fields_compared": 568815,
+    "first_actual_trade_date": "2024-10-07",
+    "last_actual_trade_date": "2026-10-06",
+    "first_bar_ms": 1728259200000,
+    "last_bar_ms": 1791262800000,
+    "original_archive_files_copied_and_sha_verified": 39,
+    "tail_quotes_kept_separate": true,
+    "all39_source_archives_and_seed_states_byte_identical": true,
+    "completed_seed_not_fetched_again_each_cycle": true,
+    "original_source_time_and_coverage_target_preserved": true,
+    "all10_runtime_files_byte_identical_prior_bd41": true,
+    "9_runtime_files_byte_identical_original_b07": true,
+    "shared_hourly_dependency_ast_identical_original_b07": {
+      "YahooIndexError": true,
+      "_number": true,
+      "YahooChartTransport": true,
+      "all_outside_daily_parse_and_new_struct_import_identical": true
     },
-    "official_basic_scope": {
-      "url": "https://massive.com/knowledge-base/article/are-all-indices-available-through-the-basic-subscription-tier",
-      "csv_url": "https://docs.google.com/spreadsheets/d/1nJtgUaHeqghPthhYUcNDBi_22lae3zPnOTWy3dCg0KM/export?format=csv&gid=0",
-      "saved_csv_sha256": "c013ef0c3ddb63da7e6cf130f89649cd068b902bb5f3c5e0cbf7a2fbc3a01238",
-      "exact_six_tickers_present": [
-        "I:DJUSAL",
-        "I:DJUSCF",
-        "I:DJUSDB",
-        "I:DJUSHD",
-        "I:DJUSNF",
-        "I:DWCFRP"
+    "pending_count_at_preservation_read_only": 0,
+    "backtest_bar_data_kind": "hour_bar"
+  },
+  "historical_037_acceptance": {
+    "schema_version": 1,
+    "record_generated_at_utc": "2026-10-07T02:20:06.806112+00:00",
+    "status": "verified_recorded_037_collection_and_adopted_massive_backfill_scope",
+    "scope": "Historical acceptance observations for deployed 037 Yahoo collection and completed124 adopted same-index Massive request windows; not a live status endpoint or all170 original indices available from Massive.",
+    "revision": "037f306d7b3b6957e33011e40744f755151a7b49",
+    "branch": "refactor/cleanup-v15-only",
+    "ci": {
+      "run_id": 37553331701,
+      "release_job_id": 112574435038,
+      "url": "https://github.com/WidgetA/A-share-quant-trading/actions/runs/37553331701",
+      "conclusion": "success",
+      "completed_success_utc": "2026-10-07T00:51:16Z"
+    },
+    "deployment": {
+      "entities_checked_at_utc": "2026-10-07T00:57:33.411847+00:00",
+      "two_collectors_actual_running_same_revision": true,
+      "fc_actual_revision": "037f306d7b3b6957e33011e40744f755151a7b49",
+      "collectors_without_proxy": true,
+      "runtime_source_and_reference_file_count": 18,
+      "runtime_total_files_including_vendor": 1068,
+      "runtime_bundle_sha256": "b0a6a691e11feeda238f2f71ea3830a8942018d0b00894d2c4b9742dd5dac7c9",
+      "runtime_archive_sha256": "71b9fc9b1d2a57b7c1a2254626fbac19b57ab14cc001586e2ba64bee04d7341f",
+      "compose_sha256": "b3e38b453bfd167b7abb89c4ce2e29a54b7c22013cd2feab4ace6b659f26ea43",
+      "cloud_worker_total_files": 817,
+      "cloud_worker_zip_sha256": "01022d680b2e5a96c86bc7699e9cda407e3e122f2050a820d49f7561f91200ae",
+      "cloud_zip_exact_uploaded_bytes": true,
+      "actual_runtime_and_cloud_files_match_committed_revision": true,
+      "runtime_source_files_sha256": {
+        "src/data/yahoo_indices.py": "4ee26b3f5bdc0c59c1dc1f03ff94e76108871dbfcc5317fa1f091d431edd51ec",
+        "src/data/yahoo_intraday_indices.py": "239d76740d23ad72ceb68784d1c02264452dd22f9f2044e8616e1f2dad2409b8",
+        "src/data/fc_yahoo_indices.py": "64f93d0e7726f48a3f01d463d319a45844f61e99a7430070d2fa7ddd7e33f698",
+        "src/data/fc_intraday_indices.py": "6efe0ac84e308b5867776aac3ea7c61ef915bf4a3ff211df528f3a44a3382ba7",
+        "src/data/cross_market_store.py": "453c93f457c754876eec4e5a7dc87d7d4a6e9d3eb6899ebea04934946d7abf8c",
+        "src/data/cross_market_ingest.py": "dec0cc37d404db5dbc84586d2c6675528b97f7c77c7f426d94b0f6188426925c",
+        "src/data/cross_market_intraday_ingest.py": "2297a93af233f17c499724cf2b0e15177d802bb8c84e4f8fc9e1dc2e54c47c1b",
+        "src/data/massive_indices.py": "6fa59500406427dfd9a365779aba5d2571c1ddeadb5b76b94daf3c7de1e298c3",
+        "src/data/cross_market_massive_ingest.py": "d67194cfb8549e6f65b664c82c598af09a304a2531dc1c4b1b6c5d46f392e3b3",
+        "scripts/collect_cross_market_indices.py": "ec207b626f7f01afd024ff448afbb416aa35a472979c777b41475ddc2bd7ad6f",
+        "scripts/collect_cross_market_intraday.py": "c111a8f9a3d37d753ff4b3ad79d87d290607cbd9680537fdae9787c9a6607641",
+        "scripts/backfill_cross_market_massive.py": "cf559db00144b6f1d1465b369d66e061df4f280b8d3b1440128a27dce4af7169",
+        "src/data/reference/cross_market/industry_boards.json": "498f0bb1d9217ac78d6ce80d4891f4c1ca810502a41b30a5209e8006d8b5a2d7",
+        "src/data/reference/cross_market/industry_indices.json": "8e14dd0f8346fae374dd8adaac3eb0a48254967b2dc82c5548635922b7c628e5",
+        "src/data/reference/cross_market/intraday_indices.json": "b082bac9f9cfa667834960f8c1236d34ab1445a5ce8d37684bb0e1e80583c252",
+        "src/data/reference/cross_market/massive_indices.json": "d0a539a77f34d767d718eae1baea96d9e802ce574877c3feef18cd9010026948",
+        "src/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "src/data/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "worker_source_files_sha256": {
+        "handler.py": "66258ea8d101f583c0a0bdaed8d5ad037ac9b6aa9d5f95a9243afa0c87f03c8b",
+        "src/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "src/data/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "src/data/yahoo_indices.py": "4ee26b3f5bdc0c59c1dc1f03ff94e76108871dbfcc5317fa1f091d431edd51ec",
+        "src/data/yahoo_intraday_indices.py": "239d76740d23ad72ceb68784d1c02264452dd22f9f2044e8616e1f2dad2409b8",
+        "src/data/fc_yahoo_worker.py": "183455f32ae3550801dd77e637a7d1cbf58b167b2a4b0b516a51a1ddccdf9601"
+      },
+      "fc_instance_concurrency_readback": null,
+      "requested_fc_instance_concurrency": 1,
+      "requested_concurrency_not_independently_confirmed": true,
+      "fc_function_name": "ashare_yahoo_indices_v15",
+      "fc_runtime": "python3.12"
+    },
+    "actual_037_cycles": {
+      "daily_series": 170,
+      "daily_completed_utc": [
+        "2026-10-07T00:50:37.217505327Z",
+        "2026-10-07T00:57:14.263990332Z"
+      ],
+      "intraday_series": 379,
+      "intraday_completed_utc": [
+        "2026-10-07T00:50:43.063589120Z",
+        "2026-10-07T00:57:55.116895008Z"
+      ],
+      "continuous_minute_series": 340,
+      "hour_history_seed_series": 39,
+      "two_cycles_each_independently_validated": true,
+      "all39_hour_seed_status_each_cycle": "previously_verified",
+      "minutes_advance_to_each_real_cycle_target": true,
+      "source_gaps_retained": true,
+      "daily_cycle_statuses": [
+        "verified",
+        "verified"
+      ],
+      "intraday_cycle_statuses": [
+        "verified_with_gaps",
+        "verified_with_gaps"
+      ],
+      "intraday_cycle_target_s": [
+        1791334071,
+        1791334543
+      ],
+      "intraday_replayed_source_rows": [
+        74,
+        0
       ]
     },
-    "conclusion": "Current activated account denies these six candidate values, despite their inclusion in the official Basic list. Both historical aggregates and a grouped snapshot request were denied. Cause unresolved: no claim that buying/upgrading necessarily resolves it. The same account actually returned original SOX2023 five-minute bars.",
-    "drg_conclusion": "No exact match in the complete saved catalog or four current owner-fullname active/inactive queries. This is not permanent provider-unsupported proof. ICE original DRG is market-cap weighted; DGE is not a permitted substitute. No free authorized DRG2023 minute download demonstrated.",
-    "no_purchase_upgrade_or_substitution": true,
-    "source_data_and_database_counts_not_refreshed_by_this_permission_probe": true,
-    "evidence_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/current_gap_evidence.json",
-    "evidence_sha256": "c8ca00601fc00fc761d9ef7df7747a8f598d4130723e8ef57321787be3b0492e"
+    "independent_database_readback": {
+      "mapping_business_json_and_keys_exact_rows": 268,
+      "price_columns_per_key": 18,
+      "daily_latest_source_keys_exact": 170,
+      "intraday_latest_source_keys_exact": 379,
+      "source_null_values_retained_not_zero_filled": true,
+      "actual_drg_native_source_nonfetch_fields_exact": 17,
+      "drg_fetched_at_retains_each_actual_fetch_time": true,
+      "observation_stage": "Original 037 acceptance before 04:00 UTC; the later midnight DRG RAW/SQL proof is recorded separately below."
+    },
+    "kr_hour_history_seed": {
+      "market": "KR",
+      "original_source_observed_revision": "b07d77308f744ca36357ede6afa4761adb1c5406",
+      "preservation_checked_at_utc": "2026-10-07T00:48:44.193317+00:00",
+      "preservation_running_revision": "037f306d7b3b6957e33011e40744f755151a7b49",
+      "index_count": 39,
+      "requested_retention_days": 730,
+      "update_mode": "history_seed",
+      "source_point_keys": 113763,
+      "hour_bar_keys": 113724,
+      "hour_quote_snapshot_keys": 39,
+      "null_hour_close_keys": 434,
+      "all_keys_and_all18fields_exact": true,
+      "direct_raw_ohlcv_fields_compared": 568815,
+      "first_actual_trade_date": "2024-10-07",
+      "last_actual_trade_date": "2026-10-06",
+      "first_bar_ms": 1728259200000,
+      "last_bar_ms": 1791262800000,
+      "original_archive_files_copied_and_sha_verified": 39,
+      "tail_quotes_kept_separate": true,
+      "all39_source_archives_and_seed_states_byte_identical": true,
+      "completed_seed_not_fetched_again_each_cycle": true,
+      "original_source_time_and_coverage_target_preserved": true,
+      "all10_runtime_files_byte_identical_prior_bd41": true,
+      "9_runtime_files_byte_identical_original_b07": true,
+      "shared_hourly_dependency_ast_identical_original_b07": {
+        "YahooIndexError": true,
+        "_number": true,
+        "YahooChartTransport": true,
+        "all_outside_daily_parse_and_new_struct_import_identical": true
+      },
+      "pending_count_at_preservation_read_only": 0,
+      "backtest_bar_data_kind": "hour_bar"
+    },
+    "original_services": {
+      "training_full_configuration_sha256_unchanged": "aebb943a8d5acb1774bc0d40d4e7a423de8419a20878b412b23f141ddf80c829",
+      "greptime_image_started_at_restart_count_unchanged": true
+    },
+    "boundaries": [
+      "Old3 daily pending RAW were not retained; no claim of retrospective full-field equality to those original batches.",
+      "4 daily source-gap series and minute/hour source NULL points retained; successful cycles do not mean provider has no gaps.",
+      "FC instance_concurrency readback null; requested1 not independently confirmed.",
+      "At the original 00:57 UTC acceptance, NY-midnight metadata rollover had not yet been observed. The later 04:03 production cycle and 04:05 native RAW now prove one actual rollover with provider-filled OHLC; no future SLA or old zero-OHL guard acceptance for a rolled old day is claimed.",
+      "Original hourly RAW/SQL acceptance belongs to b07; later preservation and cycles retain their own observed revisions.",
+      "Source NULL values are not replaced with zero or invented bars; real quote snapshots are distinct from hour/minute bars.",
+      "No claim of exchange-calendar every-minute/every-hour completeness, 2023 Yahoo minute/hour coverage or future availability. Massive completion is the124 adopted original-price indices and requested windows with actual source dates;6 candidate403/price-basis-pending indices and unmatched DRG/KR are not filled by substitutes.",
+      "Current Basic retry:18 aggregate windows and one grouped snapshot denied for the6 Dow candidates, despite official Basic-list inclusion; same-account SOX2023 actual158 bars. Four current original-DRG name searches returned200 empty. Seven original-US historical-minute gaps remain; no automatic paid upgrade or substitutes."
+    ],
+    "original_evidence_index": {
+      "production_037_summary": {
+        "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/037f306_production_final_acceptance.json",
+        "sha256": "e88780dd357489f9e07ecdb35b7fddd7a6c20a2eb09e671745ba191a09b49974",
+        "storage": "local_ignored_original_evidence"
+      },
+      "hour_037_preservation_summary": {
+        "path": "dev-tools/cross-market-yahoo/kr_probe/review/hour_037_current_preservation_acceptance_v1.json",
+        "sha256": "d75fa814cffb8aa618fd04d66e691441581913b3d17e89195151661381b32b06",
+        "storage": "local_ignored_original_evidence"
+      },
+      "ci": {
+        "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/037f306_ci_final.json",
+        "sha256": "4b8ec5e9453fa3de4e3fe748a79078ba03db44aff39418c3d7ced2c83dff2748",
+        "storage": "local_ignored_original_evidence"
+      },
+      "entities": {
+        "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/actual_037f306_final_release.json",
+        "sha256": "bae939b29ccfc585dfe7565a088639c19006c86d030af01f0c3a15026100bdea",
+        "storage": "local_ignored_original_evidence"
+      },
+      "new_cycles": {
+        "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/037f306_two_cycles_validated.json",
+        "sha256": "cb3444aed9db0b7c41f4c407a20c88494d02ad099b896ed31924060983cda83e",
+        "storage": "local_ignored_original_evidence"
+      },
+      "timestamped_safe_cycles": {
+        "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/037f306_safe_cycles.json",
+        "sha256": "c329c7327fc080a613556ddd7a3461e339eedeaa79f562bab16f143a56fdd5b5",
+        "storage": "local_ignored_original_evidence"
+      },
+      "latest_daily_all18": {
+        "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/037f306_daily_final_readback.json",
+        "sha256": "68145246a16e421d9705527a4f268ad365154740206f1dbf5622a7a157f37da5",
+        "storage": "local_ignored_original_evidence"
+      },
+      "formal_readback_after_two": {
+        "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/037f306_formal_readback_after_two_cycles.json",
+        "sha256": "f15723bef0bfa5a903ab416a4874956efbfdcead217607617a89c24d80159744",
+        "storage": "local_ignored_original_evidence"
+      },
+      "drg_source_and_db": {
+        "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/037f306_drg_native_to_db_comparison.json",
+        "sha256": "18875879f53c4cd14b5f28e2a454031d7308ce97abed06fa4137db9132d0da40",
+        "storage": "local_ignored_original_evidence"
+      },
+      "runtime_byte_lineage": {
+        "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/bd_to_037_runtime_byte_lineage.json",
+        "sha256": "c3cb8aedf2077600a6f8fa1aa96a0e3fa275cf2dfca9669ff40563bfaf4e6259",
+        "storage": "local_ignored_original_evidence"
+      },
+      "current_037_readonly_preservation": {
+        "path": "dev-tools/cross-market-yahoo/kr_probe/review/hour_final_preservation_20261007T004844193531Z.json",
+        "sha256": "0ffa05fdbcb83754d0c7de30dfcfb2f882a9fd5975ca6688fa522c5093ae7119",
+        "storage": "local_ignored_original_evidence"
+      },
+      "prior_bd41_actual_hour_acceptance": {
+        "path": "dev-tools/cross-market-yahoo/kr_probe/review/hour_bd41_final_acceptance_v1.json",
+        "sha256": "423b24b8aaa5f034643936a221ae178fd7107bc3edffc4e290b4331d4a3910ee",
+        "storage": "local_ignored_original_evidence"
+      },
+      "original_b07_source_to_db": {
+        "path": "dev-tools/cross-market-yahoo/kr_probe/review/hour_production_20261006T235153691530Z/hour_source_db_readback.json",
+        "sha256": "569be0d7c1ea904dfb382da3f718f68916677e555f01ffc1430091982819f027",
+        "storage": "local_ignored_original_evidence"
+      },
+      "ny_midnight_acceptance": {
+        "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/037_midnight_final_acceptance.json",
+        "sha256": "c7d0f47f5b0b777888b58dc488fbf09f4903ff1337b32c2b730dd7a74ea63cdc",
+        "storage": "local_ignored_original_evidence"
+      },
+      "ny_midnight_037_drg_post_midnight_20261007T0404.json": {
+        "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/037_drg_post_midnight_20261007T0404.json",
+        "sha256": "790ea1bd4bf040771ca7a56b8271c5c5241aef47ad513a415b0ed5208c30fdfe",
+        "storage": "local_ignored_original_evidence"
+      },
+      "ny_midnight_037_drg_midnight_actual_raw_and_db.json": {
+        "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/037_drg_midnight_actual_raw_and_db.json",
+        "sha256": "04a92696f774e2e367fca87e7059bb1bd4c18d3eb883d02835782bf78d2ff862",
+        "storage": "local_ignored_original_evidence"
+      },
+      "ny_midnight_drg_daily_native_midnight_20261007T0405_yahoo.body": {
+        "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/drg_daily_native_midnight_20261007T0405_yahoo.body",
+        "sha256": "9a08b487c8b5f8c9eca4820e3348ad7341b33d7f95755674ffdf20f32bbaaaf4",
+        "storage": "local_ignored_original_evidence"
+      },
+      "ny_midnight_drg_daily_native_midnight_20261007T0405.response": {
+        "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/drg_daily_native_midnight_20261007T0405.response",
+        "sha256": "b79a47fd4b827772a68f442e86e10bfacecbd4b93bf10735c7e92cc719e8064b",
+        "storage": "local_ignored_original_evidence"
+      },
+      "ny_midnight_037_drg_pre_midnight_20261007T0345.json": {
+        "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/037_drg_pre_midnight_20261007T0345.json",
+        "sha256": "a773281660eb8628cfd3c0004010b24d3b56d28db063452505c21f1f1ac548cf",
+        "storage": "local_ignored_original_evidence"
+      },
+      "massive_strict_final_audit": {
+        "path": "dev-tools/cross-market-yahoo/us_probe/review/massive_history_final_20261007T065601978957Z.json",
+        "sha256": "5115f6a88cd434aaa69bd067523b48b2a52ad411bfe8993bb531bf7f1f207aed",
+        "storage": "local_ignored_original_evidence",
+        "sha_scope": "Actual local audit bytes observed during this documentation update; future finalized audit changes require a new hash."
+      },
+      "massive_root_raw_numeric_sample_readback": {
+        "path": "dev-tools/cross-market-yahoo/root_history_final_sample_readback.json",
+        "sha256": "61c3c12c56b0a059bd40e95c7bbfa9b414e3998a63c570c0afe6cbd5f6004136",
+        "storage": "local_ignored_original_evidence"
+      },
+      "massive_run5_runtime_metadata": {
+        "path": "D:/CodexBuild/cross-market-fc-v15/massive-history-run5.runtime.json",
+        "sha256": "4189bc5e1d338d4685be41ea3fa07936e90bf089f6c988d1413ccee0962e4069",
+        "storage": "local_build_evidence_outside_repository"
+      }
+    },
+    "evidence_index_note": "Paths are relative to the repository and point to local ignored original evidence retained on this machine. SHA256 binds the originals; this committed summary contains no RAW price arrays or credentials.",
+    "record_updated_at_utc": "2026-10-07T08:18:54.702708+00:00",
+    "ny_midnight_actual_verification": {
+      "daily_cycle_completed_utc": "2026-10-07T04:03:03.836877609Z",
+      "daily_complete_indices": 170,
+      "daily_failures": 0,
+      "production_drg_source_fetched_at_utc": "2026-10-07T04:01:44.054Z",
+      "production_source_sha256": "8fdfaab6df9fb7bb4f88348695850993f9e4cc8cafa88eb68c6ac5a3f9dfdf22",
+      "readonly_native_fetched_at_utc": "2026-10-07T04:05:32.982Z",
+      "readonly_native_raw_sha256": "9a08b487c8b5f8c9eca4820e3348ad7341b33d7f95755674ffdf20f32bbaaaf4",
+      "native_payload_sha_verified": true,
+      "native_request_same_start_as_production": true,
+      "current_regular_start_before": 1791293400,
+      "current_regular_start_after": 1791379800,
+      "meta_session_has_rolled": true,
+      "raw_latest_day_ohl": [
+        1206.02001953125,
+        1220.5999755859375,
+        1199.5
+      ],
+      "old_source_close": 1215.5789794921875,
+      "current_source_close": 1215.5799560546875,
+      "observed_close_revision": 0.0009765625,
+      "real_source_ts_ms_preserved": 1791293400000,
+      "current_raw17_non_fetch_fields_exact_db": true,
+      "volume": 0,
+      "is_final": null,
+      "drg_pending": false,
+      "drg_gaps": [],
+      "mechanism_boundary": "Actual provider filled OHLC and revised close when session metadata rolled. This is normal full-OHLC daily parsing; not proof the old zero-OHL guard accepts an old day with rolled metadata. No such source failure was observed.",
+      "revision": "037f306d7b3b6957e33011e40744f755151a7b49",
+      "observation_scope": "One real completed 170-index production cycle plus independent native source/DRG database proof across NY midnight; not a future SLA."
+    },
+    "massive_history_backfill": {
+      "status": "all124_adopted_same_price_indices_requested_windows_completed_and_verified",
+      "completion_utc_minute_reported_by_actual_operator": "2026-10-07T06:52Z",
+      "completed_run": "run5",
+      "actual_operator_observed_exit_code": 0,
+      "strict_final_audit_checked_at_utc": "2026-10-07T06:56:01.978957+00:00",
+      "strict_final_audit_phase": "final",
+      "provider": "massive",
+      "market": "US",
+      "interval": "5m",
+      "data_kind": "minute_bar",
+      "return_basis": "price_return",
+      "same_original_index_and_return_basis_verified": 124,
+      "requested_start_date": "2023-01-01",
+      "requested_end_date": "2026-10-06",
+      "requested_end_is_this_run_parameter_not_new_business_limit": true,
+      "completed_indices": 124,
+      "completed_request_windows": 1984,
+      "verified_stored_rows": 8854906,
+      "current_state": {
+        "todo_windows": 0,
+        "pending_windows": 0,
+        "active_delayed_windows": 0,
+        "active_failures": 0,
+        "final_verified_receipt_raw_status_counts": {
+          "OK": 1984
+        }
+      },
+      "historical_delayed_and_failure_diagnostics_retained": true,
+      "all_window_source_raw_identity_and18field_write_readback_receipts_verified": true,
+      "database_aggregate": {
+        "massive_records": 124,
+        "massive_row_sum": 8854906,
+        "all124_match_expected_receipts": true,
+        "database_errors": 0
+      },
+      "independent_raw_numeric_and_database_sample": {
+        "checked_at_utc": "2026-10-07T06:56:16.778123+00:00",
+        "source_keys": 18,
+        "columns_per_key": 18,
+        "source_symbols": [
+          "^NQUSB40501025",
+          "^NQUSB50206025",
+          "^SOX"
+        ],
+        "differences": 0,
+        "new_source_api_requests": 0
+      },
+      "actual_source_dates": {
+        "first_date_groups": [
+          {
+            "index_count": 123,
+            "first_date": "2023-02-15"
+          },
+          {
+            "index_count": 1,
+            "first_date": "2025-03-24",
+            "original_symbol": "^NQUSB50206025"
+          }
+        ],
+        "last_date_all124": "2026-10-06",
+        "later_first_date_index": {
+          "original_symbol": "^NQUSB50206025",
+          "vendor_ticker": "I:NQUSB50206025",
+          "official_name": "Nasdaq US Benchmark Railroad Equipment Index",
+          "source_first_date": "2025-03-24",
+          "source_empty_quarters_2023_and2024": [
+            {
+              "start_date": "2023-01-01",
+              "end_date": "2023-03-31",
+              "raw_status": "OK",
+              "source_empty": true
+            },
+            {
+              "start_date": "2023-04-01",
+              "end_date": "2023-06-30",
+              "raw_status": "OK",
+              "source_empty": true
+            },
+            {
+              "start_date": "2023-07-01",
+              "end_date": "2023-09-30",
+              "raw_status": "OK",
+              "source_empty": true
+            },
+            {
+              "start_date": "2023-10-01",
+              "end_date": "2023-12-31",
+              "raw_status": "OK",
+              "source_empty": true
+            },
+            {
+              "start_date": "2024-01-01",
+              "end_date": "2024-03-31",
+              "raw_status": "OK",
+              "source_empty": true
+            },
+            {
+              "start_date": "2024-04-01",
+              "end_date": "2024-06-30",
+              "raw_status": "OK",
+              "source_empty": true
+            },
+            {
+              "start_date": "2024-07-01",
+              "end_date": "2024-09-30",
+              "raw_status": "OK",
+              "source_empty": true
+            },
+            {
+              "start_date": "2024-10-01",
+              "end_date": "2024-12-31",
+              "raw_status": "OK",
+              "source_empty": true
+            }
+          ],
+          "empty_quarters_do_not_prove_index_did_not_exist": true
+        }
+      },
+      "remaining_original_index_scope": {
+        "original_reference_indices": 170,
+        "outside_adopted_massive_reference": 46,
+        "us_candidate_download403_price_identity_unverified": [
+          "^DJUSAL",
+          "^DJUSCF",
+          "^DJUSDB",
+          "^DJUSHD",
+          "^DJUSNF",
+          "^DWCFRP"
+        ],
+        "us_unmatched_same_original_index": "^DRG",
+        "kr_unmatched_same_original_indices": 39,
+        "same_original_index_replacements_used": false,
+        "saved_catalogue_no_match_not_permanent_provider_unsupported_claim": true
+      },
+      "runtime_chain": {
+        "run4_loaded_revision": "b07d77308f744ca36357ede6afa4761adb1c5406",
+        "run5_loaded_revision": "037f306d7b3b6957e33011e40744f755151a7b49",
+        "run5_started_at_utc": "2026-10-07T06:24:34.7848578Z",
+        "same_state_resume": true,
+        "four_massive_core_files_same_git_bytes_and_loaded_hashes": {
+          "src/data/massive_indices.py": "6fa59500406427dfd9a365779aba5d2571c1ddeadb5b76b94daf3c7de1e298c3",
+          "src/data/cross_market_massive_ingest.py": "d67194cfb8549e6f65b664c82c598af09a304a2531dc1c4b1b6c5d46f392e3b3",
+          "scripts/backfill_cross_market_massive.py": "cf559db00144b6f1d1465b369d66e061df4f280b8d3b1440128a27dce4af7169",
+          "src/data/cross_market_store.py": "453c93f457c754876eec4e5a7dc87d7d4a6e9d3eb6899ebea04934946d7abf8c"
+        },
+        "old_source_raw_and_fetched_at_not_relabeled_as_new037_requests": true
+      },
+      "industry_reference_sha256": "8e14dd0f8346fae374dd8adaac3eb0a48254967b2dc82c5548635922b7c628e5",
+      "actual_backfill_reference_sha256": "8f852e91e78273ca17ac1b1e9af851deb7d20fe791e15243b3087f924218e559",
+      "same_index_identity_manifest_sha256": "705be7993207218c7c5f26d435cf58849d11f226c8d0f736e59a11941e78a7d9",
+      "coverage_kind": "saved_source_and_write_readback_receipts_not_every_calendar_date",
+      "boundary": "Completion is every requested window for the124 verified same original price-return indices and actual published source values, not invented bars for every calendar minute or coverage of the6 unverified403 candidates, DRG, or KR indices from Massive.",
+      "coverage_documents": {
+        "json": {
+          "path": "docs/cross-market-index-coverage.json",
+          "sha256": "dce84ffbcc8680b21f070f96d08f5f8d94a21b6d740e19ef21d5fc4a8b6415f3",
+          "bytes": 2791697,
+          "storage": "tracked_delivery_artifact"
+        },
+        "html": {
+          "path": "docs/cross-market-index-coverage.html",
+          "sha256": "09f15986aae83b738a44d85a601a4ea777513287ae81257fbf47e464455ca872",
+          "bytes": 483651,
+          "storage": "tracked_delivery_artifact"
+        },
+        "original_index_count": 170,
+        "scope": "Final per-original-index identity and actual source coverage; originals are retained separately from adopted provider candidates."
+      },
+      "original_index_ids_symbols_and_original_provider_reference_preserved": true
+    },
+    "overall_requested_goal_status": "incomplete_seven_original_us_historical_minute_gaps",
+    "current_history_gap_verification": {
+      "checked_at_utc": "2026-10-07T07:54:21.706725+00:00",
+      "account_plan": "Indices Basic, user confirmed enabled before these requests",
+      "authenticated_requests": 24,
+      "minimum_request_spacing_seconds_observed": 13.001643896102905,
+      "maximum_requests_in_any_60_seconds_observed": 5,
+      "rate_limited_responses": 0,
+      "aggregate_permission_denied_requests": 18,
+      "snapshot_group_permission_denied_requests": 1,
+      "original_drg_fullname_catalog_queries": 4,
+      "original_drg_fullname_catalog_results": 0,
+      "sox_same_account_2023_positive_control": {
+        "actual_parsed_bars": 158,
+        "source_first_date": "2023-03-06",
+        "source_last_date": "2023-03-07",
+        "http_status": 200,
+        "raw_status": "OK",
+        "not_ingested_again": true
+      },
+      "official_basic_scope": {
+        "url": "https://massive.com/knowledge-base/article/are-all-indices-available-through-the-basic-subscription-tier",
+        "csv_url": "https://docs.google.com/spreadsheets/d/1nJtgUaHeqghPthhYUcNDBi_22lae3zPnOTWy3dCg0KM/export?format=csv&gid=0",
+        "saved_csv_sha256": "c013ef0c3ddb63da7e6cf130f89649cd068b902bb5f3c5e0cbf7a2fbc3a01238",
+        "exact_six_tickers_present": [
+          "I:DJUSAL",
+          "I:DJUSCF",
+          "I:DJUSDB",
+          "I:DJUSHD",
+          "I:DJUSNF",
+          "I:DWCFRP"
+        ]
+      },
+      "conclusion": "Current activated account denies these six candidate values, despite their inclusion in the official Basic list. Both historical aggregates and a grouped snapshot request were denied. Cause unresolved: no claim that buying/upgrading necessarily resolves it. The same account actually returned original SOX2023 five-minute bars.",
+      "drg_conclusion": "No exact match in the complete saved catalog or four current owner-fullname active/inactive queries. This is not permanent provider-unsupported proof. ICE original DRG is market-cap weighted; DGE is not a permitted substitute. No free authorized DRG2023 minute download demonstrated.",
+      "no_purchase_upgrade_or_substitution": true,
+      "source_data_and_database_counts_not_refreshed_by_this_permission_probe": true,
+      "evidence_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/current_gap_evidence.json",
+      "evidence_sha256": "c8ca00601fc00fc761d9ef7df7747a8f598d4130723e8ef57321787be3b0492e"
+    },
+    "pending_drg_source_reference_correction": {
+      "corrected_at_utc": "2026-10-07T08:18:53.587901+00:00",
+      "index_id": "US:YAHOO:^DRG",
+      "original_symbol_name_provider_and_selection_preserved": true,
+      "scope": "Original DRG2014 market-cap-weighted source replaces indirect DGE source and copied notes; no2026 membership or new historical availability claim.",
+      "actual_official_url": "https://www.ice.com/publicdocs/nyse/indices/nyse_arca_pharmaceutical_index.pdf",
+      "actual_official_sha256": "3a0dac40f42165a3e0469b02a4609614fa94c48c94065ebc0a76dff74e58d832",
+      "actual_official_http_status": 200,
+      "actual_official_requested_at_utc": "2026-10-07T08:04:51.783390+00:00",
+      "actual_official_retrieved_at_utc": "2026-10-07T08:04:54.381928+00:00",
+      "current_corrected_reference_file_sha256": {
+        "industry_indices.json": "1be0ecb79e37bb45bb710afa41f016fcad08efc47ce6f3d740ef58076af38161",
+        "intraday_indices.json": "c269b63a809db900b07d5f54c538f1c0e36fb9e690ef37b411f10394a4c911cc",
+        "massive_indices.json": "699292cad22e786e6265be60a56981b9199019fef2cb2b07b4338e79994c5ae2"
+      },
+      "previous_history_source_and_sql_reference_sha256_retained_as_actual_old_evidence": true,
+      "all170_originals_all379_intraday_identities_and124_massive_identities_state_paths_unchanged": true,
+      "existing124_history_source_states_preserved": {
+        "rows": 8854906,
+        "completed_windows": 1984,
+        "todo": 0,
+        "pending": 0,
+        "original_state_reference_sha256_retained": true
+      },
+      "reference_preservation_evidence": {
+        "path": "dev-tools/cross-market-yahoo/us_probe/review/drg_metadata_binding_review_20261007/final_ref_correction_preservation_v1.json",
+        "sha256": "4caa73c851c06f0849449af7a5e015270c9d06df80776596087d55bb0234e122"
+      },
+      "pre_release_actual_baseline": {
+        "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/pre_drg_correction_actual_baseline.json",
+        "sha256": "c8368fd1716731ec35adf57dbd4cc86b0dcf337cb2b796d31041f0cdd279b90c",
+        "actual_runtime_revision": "037f306d7b3b6957e33011e40744f755151a7b49"
+      },
+      "regression_check": {
+        "test": "test_original_drg_scope_uses_its_own_market_cap_methodology",
+        "failed_before_correction_on_wrong_DGE_url": true,
+        "reference_and_state_checks_passed_after_correction": 50,
+        "ruff_check_and_format": "passed"
+      },
+      "new_corrected_reference_deployment_status": "pending_new_source_commit_ci_and_actual_production_readback"
+    }
   },
-  "pending_drg_source_reference_correction": {
-    "corrected_at_utc": "2026-10-07T08:18:53.587901+00:00",
-    "index_id": "US:YAHOO:^DRG",
-    "original_symbol_name_provider_and_selection_preserved": true,
-    "scope": "Original DRG2014 market-cap-weighted source replaces indirect DGE source and copied notes; no2026 membership or new historical availability claim.",
-    "actual_official_url": "https://www.ice.com/publicdocs/nyse/indices/nyse_arca_pharmaceutical_index.pdf",
-    "actual_official_sha256": "3a0dac40f42165a3e0469b02a4609614fa94c48c94065ebc0a76dff74e58d832",
-    "actual_official_http_status": 200,
-    "actual_official_requested_at_utc": "2026-10-07T08:04:51.783390+00:00",
-    "actual_official_retrieved_at_utc": "2026-10-07T08:04:54.381928+00:00",
-    "current_corrected_reference_file_sha256": {
-      "industry_indices.json": "1be0ecb79e37bb45bb710afa41f016fcad08efc47ce6f3d740ef58076af38161",
-      "intraday_indices.json": "c269b63a809db900b07d5f54c538f1c0e36fb9e690ef37b411f10394a4c911cc",
-      "massive_indices.json": "699292cad22e786e6265be60a56981b9199019fef2cb2b07b4338e79994c5ae2"
-    },
-    "previous_history_source_and_sql_reference_sha256_retained_as_actual_old_evidence": true,
-    "all170_originals_all379_intraday_identities_and124_massive_identities_state_paths_unchanged": true,
-    "existing124_history_source_states_preserved": {
-      "rows": 8854906,
-      "completed_windows": 1984,
-      "todo": 0,
-      "pending": 0,
-      "original_state_reference_sha256_retained": true
-    },
-    "reference_preservation_evidence": {
-      "path": "dev-tools/cross-market-yahoo/us_probe/review/drg_metadata_binding_review_20261007/final_ref_correction_preservation_v1.json",
-      "sha256": "4caa73c851c06f0849449af7a5e015270c9d06df80776596087d55bb0234e122"
-    },
-    "pre_release_actual_baseline": {
-      "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/pre_drg_correction_actual_baseline.json",
-      "sha256": "c8368fd1716731ec35adf57dbd4cc86b0dcf337cb2b796d31041f0cdd279b90c",
-      "actual_runtime_revision": "037f306d7b3b6957e33011e40744f755151a7b49"
-    },
-    "regression_check": {
-      "test": "test_original_drg_scope_uses_its_own_market_cap_methodology",
-      "failed_before_correction_on_wrong_DGE_url": true,
-      "reference_and_state_checks_passed_after_correction": 50,
-      "ruff_check_and_format": "passed"
-    },
-    "new_corrected_reference_deployment_status": "pending_new_source_commit_ci_and_actual_production_readback"
-  }
+  "scope_counts": {
+    "original_US": 131,
+    "original_KR": 39,
+    "original_US_with_adopted_Massive_history": 124,
+    "original_US_with_actual2023_source_bars": 123,
+    "original_US_without_adopted_Massive_history": 7,
+    "original_US_without_actual2023_source_bars": 8,
+    "KR_completed_original_hour_seed": 39
+  },
+  "remaining_original_US_2023_history": {
+    "no_adopted_Massive_history": [
+      "^DJUSAL",
+      "^DJUSCF",
+      "^DJUSDB",
+      "^DJUSHD",
+      "^DJUSNF",
+      "^DWCFRP",
+      "^DRG"
+    ],
+    "adopted_but_actual2023_2024_source_empty": "^NQUSB50206025",
+    "no_purchase_upgrade_or_substitution": true,
+    "six_Dow_current_account_permission_vs_official_Basic_list_unresolved": true,
+    "DRG_free_authorized2023_minute_source_not_demonstrated": true
+  },
+  "temporary_environment_cleanup": {
+    "status": "blocked_by_automatic_tool_policy",
+    "targets": [
+      "D:/CodexBuild/cross-market-fc-v15/tools-env",
+      "D:/CodexBuild/cross-market-fc-v15/v15-ci-env"
+    ],
+    "targets_still_exist": true,
+    "using_process_count_each": 0,
+    "no_reparse_points_in_either_target": true,
+    "tool_rejected_reason": "blocked by policy; no more specific reason supplied",
+    "tools_env_prior_rejections": 2,
+    "v15_ci_env_current_rejections": 1,
+    "original_project_environment_used_in_current_work": "Z:/Project/Python/A-share-quant-trading/.venv/Scripts/python.exe",
+    "local_key_and_source_receipts_retained": true
+  },
+  "evidence_index_note": "Relative paths reference locally retained ignored originals. Hashes bind actual original observations; no credentials or source RAW price arrays are included in this summary."
 }

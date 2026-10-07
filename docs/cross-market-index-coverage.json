@@ -59959,7 +59959,7 @@
     "sha256": "c8ca00601fc00fc761d9ef7df7747a8f598d4130723e8ef57321787be3b0492e"
   },
   "new_gap_check_does_not_change_previous_history_sql_audit_time": true,
-  "publication_updated_at_utc": "2026-10-07T07:54:21.770193+00:00",
+  "publication_updated_at_utc": "2026-10-07T08:53:00.455173+00:00",
   "original_us_indices_without_adopted_massive_history": [
     "^DJUSAL",
     "^DJUSCF",
@@ -60019,6 +60019,91 @@
       "reference_and_state_checks_passed_after_correction": 50,
       "ruff_check_and_format": "passed"
     },
-    "new_corrected_reference_deployment_status": "pending_new_source_commit_ci_and_actual_production_readback"
+    "new_corrected_reference_deployment_status": "verified_actual_a2_production_and_two_new_full_cycles",
+    "actual_deployed_revision": "a2c89213b526278847a2e6d362fcea75bc1b4896",
+    "actual_production_acceptance": {
+      "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/a2c8921_drg_reference_production_final_acceptance.json",
+      "sha256": "4218ee91ba9b1dc948cfdce92c197e3bf4b6c2ac2dd2b92ec07e6ba47f2c112a",
+      "checked_at_utc": "2026-10-07T08:40:45.064572+00:00"
+    }
+  },
+  "legacy_host_controls": {
+    "checked_at_utc": "2026-10-07T08:37:44.316754+00:00",
+    "api_host": "https://api.polygon.io",
+    "documented_legacy_alias": "https://www.massive.com/blog/polygon-is-now-massive",
+    "production_mutations": 0,
+    "results": [
+      {
+        "label": "legacy_DJUSAL_2023",
+        "requested_at_utc": "2026-10-07T08:37:30.346246+00:00",
+        "completed_at_utc": "2026-10-07T08:37:31.675690+00:00",
+        "path": "/v2/aggs/ticker/I%3ADJUSAL/range/5/minute/2023-03-06/2023-03-07",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "d601358d0126857db5903d5e3e8e3a8b69a5b8c34c1a0e38dd164e9314e91c80",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 08:37:30 GMT",
+        "count": null,
+        "next_url_present": false,
+        "api_host": "https://api.polygon.io",
+        "request_url": "https://api.polygon.io/v2/aggs/ticker/I%3ADJUSAL/range/5/minute/2023-03-06/2023-03-07"
+      },
+      {
+        "label": "legacy_SOX_2023",
+        "requested_at_utc": "2026-10-07T08:37:43.348340+00:00",
+        "completed_at_utc": "2026-10-07T08:37:44.281840+00:00",
+        "path": "/v2/aggs/ticker/I%3ASOX/range/5/minute/2023-03-06/2023-03-07",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 200,
+        "status": "OK",
+        "ticker": "I:SOX",
+        "results_count": 158,
+        "query_count": 782,
+        "classification": "data",
+        "message": null,
+        "body_sha256": "24592294aa6b81bce8768528b4e1f74c94390f1d6b0d3505d7ac61613d403b41",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 08:37:43 GMT",
+        "count": 158,
+        "next_url_present": false,
+        "api_host": "https://api.polygon.io",
+        "request_url": "https://api.polygon.io/v2/aggs/ticker/I%3ASOX/range/5/minute/2023-03-06/2023-03-07"
+      }
+    ],
+    "conclusion": "Official legacy route is currently working for SOX2023, while sampled original DJUSAL2023 remains permission denied. No migration-host workaround demonstrated; other five legacy candidates not individually re-tested.",
+    "original_evidence": {
+      "path": "dev-tools/cross-market-yahoo/root_current_gap_probe/legacy_controls_summary.json",
+      "sha256": "7fe15f469606e109c8e2295ae8add6f47e8323fad5c8a8f1a6d542a3e9164c9c"
+    }
+  },
+  "authenticated_requests_in_current_gap_review_including_legacy_controls": 26,
+  "current_history_database_readback": {
+    "checked_at_utc": "2026-10-07T08:27:49.805524+00:00",
+    "finished_at_utc": "2026-10-07T08:28:08.924349+00:00",
+    "scope": "Actual readonly native Greptime SELECT aggregates and18 previously RAW-verified source keys; no DDL/write/source API. Not new-production-cycle acceptance.",
+    "status": "current_database_counts_dates_and18_source_keys_all18_fields_exact",
+    "source_api_requests": 0,
+    "queries": 2,
+    "massive_original_indices": 124,
+    "massive_actual_database_rows": 8854906,
+    "sample_keys": 18,
+    "columns_per_key": 18,
+    "differences": [],
+    "original_evidence": {
+      "path": "dev-tools/cross-market-yahoo/root_current_gap_probe/current_history_sql_readback.json",
+      "sha256": "8fe9a8001b7113d58cf069ff0b03338a903af87d8032ba6ff71b1c1582388c8c"
+    }
   }
 }
