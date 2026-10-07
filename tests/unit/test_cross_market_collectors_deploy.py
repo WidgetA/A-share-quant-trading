@@ -730,3 +730,93 @@ def test_upload_sets_private_permission_without_logging_credentials():
     remote.client = SimpleNamespace(open_sftp=lambda: sftp)
     remote.upload(b"private-secret", "/stage/fc.credentials.env")
     assert written["/stage/fc.credentials.env"] == b"private-secret" and written["mode"] == 0o600
+
+
+@pytest.mark.parametrize(
+    "change", [None, "business_json", "missing_key", "duplicate_key", "invalid_clock"]
+)
+def test_actual_readback_uses_persisted_mapping_clock_and_checks_business_fields(
+    monkeypatch, capsys, change
+):
+    # Static mappings may have been verified days before this deployment. The
+    # deployment's new inspection clock is not a new source observation.
+    import src.data.cross_market_ingest as ingest_module
+    import src.data.cross_market_store as store_module
+
+    mappings = [
+        dict(
+            provider="yahoo",
+            market=market,
+            sw_code="110100",
+            reference_at=1000,
+            mapping_json={"status": "matched", "sources": ["official"]},
+            fetched_at=9000,
+        )
+        for market in ("US", "KR")
+    ]
+    reference = {"indices": [{"market": "US", "symbol": "^TEST"}], "mappings": mappings}
+    persisted = [store_module._normalise_reference({**r, "fetched_at": 2000}) for r in mappings]
+    if change == "business_json":
+        persisted[0]["mapping_json"] = '{"status":"wrong_index"}'
+    elif change == "missing_key":
+        persisted.pop()
+    elif change == "duplicate_key":
+        persisted.append(copy.deepcopy(persisted[0]))
+    elif change == "invalid_clock":
+        persisted[0]["fetched_at"] = True
+    state = {
+        "identity": {"market": "US", "symbol": "^TEST"},
+        "capability": "daily_history",
+        "last_verified_ms": 1000,
+    }
+    price = {field: None for field in store_module.PRICE_COLUMNS}
+    price.update(
+        provider="yahoo", market="US", symbol="^TEST", interval="1d", data_kind="daily_bar", ts=1000
+    )
+    calls = []
+
+    class ReadOnlyStore(store_module.CrossMarketStore):
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def aclose(self):
+            pass
+
+        async def read_industry_indices(self, references):
+            calls.append("mapping_read")
+            return copy.deepcopy(persisted)
+
+        async def read_prices(self, keys):
+            calls.append("price_read")
+            return [price]
+
+    original_read_text = Path.read_text
+    original_glob = Path.glob
+
+    def fake_read_text(path, *args, **kwargs):
+        if path == Path("/state/one.state.json"):
+            return json.dumps(state)
+        if path == Path("/collector/src/data/reference/cross_market/intraday_indices.json"):
+            return json.dumps({"indices": []})
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(ingest_module, "load_reference", lambda *args: reference)
+    monkeypatch.setattr(store_module, "CrossMarketStore", ReadOnlyStore)
+    monkeypatch.setattr(Path, "read_text", fake_read_text)
+    monkeypatch.setattr(
+        Path,
+        "glob",
+        lambda path, pattern: (
+            iter([Path("/state/one.state.json")])
+            if path == Path("/state")
+            else original_glob(path, pattern)
+        ),
+    )
+    if change is None:
+        exec(deploy.READBACK, {})
+        assert json.loads(capsys.readouterr().out)["mapping_rows_verified"] == 2
+        assert calls == ["mapping_read", "price_read"]
+    else:
+        with pytest.raises((store_module.GreptimeReadbackError, AssertionError, ValueError)):
+            exec(deploy.READBACK, {})
+        assert calls == ["mapping_read"]

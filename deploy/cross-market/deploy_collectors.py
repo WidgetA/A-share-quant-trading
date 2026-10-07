@@ -477,7 +477,7 @@ def state_preserved(before: dict, after: dict) -> bool:
 
 READBACK = """import asyncio,json,pathlib
 from src.data.cross_market_ingest import load_reference
-from src.data.cross_market_store import CrossMarketStore
+from src.data.cross_market_store import CrossMarketStore,REFERENCE_KEYS,_normalise_reference
 async def check():
  ref=load_reference(pathlib.Path('/collector/src/data/reference/cross_market/industry_indices.json'),pathlib.Path('/collector/src/data/reference/cross_market/industry_boards.json'))
  states=[json.loads(p.read_text()) for p in pathlib.Path('/state').glob('*.state.json')]
@@ -500,7 +500,16 @@ async def check():
                    interval=grain,data_kind=kind,ts=stamp))
  assert len(keys)==len(expected)
  async with CrossMarketStore('http://greptimedb:4000',timeout=120) as db:
-  mappings=await db.verify_industry_indices(ref['mappings'])
+  # Cached mapping content retains its original observation clock. A new
+  # deployment check must not require it to equal load_reference's new clock.
+  stored=await db.read_industry_indices(ref['mappings'])
+  saved={tuple(r[k] for k in REFERENCE_KEYS):r['fetched_at'] for r in stored}
+  expected_mappings=[]
+  for r in ref['mappings']:
+   stamp=saved.get(tuple(r[k] for k in REFERENCE_KEYS))
+   assert type(stamp) is int
+   expected_mappings.append(_normalise_reference(dict(r,fetched_at=stamp)))
+  mappings=db._verify(expected_mappings,stored,REFERENCE_KEYS)
   rows=await db.read_prices(keys)
   identity=lambda r:tuple(r[k] for k in ('provider','market','symbol','interval','data_kind','ts'))
   assert len(rows)==len(keys) and {identity(r) for r in rows}=={identity(r) for r in keys}
