@@ -1,0 +1,471 @@
+{
+  "schema_version": 1,
+  "record_generated_at_utc": "2026-10-07T02:20:06.806112+00:00",
+  "status": "verified_recorded_037_collection_and_adopted_massive_backfill_scope",
+  "scope": "Historical acceptance observations for deployed 037 Yahoo collection and completed124 adopted same-index Massive request windows; not a live status endpoint or all170 original indices available from Massive.",
+  "revision": "037f306d7b3b6957e33011e40744f755151a7b49",
+  "branch": "refactor/cleanup-v15-only",
+  "ci": {
+    "run_id": 37553331701,
+    "release_job_id": 112574435038,
+    "url": "https://github.com/WidgetA/A-share-quant-trading/actions/runs/37553331701",
+    "conclusion": "success",
+    "completed_success_utc": "2026-10-07T00:51:16Z"
+  },
+  "deployment": {
+    "entities_checked_at_utc": "2026-10-07T00:57:33.411847+00:00",
+    "two_collectors_actual_running_same_revision": true,
+    "fc_actual_revision": "037f306d7b3b6957e33011e40744f755151a7b49",
+    "collectors_without_proxy": true,
+    "runtime_source_and_reference_file_count": 18,
+    "runtime_total_files_including_vendor": 1068,
+    "runtime_bundle_sha256": "b0a6a691e11feeda238f2f71ea3830a8942018d0b00894d2c4b9742dd5dac7c9",
+    "runtime_archive_sha256": "71b9fc9b1d2a57b7c1a2254626fbac19b57ab14cc001586e2ba64bee04d7341f",
+    "compose_sha256": "b3e38b453bfd167b7abb89c4ce2e29a54b7c22013cd2feab4ace6b659f26ea43",
+    "cloud_worker_total_files": 817,
+    "cloud_worker_zip_sha256": "01022d680b2e5a96c86bc7699e9cda407e3e122f2050a820d49f7561f91200ae",
+    "cloud_zip_exact_uploaded_bytes": true,
+    "actual_runtime_and_cloud_files_match_committed_revision": true,
+    "runtime_source_files_sha256": {
+      "src/data/yahoo_indices.py": "4ee26b3f5bdc0c59c1dc1f03ff94e76108871dbfcc5317fa1f091d431edd51ec",
+      "src/data/yahoo_intraday_indices.py": "239d76740d23ad72ceb68784d1c02264452dd22f9f2044e8616e1f2dad2409b8",
+      "src/data/fc_yahoo_indices.py": "64f93d0e7726f48a3f01d463d319a45844f61e99a7430070d2fa7ddd7e33f698",
+      "src/data/fc_intraday_indices.py": "6efe0ac84e308b5867776aac3ea7c61ef915bf4a3ff211df528f3a44a3382ba7",
+      "src/data/cross_market_store.py": "453c93f457c754876eec4e5a7dc87d7d4a6e9d3eb6899ebea04934946d7abf8c",
+      "src/data/cross_market_ingest.py": "dec0cc37d404db5dbc84586d2c6675528b97f7c77c7f426d94b0f6188426925c",
+      "src/data/cross_market_intraday_ingest.py": "2297a93af233f17c499724cf2b0e15177d802bb8c84e4f8fc9e1dc2e54c47c1b",
+      "src/data/massive_indices.py": "6fa59500406427dfd9a365779aba5d2571c1ddeadb5b76b94daf3c7de1e298c3",
+      "src/data/cross_market_massive_ingest.py": "d67194cfb8549e6f65b664c82c598af09a304a2531dc1c4b1b6c5d46f392e3b3",
+      "scripts/collect_cross_market_indices.py": "ec207b626f7f01afd024ff448afbb416aa35a472979c777b41475ddc2bd7ad6f",
+      "scripts/collect_cross_market_intraday.py": "c111a8f9a3d37d753ff4b3ad79d87d290607cbd9680537fdae9787c9a6607641",
+      "scripts/backfill_cross_market_massive.py": "cf559db00144b6f1d1465b369d66e061df4f280b8d3b1440128a27dce4af7169",
+      "src/data/reference/cross_market/industry_boards.json": "498f0bb1d9217ac78d6ce80d4891f4c1ca810502a41b30a5209e8006d8b5a2d7",
+      "src/data/reference/cross_market/industry_indices.json": "8e14dd0f8346fae374dd8adaac3eb0a48254967b2dc82c5548635922b7c628e5",
+      "src/data/reference/cross_market/intraday_indices.json": "b082bac9f9cfa667834960f8c1236d34ab1445a5ce8d37684bb0e1e80583c252",
+      "src/data/reference/cross_market/massive_indices.json": "d0a539a77f34d767d718eae1baea96d9e802ce574877c3feef18cd9010026948",
+      "src/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "src/data/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "worker_source_files_sha256": {
+      "handler.py": "66258ea8d101f583c0a0bdaed8d5ad037ac9b6aa9d5f95a9243afa0c87f03c8b",
+      "src/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "src/data/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "src/data/yahoo_indices.py": "4ee26b3f5bdc0c59c1dc1f03ff94e76108871dbfcc5317fa1f091d431edd51ec",
+      "src/data/yahoo_intraday_indices.py": "239d76740d23ad72ceb68784d1c02264452dd22f9f2044e8616e1f2dad2409b8",
+      "src/data/fc_yahoo_worker.py": "183455f32ae3550801dd77e637a7d1cbf58b167b2a4b0b516a51a1ddccdf9601"
+    },
+    "fc_instance_concurrency_readback": null,
+    "requested_fc_instance_concurrency": 1,
+    "requested_concurrency_not_independently_confirmed": true,
+    "fc_function_name": "ashare_yahoo_indices_v15",
+    "fc_runtime": "python3.12"
+  },
+  "actual_037_cycles": {
+    "daily_series": 170,
+    "daily_completed_utc": [
+      "2026-10-07T00:50:37.217505327Z",
+      "2026-10-07T00:57:14.263990332Z"
+    ],
+    "intraday_series": 379,
+    "intraday_completed_utc": [
+      "2026-10-07T00:50:43.063589120Z",
+      "2026-10-07T00:57:55.116895008Z"
+    ],
+    "continuous_minute_series": 340,
+    "hour_history_seed_series": 39,
+    "two_cycles_each_independently_validated": true,
+    "all39_hour_seed_status_each_cycle": "previously_verified",
+    "minutes_advance_to_each_real_cycle_target": true,
+    "source_gaps_retained": true,
+    "daily_cycle_statuses": [
+      "verified",
+      "verified"
+    ],
+    "intraday_cycle_statuses": [
+      "verified_with_gaps",
+      "verified_with_gaps"
+    ],
+    "intraday_cycle_target_s": [
+      1791334071,
+      1791334543
+    ],
+    "intraday_replayed_source_rows": [
+      74,
+      0
+    ]
+  },
+  "independent_database_readback": {
+    "mapping_business_json_and_keys_exact_rows": 268,
+    "price_columns_per_key": 18,
+    "daily_latest_source_keys_exact": 170,
+    "intraday_latest_source_keys_exact": 379,
+    "source_null_values_retained_not_zero_filled": true,
+    "actual_drg_native_source_nonfetch_fields_exact": 17,
+    "drg_fetched_at_retains_each_actual_fetch_time": true,
+    "observation_stage": "Original 037 acceptance before 04:00 UTC; the later midnight DRG RAW/SQL proof is recorded separately below."
+  },
+  "kr_hour_history_seed": {
+    "market": "KR",
+    "original_source_observed_revision": "b07d77308f744ca36357ede6afa4761adb1c5406",
+    "preservation_checked_at_utc": "2026-10-07T00:48:44.193317+00:00",
+    "preservation_running_revision": "037f306d7b3b6957e33011e40744f755151a7b49",
+    "index_count": 39,
+    "requested_retention_days": 730,
+    "update_mode": "history_seed",
+    "source_point_keys": 113763,
+    "hour_bar_keys": 113724,
+    "hour_quote_snapshot_keys": 39,
+    "null_hour_close_keys": 434,
+    "all_keys_and_all18fields_exact": true,
+    "direct_raw_ohlcv_fields_compared": 568815,
+    "first_actual_trade_date": "2024-10-07",
+    "last_actual_trade_date": "2026-10-06",
+    "first_bar_ms": 1728259200000,
+    "last_bar_ms": 1791262800000,
+    "original_archive_files_copied_and_sha_verified": 39,
+    "tail_quotes_kept_separate": true,
+    "all39_source_archives_and_seed_states_byte_identical": true,
+    "completed_seed_not_fetched_again_each_cycle": true,
+    "original_source_time_and_coverage_target_preserved": true,
+    "all10_runtime_files_byte_identical_prior_bd41": true,
+    "9_runtime_files_byte_identical_original_b07": true,
+    "shared_hourly_dependency_ast_identical_original_b07": {
+      "YahooIndexError": true,
+      "_number": true,
+      "YahooChartTransport": true,
+      "all_outside_daily_parse_and_new_struct_import_identical": true
+    },
+    "pending_count_at_preservation_read_only": 0,
+    "backtest_bar_data_kind": "hour_bar"
+  },
+  "original_services": {
+    "training_full_configuration_sha256_unchanged": "aebb943a8d5acb1774bc0d40d4e7a423de8419a20878b412b23f141ddf80c829",
+    "greptime_image_started_at_restart_count_unchanged": true
+  },
+  "boundaries": [
+    "Old3 daily pending RAW were not retained; no claim of retrospective full-field equality to those original batches.",
+    "4 daily source-gap series and minute/hour source NULL points retained; successful cycles do not mean provider has no gaps.",
+    "FC instance_concurrency readback null; requested1 not independently confirmed.",
+    "At the original 00:57 UTC acceptance, NY-midnight metadata rollover had not yet been observed. The later 04:03 production cycle and 04:05 native RAW now prove one actual rollover with provider-filled OHLC; no future SLA or old zero-OHL guard acceptance for a rolled old day is claimed.",
+    "Original hourly RAW/SQL acceptance belongs to b07; later preservation and cycles retain their own observed revisions.",
+    "Source NULL values are not replaced with zero or invented bars; real quote snapshots are distinct from hour/minute bars.",
+    "No claim of exchange-calendar every-minute/every-hour completeness, 2023 Yahoo minute/hour coverage or future availability. Massive completion is the124 adopted original-price indices and requested windows with actual source dates;6 candidate403/price-basis-pending indices and unmatched DRG/KR are not filled by substitutes."
+  ],
+  "original_evidence_index": {
+    "production_037_summary": {
+      "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/037f306_production_final_acceptance.json",
+      "sha256": "e88780dd357489f9e07ecdb35b7fddd7a6c20a2eb09e671745ba191a09b49974",
+      "storage": "local_ignored_original_evidence"
+    },
+    "hour_037_preservation_summary": {
+      "path": "dev-tools/cross-market-yahoo/kr_probe/review/hour_037_current_preservation_acceptance_v1.json",
+      "sha256": "d75fa814cffb8aa618fd04d66e691441581913b3d17e89195151661381b32b06",
+      "storage": "local_ignored_original_evidence"
+    },
+    "ci": {
+      "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/037f306_ci_final.json",
+      "sha256": "4b8ec5e9453fa3de4e3fe748a79078ba03db44aff39418c3d7ced2c83dff2748",
+      "storage": "local_ignored_original_evidence"
+    },
+    "entities": {
+      "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/actual_037f306_final_release.json",
+      "sha256": "bae939b29ccfc585dfe7565a088639c19006c86d030af01f0c3a15026100bdea",
+      "storage": "local_ignored_original_evidence"
+    },
+    "new_cycles": {
+      "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/037f306_two_cycles_validated.json",
+      "sha256": "cb3444aed9db0b7c41f4c407a20c88494d02ad099b896ed31924060983cda83e",
+      "storage": "local_ignored_original_evidence"
+    },
+    "timestamped_safe_cycles": {
+      "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/037f306_safe_cycles.json",
+      "sha256": "c329c7327fc080a613556ddd7a3461e339eedeaa79f562bab16f143a56fdd5b5",
+      "storage": "local_ignored_original_evidence"
+    },
+    "latest_daily_all18": {
+      "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/037f306_daily_final_readback.json",
+      "sha256": "68145246a16e421d9705527a4f268ad365154740206f1dbf5622a7a157f37da5",
+      "storage": "local_ignored_original_evidence"
+    },
+    "formal_readback_after_two": {
+      "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/037f306_formal_readback_after_two_cycles.json",
+      "sha256": "f15723bef0bfa5a903ab416a4874956efbfdcead217607617a89c24d80159744",
+      "storage": "local_ignored_original_evidence"
+    },
+    "drg_source_and_db": {
+      "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/037f306_drg_native_to_db_comparison.json",
+      "sha256": "18875879f53c4cd14b5f28e2a454031d7308ce97abed06fa4137db9132d0da40",
+      "storage": "local_ignored_original_evidence"
+    },
+    "runtime_byte_lineage": {
+      "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/bd_to_037_runtime_byte_lineage.json",
+      "sha256": "c3cb8aedf2077600a6f8fa1aa96a0e3fa275cf2dfca9669ff40563bfaf4e6259",
+      "storage": "local_ignored_original_evidence"
+    },
+    "current_037_readonly_preservation": {
+      "path": "dev-tools/cross-market-yahoo/kr_probe/review/hour_final_preservation_20261007T004844193531Z.json",
+      "sha256": "0ffa05fdbcb83754d0c7de30dfcfb2f882a9fd5975ca6688fa522c5093ae7119",
+      "storage": "local_ignored_original_evidence"
+    },
+    "prior_bd41_actual_hour_acceptance": {
+      "path": "dev-tools/cross-market-yahoo/kr_probe/review/hour_bd41_final_acceptance_v1.json",
+      "sha256": "423b24b8aaa5f034643936a221ae178fd7107bc3edffc4e290b4331d4a3910ee",
+      "storage": "local_ignored_original_evidence"
+    },
+    "original_b07_source_to_db": {
+      "path": "dev-tools/cross-market-yahoo/kr_probe/review/hour_production_20261006T235153691530Z/hour_source_db_readback.json",
+      "sha256": "569be0d7c1ea904dfb382da3f718f68916677e555f01ffc1430091982819f027",
+      "storage": "local_ignored_original_evidence"
+    },
+    "ny_midnight_acceptance": {
+      "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/037_midnight_final_acceptance.json",
+      "sha256": "c7d0f47f5b0b777888b58dc488fbf09f4903ff1337b32c2b730dd7a74ea63cdc",
+      "storage": "local_ignored_original_evidence"
+    },
+    "ny_midnight_037_drg_post_midnight_20261007T0404.json": {
+      "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/037_drg_post_midnight_20261007T0404.json",
+      "sha256": "790ea1bd4bf040771ca7a56b8271c5c5241aef47ad513a415b0ed5208c30fdfe",
+      "storage": "local_ignored_original_evidence"
+    },
+    "ny_midnight_037_drg_midnight_actual_raw_and_db.json": {
+      "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/037_drg_midnight_actual_raw_and_db.json",
+      "sha256": "04a92696f774e2e367fca87e7059bb1bd4c18d3eb883d02835782bf78d2ff862",
+      "storage": "local_ignored_original_evidence"
+    },
+    "ny_midnight_drg_daily_native_midnight_20261007T0405_yahoo.body": {
+      "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/drg_daily_native_midnight_20261007T0405_yahoo.body",
+      "sha256": "9a08b487c8b5f8c9eca4820e3348ad7341b33d7f95755674ffdf20f32bbaaaf4",
+      "storage": "local_ignored_original_evidence"
+    },
+    "ny_midnight_drg_daily_native_midnight_20261007T0405.response": {
+      "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/drg_daily_native_midnight_20261007T0405.response",
+      "sha256": "b79a47fd4b827772a68f442e86e10bfacecbd4b93bf10735c7e92cc719e8064b",
+      "storage": "local_ignored_original_evidence"
+    },
+    "ny_midnight_037_drg_pre_midnight_20261007T0345.json": {
+      "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/037_drg_pre_midnight_20261007T0345.json",
+      "sha256": "a773281660eb8628cfd3c0004010b24d3b56d28db063452505c21f1f1ac548cf",
+      "storage": "local_ignored_original_evidence"
+    },
+    "massive_strict_final_audit": {
+      "path": "dev-tools/cross-market-yahoo/us_probe/review/massive_history_final_20261007T065601978957Z.json",
+      "sha256": "5115f6a88cd434aaa69bd067523b48b2a52ad411bfe8993bb531bf7f1f207aed",
+      "storage": "local_ignored_original_evidence",
+      "sha_scope": "Actual local audit bytes observed during this documentation update; future finalized audit changes require a new hash."
+    },
+    "massive_root_raw_numeric_sample_readback": {
+      "path": "dev-tools/cross-market-yahoo/root_history_final_sample_readback.json",
+      "sha256": "61c3c12c56b0a059bd40e95c7bbfa9b414e3998a63c570c0afe6cbd5f6004136",
+      "storage": "local_ignored_original_evidence"
+    },
+    "massive_run5_runtime_metadata": {
+      "path": "D:/CodexBuild/cross-market-fc-v15/massive-history-run5.runtime.json",
+      "sha256": "4189bc5e1d338d4685be41ea3fa07936e90bf089f6c988d1413ccee0962e4069",
+      "storage": "local_build_evidence_outside_repository"
+    }
+  },
+  "evidence_index_note": "Paths are relative to the repository and point to local ignored original evidence retained on this machine. SHA256 binds the originals; this committed summary contains no RAW price arrays or credentials.",
+  "record_updated_at_utc": "2026-10-07T07:11:49.030432+00:00",
+  "ny_midnight_actual_verification": {
+    "daily_cycle_completed_utc": "2026-10-07T04:03:03.836877609Z",
+    "daily_complete_indices": 170,
+    "daily_failures": 0,
+    "production_drg_source_fetched_at_utc": "2026-10-07T04:01:44.054Z",
+    "production_source_sha256": "8fdfaab6df9fb7bb4f88348695850993f9e4cc8cafa88eb68c6ac5a3f9dfdf22",
+    "readonly_native_fetched_at_utc": "2026-10-07T04:05:32.982Z",
+    "readonly_native_raw_sha256": "9a08b487c8b5f8c9eca4820e3348ad7341b33d7f95755674ffdf20f32bbaaaf4",
+    "native_payload_sha_verified": true,
+    "native_request_same_start_as_production": true,
+    "current_regular_start_before": 1791293400,
+    "current_regular_start_after": 1791379800,
+    "meta_session_has_rolled": true,
+    "raw_latest_day_ohl": [
+      1206.02001953125,
+      1220.5999755859375,
+      1199.5
+    ],
+    "old_source_close": 1215.5789794921875,
+    "current_source_close": 1215.5799560546875,
+    "observed_close_revision": 0.0009765625,
+    "real_source_ts_ms_preserved": 1791293400000,
+    "current_raw17_non_fetch_fields_exact_db": true,
+    "volume": 0,
+    "is_final": null,
+    "drg_pending": false,
+    "drg_gaps": [],
+    "mechanism_boundary": "Actual provider filled OHLC and revised close when session metadata rolled. This is normal full-OHLC daily parsing; not proof the old zero-OHL guard accepts an old day with rolled metadata. No such source failure was observed.",
+    "revision": "037f306d7b3b6957e33011e40744f755151a7b49",
+    "observation_scope": "One real completed 170-index production cycle plus independent native source/DRG database proof across NY midnight; not a future SLA."
+  },
+  "massive_history_backfill": {
+    "status": "all124_adopted_same_price_indices_requested_windows_completed_and_verified",
+    "completion_utc_minute_reported_by_actual_operator": "2026-10-07T06:52Z",
+    "completed_run": "run5",
+    "actual_operator_observed_exit_code": 0,
+    "strict_final_audit_checked_at_utc": "2026-10-07T06:56:01.978957+00:00",
+    "strict_final_audit_phase": "final",
+    "provider": "massive",
+    "market": "US",
+    "interval": "5m",
+    "data_kind": "minute_bar",
+    "return_basis": "price_return",
+    "same_original_index_and_return_basis_verified": 124,
+    "requested_start_date": "2023-01-01",
+    "requested_end_date": "2026-10-06",
+    "requested_end_is_this_run_parameter_not_new_business_limit": true,
+    "completed_indices": 124,
+    "completed_request_windows": 1984,
+    "verified_stored_rows": 8854906,
+    "current_state": {
+      "todo_windows": 0,
+      "pending_windows": 0,
+      "active_delayed_windows": 0,
+      "active_failures": 0,
+      "final_verified_receipt_raw_status_counts": {
+        "OK": 1984
+      }
+    },
+    "historical_delayed_and_failure_diagnostics_retained": true,
+    "all_window_source_raw_identity_and18field_write_readback_receipts_verified": true,
+    "database_aggregate": {
+      "massive_records": 124,
+      "massive_row_sum": 8854906,
+      "all124_match_expected_receipts": true,
+      "database_errors": 0
+    },
+    "independent_raw_numeric_and_database_sample": {
+      "checked_at_utc": "2026-10-07T06:56:16.778123+00:00",
+      "source_keys": 18,
+      "columns_per_key": 18,
+      "source_symbols": [
+        "^NQUSB40501025",
+        "^NQUSB50206025",
+        "^SOX"
+      ],
+      "differences": 0,
+      "new_source_api_requests": 0
+    },
+    "actual_source_dates": {
+      "first_date_groups": [
+        {
+          "index_count": 123,
+          "first_date": "2023-02-15"
+        },
+        {
+          "index_count": 1,
+          "first_date": "2025-03-24",
+          "original_symbol": "^NQUSB50206025"
+        }
+      ],
+      "last_date_all124": "2026-10-06",
+      "later_first_date_index": {
+        "original_symbol": "^NQUSB50206025",
+        "vendor_ticker": "I:NQUSB50206025",
+        "official_name": "Nasdaq US Benchmark Railroad Equipment Index",
+        "source_first_date": "2025-03-24",
+        "source_empty_quarters_2023_and2024": [
+          {
+            "start_date": "2023-01-01",
+            "end_date": "2023-03-31",
+            "raw_status": "OK",
+            "source_empty": true
+          },
+          {
+            "start_date": "2023-04-01",
+            "end_date": "2023-06-30",
+            "raw_status": "OK",
+            "source_empty": true
+          },
+          {
+            "start_date": "2023-07-01",
+            "end_date": "2023-09-30",
+            "raw_status": "OK",
+            "source_empty": true
+          },
+          {
+            "start_date": "2023-10-01",
+            "end_date": "2023-12-31",
+            "raw_status": "OK",
+            "source_empty": true
+          },
+          {
+            "start_date": "2024-01-01",
+            "end_date": "2024-03-31",
+            "raw_status": "OK",
+            "source_empty": true
+          },
+          {
+            "start_date": "2024-04-01",
+            "end_date": "2024-06-30",
+            "raw_status": "OK",
+            "source_empty": true
+          },
+          {
+            "start_date": "2024-07-01",
+            "end_date": "2024-09-30",
+            "raw_status": "OK",
+            "source_empty": true
+          },
+          {
+            "start_date": "2024-10-01",
+            "end_date": "2024-12-31",
+            "raw_status": "OK",
+            "source_empty": true
+          }
+        ],
+        "empty_quarters_do_not_prove_index_did_not_exist": true
+      }
+    },
+    "remaining_original_index_scope": {
+      "original_reference_indices": 170,
+      "outside_adopted_massive_reference": 46,
+      "us_candidate_download403_price_identity_unverified": [
+        "^DJUSAL",
+        "^DJUSCF",
+        "^DJUSDB",
+        "^DJUSHD",
+        "^DJUSNF",
+        "^DWCFRP"
+      ],
+      "us_unmatched_same_original_index": "^DRG",
+      "kr_unmatched_same_original_indices": 39,
+      "same_original_index_replacements_used": false,
+      "saved_catalogue_no_match_not_permanent_provider_unsupported_claim": true
+    },
+    "runtime_chain": {
+      "run4_loaded_revision": "b07d77308f744ca36357ede6afa4761adb1c5406",
+      "run5_loaded_revision": "037f306d7b3b6957e33011e40744f755151a7b49",
+      "run5_started_at_utc": "2026-10-07T06:24:34.7848578Z",
+      "same_state_resume": true,
+      "four_massive_core_files_same_git_bytes_and_loaded_hashes": {
+        "src/data/massive_indices.py": "6fa59500406427dfd9a365779aba5d2571c1ddeadb5b76b94daf3c7de1e298c3",
+        "src/data/cross_market_massive_ingest.py": "d67194cfb8549e6f65b664c82c598af09a304a2531dc1c4b1b6c5d46f392e3b3",
+        "scripts/backfill_cross_market_massive.py": "cf559db00144b6f1d1465b369d66e061df4f280b8d3b1440128a27dce4af7169",
+        "src/data/cross_market_store.py": "453c93f457c754876eec4e5a7dc87d7d4a6e9d3eb6899ebea04934946d7abf8c"
+      },
+      "old_source_raw_and_fetched_at_not_relabeled_as_new037_requests": true
+    },
+    "industry_reference_sha256": "8e14dd0f8346fae374dd8adaac3eb0a48254967b2dc82c5548635922b7c628e5",
+    "actual_backfill_reference_sha256": "8f852e91e78273ca17ac1b1e9af851deb7d20fe791e15243b3087f924218e559",
+    "same_index_identity_manifest_sha256": "705be7993207218c7c5f26d435cf58849d11f226c8d0f736e59a11941e78a7d9",
+    "coverage_kind": "saved_source_and_write_readback_receipts_not_every_calendar_date",
+    "boundary": "Completion is every requested window for the124 verified same original price-return indices and actual published source values, not invented bars for every calendar minute or coverage of the6 unverified403 candidates, DRG, or KR indices from Massive.",
+    "coverage_documents": {
+      "json": {
+        "path": "docs/cross-market-index-coverage.json",
+        "sha256": "95c830eeffa210633651bb45813941ada456f6f9a3720ef895a204cae1e87c8a",
+        "bytes": 2716558,
+        "storage": "tracked_delivery_artifact"
+      },
+      "html": {
+        "path": "docs/cross-market-index-coverage.html",
+        "sha256": "8be1a92ceba4aeb17ecc3ce487d13dc4dd157b8f0eace93b9ef6f7b73a446373",
+        "bytes": 481539,
+        "storage": "tracked_delivery_artifact"
+      },
+      "original_index_count": 170,
+      "scope": "Final per-original-index identity and actual source coverage; originals are retained separately from adopted provider candidates."
+    },
+    "original_index_ids_symbols_and_original_provider_reference_preserved": true
+  }
+}
