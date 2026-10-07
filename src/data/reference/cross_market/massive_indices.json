@@ -3,7 +3,7 @@
   "provider": "massive",
   "interval": "5m",
   "checked_at": "2026-10-06T22:42:46.745808+00:00",
-  "industry_reference_sha256": "8e14dd0f8346fae374dd8adaac3eb0a48254967b2dc82c5548635922b7c628e5",
+  "industry_reference_sha256": "1be0ecb79e37bb45bb710afa41f016fcad08efc47ce6f3d740ef58076af38161",
   "source_catalog": {
     "url": "https://api.massive.com/v3/reference/tickers?market=indices",
     "sha256": "843eab6f781813f2d6c7cefdb7daf8979198027fb1a9a15df2f8854fba214138",

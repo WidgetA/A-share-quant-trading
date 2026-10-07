@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "checked_at": "2026-10-06T18:38:36.440161+00:00",
-  "base_reference_sha256": "8e14dd0f8346fae374dd8adaac3eb0a48254967b2dc82c5548635922b7c628e5",
+  "base_reference_sha256": "1be0ecb79e37bb45bb710afa41f016fcad08efc47ce6f3d740ef58076af38161",
   "scope": "Existing adopted US131/KR39 INDEX instruments; all1m/5m plus locally verified KR39 one-hour730-day history",
   "limits": {
     "1m": {

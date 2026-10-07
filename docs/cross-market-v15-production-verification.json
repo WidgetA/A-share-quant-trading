@@ -149,7 +149,8 @@
     "At the original 00:57 UTC acceptance, NY-midnight metadata rollover had not yet been observed. The later 04:03 production cycle and 04:05 native RAW now prove one actual rollover with provider-filled OHLC; no future SLA or old zero-OHL guard acceptance for a rolled old day is claimed.",
     "Original hourly RAW/SQL acceptance belongs to b07; later preservation and cycles retain their own observed revisions.",
     "Source NULL values are not replaced with zero or invented bars; real quote snapshots are distinct from hour/minute bars.",
-    "No claim of exchange-calendar every-minute/every-hour completeness, 2023 Yahoo minute/hour coverage or future availability. Massive completion is the124 adopted original-price indices and requested windows with actual source dates;6 candidate403/price-basis-pending indices and unmatched DRG/KR are not filled by substitutes."
+    "No claim of exchange-calendar every-minute/every-hour completeness, 2023 Yahoo minute/hour coverage or future availability. Massive completion is the124 adopted original-price indices and requested windows with actual source dates;6 candidate403/price-basis-pending indices and unmatched DRG/KR are not filled by substitutes.",
+    "Current Basic retry:18 aggregate windows and one grouped snapshot denied for the6 Dow candidates, despite official Basic-list inclusion; same-account SOX2023 actual158 bars. Four current original-DRG name searches returned200 empty. Seven original-US historical-minute gaps remain; no automatic paid upgrade or substitutes."
   ],
   "original_evidence_index": {
     "production_037_summary": {
@@ -265,7 +266,7 @@
     }
   },
   "evidence_index_note": "Paths are relative to the repository and point to local ignored original evidence retained on this machine. SHA256 binds the originals; this committed summary contains no RAW price arrays or credentials.",
-  "record_updated_at_utc": "2026-10-07T07:11:49.030432+00:00",
+  "record_updated_at_utc": "2026-10-07T08:18:54.702708+00:00",
   "ny_midnight_actual_verification": {
     "daily_cycle_completed_utc": "2026-10-07T04:03:03.836877609Z",
     "daily_complete_indices": 170,
@@ -453,19 +454,100 @@
     "coverage_documents": {
       "json": {
         "path": "docs/cross-market-index-coverage.json",
-        "sha256": "95c830eeffa210633651bb45813941ada456f6f9a3720ef895a204cae1e87c8a",
-        "bytes": 2716558,
+        "sha256": "dce84ffbcc8680b21f070f96d08f5f8d94a21b6d740e19ef21d5fc4a8b6415f3",
+        "bytes": 2791697,
         "storage": "tracked_delivery_artifact"
       },
       "html": {
         "path": "docs/cross-market-index-coverage.html",
-        "sha256": "8be1a92ceba4aeb17ecc3ce487d13dc4dd157b8f0eace93b9ef6f7b73a446373",
-        "bytes": 481539,
+        "sha256": "09f15986aae83b738a44d85a601a4ea777513287ae81257fbf47e464455ca872",
+        "bytes": 483651,
         "storage": "tracked_delivery_artifact"
       },
       "original_index_count": 170,
       "scope": "Final per-original-index identity and actual source coverage; originals are retained separately from adopted provider candidates."
     },
     "original_index_ids_symbols_and_original_provider_reference_preserved": true
+  },
+  "overall_requested_goal_status": "incomplete_seven_original_us_historical_minute_gaps",
+  "current_history_gap_verification": {
+    "checked_at_utc": "2026-10-07T07:54:21.706725+00:00",
+    "account_plan": "Indices Basic, user confirmed enabled before these requests",
+    "authenticated_requests": 24,
+    "minimum_request_spacing_seconds_observed": 13.001643896102905,
+    "maximum_requests_in_any_60_seconds_observed": 5,
+    "rate_limited_responses": 0,
+    "aggregate_permission_denied_requests": 18,
+    "snapshot_group_permission_denied_requests": 1,
+    "original_drg_fullname_catalog_queries": 4,
+    "original_drg_fullname_catalog_results": 0,
+    "sox_same_account_2023_positive_control": {
+      "actual_parsed_bars": 158,
+      "source_first_date": "2023-03-06",
+      "source_last_date": "2023-03-07",
+      "http_status": 200,
+      "raw_status": "OK",
+      "not_ingested_again": true
+    },
+    "official_basic_scope": {
+      "url": "https://massive.com/knowledge-base/article/are-all-indices-available-through-the-basic-subscription-tier",
+      "csv_url": "https://docs.google.com/spreadsheets/d/1nJtgUaHeqghPthhYUcNDBi_22lae3zPnOTWy3dCg0KM/export?format=csv&gid=0",
+      "saved_csv_sha256": "c013ef0c3ddb63da7e6cf130f89649cd068b902bb5f3c5e0cbf7a2fbc3a01238",
+      "exact_six_tickers_present": [
+        "I:DJUSAL",
+        "I:DJUSCF",
+        "I:DJUSDB",
+        "I:DJUSHD",
+        "I:DJUSNF",
+        "I:DWCFRP"
+      ]
+    },
+    "conclusion": "Current activated account denies these six candidate values, despite their inclusion in the official Basic list. Both historical aggregates and a grouped snapshot request were denied. Cause unresolved: no claim that buying/upgrading necessarily resolves it. The same account actually returned original SOX2023 five-minute bars.",
+    "drg_conclusion": "No exact match in the complete saved catalog or four current owner-fullname active/inactive queries. This is not permanent provider-unsupported proof. ICE original DRG is market-cap weighted; DGE is not a permitted substitute. No free authorized DRG2023 minute download demonstrated.",
+    "no_purchase_upgrade_or_substitution": true,
+    "source_data_and_database_counts_not_refreshed_by_this_permission_probe": true,
+    "evidence_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/current_gap_evidence.json",
+    "evidence_sha256": "c8ca00601fc00fc761d9ef7df7747a8f598d4130723e8ef57321787be3b0492e"
+  },
+  "pending_drg_source_reference_correction": {
+    "corrected_at_utc": "2026-10-07T08:18:53.587901+00:00",
+    "index_id": "US:YAHOO:^DRG",
+    "original_symbol_name_provider_and_selection_preserved": true,
+    "scope": "Original DRG2014 market-cap-weighted source replaces indirect DGE source and copied notes; no2026 membership or new historical availability claim.",
+    "actual_official_url": "https://www.ice.com/publicdocs/nyse/indices/nyse_arca_pharmaceutical_index.pdf",
+    "actual_official_sha256": "3a0dac40f42165a3e0469b02a4609614fa94c48c94065ebc0a76dff74e58d832",
+    "actual_official_http_status": 200,
+    "actual_official_requested_at_utc": "2026-10-07T08:04:51.783390+00:00",
+    "actual_official_retrieved_at_utc": "2026-10-07T08:04:54.381928+00:00",
+    "current_corrected_reference_file_sha256": {
+      "industry_indices.json": "1be0ecb79e37bb45bb710afa41f016fcad08efc47ce6f3d740ef58076af38161",
+      "intraday_indices.json": "c269b63a809db900b07d5f54c538f1c0e36fb9e690ef37b411f10394a4c911cc",
+      "massive_indices.json": "699292cad22e786e6265be60a56981b9199019fef2cb2b07b4338e79994c5ae2"
+    },
+    "previous_history_source_and_sql_reference_sha256_retained_as_actual_old_evidence": true,
+    "all170_originals_all379_intraday_identities_and124_massive_identities_state_paths_unchanged": true,
+    "existing124_history_source_states_preserved": {
+      "rows": 8854906,
+      "completed_windows": 1984,
+      "todo": 0,
+      "pending": 0,
+      "original_state_reference_sha256_retained": true
+    },
+    "reference_preservation_evidence": {
+      "path": "dev-tools/cross-market-yahoo/us_probe/review/drg_metadata_binding_review_20261007/final_ref_correction_preservation_v1.json",
+      "sha256": "4caa73c851c06f0849449af7a5e015270c9d06df80776596087d55bb0234e122"
+    },
+    "pre_release_actual_baseline": {
+      "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/pre_drg_correction_actual_baseline.json",
+      "sha256": "c8368fd1716731ec35adf57dbd4cc86b0dcf337cb2b796d31041f0cdd279b90c",
+      "actual_runtime_revision": "037f306d7b3b6957e33011e40744f755151a7b49"
+    },
+    "regression_check": {
+      "test": "test_original_drg_scope_uses_its_own_market_cap_methodology",
+      "failed_before_correction_on_wrong_DGE_url": true,
+      "reference_and_state_checks_passed_after_correction": 50,
+      "ruff_check_and_format": "passed"
+    },
+    "new_corrected_reference_deployment_status": "pending_new_source_commit_ci_and_actual_production_readback"
   }
 }

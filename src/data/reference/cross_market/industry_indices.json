@@ -2244,13 +2244,14 @@
       },
       "scope_sources": [
         {
-          "id": "drg_dge_methodology",
-          "url": "https://www.nyse.com/publicdocs/nyse/indices/nyse_arca_ew_pharmaceutical_index.pdf",
-          "requested_at": "2026-10-05T15:18:35.473694+00:00",
+          "id": "drg_methodology",
+          "url": "https://www.ice.com/publicdocs/nyse/indices/nyse_arca_pharmaceutical_index.pdf",
+          "requested_at": "2026-10-07T08:04:51.783390+00:00",
+          "retrieved_at": "2026-10-07T08:04:54.381928+00:00",
+          "tls_verify": true,
           "status_code": 200,
-          "retrieved_at": "2026-10-05T15:18:37.024265+00:00",
-          "bytes": 105358,
-          "sha256": "d619d9bfba5631f8e621c9254ddd192bf49ef3824b83691823f865a416dd6a28",
+          "bytes": 100735,
+          "sha256": "3a0dac40f42165a3e0469b02a4609614fa94c48c94065ebc0a76dff74e58d832",
           "content_type": "application/pdf"
         }
       ],
@@ -35578,7 +35579,7 @@
               "provider": "ICE/NYSE",
               "name": "NYSE Arca Pharmaceutical",
               "relation": "partial_overlap",
-              "scope_note": "NYSE 当前目录与实际日线确认 DRG 制药指数；官方 DGE/DRG 说明 PDF footer 为 ©2014，支持大型制药类别历史方法。未确认2026完整规则及成员，非纯化学药。",
+              "scope_note": "NYSE 当前目录与实际日线确认原 DRG 制药指数；原 DRG 市值加权资料 footer 为 ©2014，支持大型制药研发、生产与营销的历史范围，另列分红再投资全收益版本。未确认2026完整规则及成员，非纯化学药。",
               "scope_difference": "Provider-specific eligibility and constituent universe; inspect method before treating as an entire US industry board.",
               "board_ids": [
                 "US:SA:drug-manufacturers-general"
@@ -35593,21 +35594,22 @@
               ],
               "provider_definition_evidence": [
                 {
-                  "source_id": "drg_dge_methodology",
+                  "source_id": "drg_methodology",
                   "evidence_kind": "provider_method_or_overview",
-                  "scope_summary": "Official PDF footer is ©2014 and EU-14996d/140429. It describes DGE equal-weighted pharmaceutical securities and the same components as capitalization-weighted DRG, covering large pharmaceutical development/production/marketing. Historical method, not proof of current component equivalence.",
+                  "scope_summary": "Official original-DRG brochure footer is ©2014 DO/EU-14996e/140501. DRG covers widely held, highly capitalized companies developing, producing and marketing pharmaceuticals, including stocks and ADRs. It is market-capitalization weighted using primary-market component prices; a dividend-reinvesting total-return version is described separately. Historical method, not proof of2026 complete rules or membership, and not a pure chemical-drug universe.",
                   "is_icb_definition": false
                 }
               ],
               "provider_scope_sources": [
                 {
-                  "id": "drg_dge_methodology",
-                  "url": "https://www.nyse.com/publicdocs/nyse/indices/nyse_arca_ew_pharmaceutical_index.pdf",
-                  "requested_at": "2026-10-05T15:18:35.473694+00:00",
+                  "id": "drg_methodology",
+                  "url": "https://www.ice.com/publicdocs/nyse/indices/nyse_arca_pharmaceutical_index.pdf",
+                  "requested_at": "2026-10-07T08:04:51.783390+00:00",
+                  "retrieved_at": "2026-10-07T08:04:54.381928+00:00",
+                  "tls_verify": true,
                   "status_code": 200,
-                  "retrieved_at": "2026-10-05T15:18:37.024265+00:00",
-                  "bytes": 105358,
-                  "sha256": "d619d9bfba5631f8e621c9254ddd192bf49ef3824b83691823f865a416dd6a28",
+                  "bytes": 100735,
+                  "sha256": "3a0dac40f42165a3e0469b02a4609614fa94c48c94065ebc0a76dff74e58d832",
                   "content_type": "application/pdf"
                 }
               ],
@@ -36572,7 +36574,7 @@
               "decision": "not_promoted_specific_scope_or_membership",
               "reason": "已逐项核对原表业务交集；本候选定义不能直接覆盖该部分或已有更明确同业务类别，未由旧 board 关系自动推广。",
               "original_scope_note": "实见Grifols经营血浆蛋白药、免疫球蛋白与白蛋白；综合制药分类同时包含Pfizer小分子API及制剂。",
-              "index_scope_note": "NYSE Arca capitalisation-weighted large pharmaceutical companies. Captured NYSE method explains DRG via the equal-weighted DGE counterpart; document is undated and current constituent equivalence is not asserted."
+              "index_scope_note": "Original NYSE Arca market-capitalization-weighted large pharmaceutical companies. The actual original-DRG2014 brochure covers pharmaceutical development, production and marketing and a separate dividend-reinvesting total-return calculation. Current2026 complete rules or membership are not asserted."
             }
           ]
         },
@@ -38251,7 +38253,7 @@
               "decision": "not_promoted_specific_scope_or_membership",
               "reason": "Evotec/Pfizer CentreOne、POM/YI、SBC 的服务副业务不能从制药、药店或商业咨询定义推成医疗服务指数；已有 IQV/TDOC/DGX 直接证据替代。",
               "original_scope_note": "Pfizer所属CentreOne提供药物开发及临床阶段工艺/制剂开发服务，形成研发外包交集；综合制药的药品销售和商业制造本身不计作诊疗服务。",
-              "index_scope_note": "NYSE Arca capitalisation-weighted large pharmaceutical companies. Captured NYSE method explains DRG via the equal-weighted DGE counterpart; document is undated and current constituent equivalence is not asserted."
+              "index_scope_note": "Original NYSE Arca market-capitalization-weighted large pharmaceutical companies. The actual original-DRG2014 brochure covers pharmaceutical development, production and marketing and a separate dividend-reinvesting total-return calculation. Current2026 complete rules or membership are not asserted."
             },
             {
               "index_id": "US:YAHOO:^NQUSB45201015",
@@ -70205,7 +70207,7 @@
               "decision": "not_promoted_specific_scope_or_membership",
               "reason": "TDOC/IQV 的普通医疗成员证明不支持医美；So-Young 与 SBC 的医美服务当前分类与纳入资格未证，不采用普通 HealthcareServices/BusinessSupport 副业务传递。",
               "original_scope_note": "AbbVie旗下Allergan Aesthetics的Botox Cosmetic及Juvederm对应医美注射耗材；综合药品制造其余业务超出医美。",
-              "index_scope_note": "NYSE Arca capitalisation-weighted large pharmaceutical companies. Captured NYSE method explains DRG via the equal-weighted DGE counterpart; document is undated and current constituent equivalence is not asserted."
+              "index_scope_note": "Original NYSE Arca market-capitalization-weighted large pharmaceutical companies. The actual original-DRG2014 brochure covers pharmaceutical development, production and marketing and a separate dividend-reinvesting total-return calculation. Current2026 complete rules or membership are not asserted."
             },
             {
               "index_id": "US:YAHOO:^NQUSB20101025",

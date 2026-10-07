@@ -19,9 +19,10 @@
   "loaded_backfill_runtime_revision_reported_by_operator": "037f306d7b3b6957e33011e40744f755151a7b49",
   "current_disk_head_is_not_runtime_proof": true,
   "counts": {
-    "not_matched_in_saved_complete_catalog_supplemental_query_cancelled": 40,
+    "not_matched_in_saved_complete_catalog_supplemental_query_cancelled": 39,
     "saved_source_and_write_receipts_verified": 124,
-    "candidate_download_permission_denied_original_price_basis_pending": 6
+    "candidate_download_permission_denied_original_price_basis_pending": 6,
+    "not_matched_in_complete_catalog_and_current_fullname_queries": 1
   },
   "indices": [
     {
@@ -3144,43 +3145,106 @@
       "source_first_date": null,
       "source_last_date": null,
       "status": "candidate_download_permission_denied_original_price_basis_pending",
-      "reason": "Actual candidate requests were HTTP403; original price/total-return identity remains pending.",
+      "reason": "Current activated Indices Basic account actually returned NOT_AUTHORIZED for all three windows. Exact ticker is in official Basic CSV; entitlement/list discrepancy unresolved, not rate limit or no-data. Original price/total-return identity remains pending. No verified2023 minute history or automatic purchase/substitution.",
       "permission_windows": [
         {
-          "vendor_ticker": "I:DJUSAL",
-          "requested_window": {
-            "label": "recent",
-            "from": "2026-10-01",
-            "to": "2026-10-02"
+          "label": "DJUSAL_2023",
+          "requested_at_utc": "2026-10-07T07:45:23.794892+00:00",
+          "completed_at_utc": "2026-10-07T07:45:24.422194+00:00",
+          "path": "/v2/aggs/ticker/I%3ADJUSAL/range/5/minute/2023-03-06/2023-03-07",
+          "params": {
+            "sort": "asc",
+            "limit": 50000
           },
           "http_status": 403,
-          "vendor_status": "NOT_AUTHORIZED",
-          "raw_path": "Z:\\Project\\Python\\A-share-quant-trading-v15-industry-map\\dev-tools\\cross-market-yahoo\\massive_verify\\aggs_4e6a805d6580a41f_recent.attempt1.body",
-          "raw_sha256": "d5e138589d2d380ada57afd7d799277ac09eaa647be58710802b6dd735010bf7"
-        },
-        {
+          "status": "NOT_AUTHORIZED",
+          "ticker": null,
+          "results_count": 0,
+          "query_count": null,
+          "classification": "permission_denied",
+          "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+          "body_sha256": "d2d2a1e4132d00370ff956457df3a0419e7fd452c58990c0ad2ae0e2b6d9c81b",
+          "credential_redacted": false,
+          "date_header": "Wed, 07 Oct 2026 07:45:23 GMT",
+          "count": null,
+          "next_url_present": false,
+          "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSAL_2023.json",
+          "receipt_sha256": "073bd5c3b27316901e369b521d5d4824290e9d0fc86db94017e89de7ccbac3c5",
+          "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSAL_2023.body",
+          "raw_sha256": "d2d2a1e4132d00370ff956457df3a0419e7fd452c58990c0ad2ae0e2b6d9c81b",
           "vendor_ticker": "I:DJUSAL",
-          "requested_window": {
-            "label": "2024",
-            "from": "2024-06-03",
-            "to": "2024-06-04"
-          },
-          "http_status": 403,
           "vendor_status": "NOT_AUTHORIZED",
-          "raw_path": "Z:\\Project\\Python\\A-share-quant-trading-v15-industry-map\\dev-tools\\cross-market-yahoo\\massive_verify\\aggs_4e6a805d6580a41f_2024.attempt1.body",
-          "raw_sha256": "83b480241973b659694a74d4be4ae7801ba52aea05aadd6000b6d25e98bb79f5"
-        },
-        {
-          "vendor_ticker": "I:DJUSAL",
           "requested_window": {
             "label": "2023",
             "from": "2023-03-06",
             "to": "2023-03-07"
+          }
+        },
+        {
+          "label": "DJUSAL_2024",
+          "requested_at_utc": "2026-10-07T07:45:36.806410+00:00",
+          "completed_at_utc": "2026-10-07T07:45:37.393761+00:00",
+          "path": "/v2/aggs/ticker/I%3ADJUSAL/range/5/minute/2024-06-03/2024-06-04",
+          "params": {
+            "sort": "asc",
+            "limit": 50000
           },
           "http_status": 403,
+          "status": "NOT_AUTHORIZED",
+          "ticker": null,
+          "results_count": 0,
+          "query_count": null,
+          "classification": "permission_denied",
+          "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+          "body_sha256": "6d095fe64cd781b1a144df1d8324314d1b665016a45403011248d9402bc49bce",
+          "credential_redacted": false,
+          "date_header": "Wed, 07 Oct 2026 07:45:36 GMT",
+          "count": null,
+          "next_url_present": false,
+          "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSAL_2024.json",
+          "receipt_sha256": "1527404d5bd3e87cfc037af1b6acc89a8a60b29a2120da1ae3de98107ad28a85",
+          "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSAL_2024.body",
+          "raw_sha256": "6d095fe64cd781b1a144df1d8324314d1b665016a45403011248d9402bc49bce",
+          "vendor_ticker": "I:DJUSAL",
           "vendor_status": "NOT_AUTHORIZED",
-          "raw_path": "Z:\\Project\\Python\\A-share-quant-trading-v15-industry-map\\dev-tools\\cross-market-yahoo\\massive_verify\\aggs_4e6a805d6580a41f_2023.attempt1.body",
-          "raw_sha256": "40b88726d84bb913dbce06d0f5cad1890e1a3a565440d4e3ccf45eae495f4a61"
+          "requested_window": {
+            "label": "2024",
+            "from": "2024-06-03",
+            "to": "2024-06-04"
+          }
+        },
+        {
+          "label": "DJUSAL_recent",
+          "requested_at_utc": "2026-10-07T07:45:49.808054+00:00",
+          "completed_at_utc": "2026-10-07T07:45:50.447251+00:00",
+          "path": "/v2/aggs/ticker/I%3ADJUSAL/range/5/minute/2026-10-01/2026-10-02",
+          "params": {
+            "sort": "asc",
+            "limit": 50000
+          },
+          "http_status": 403,
+          "status": "NOT_AUTHORIZED",
+          "ticker": null,
+          "results_count": 0,
+          "query_count": null,
+          "classification": "permission_denied",
+          "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+          "body_sha256": "265758dca562a306b32595ec8bc70fd8ad19cd3c3ab44f368c0edc8e75a5551e",
+          "credential_redacted": false,
+          "date_header": "Wed, 07 Oct 2026 07:45:49 GMT",
+          "count": null,
+          "next_url_present": false,
+          "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSAL_recent.json",
+          "receipt_sha256": "e43882408a2beb28f8b61732ccd8cae9b27c8cf5be5863f12c3ff04ebe481550",
+          "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSAL_recent.body",
+          "raw_sha256": "265758dca562a306b32595ec8bc70fd8ad19cd3c3ab44f368c0edc8e75a5551e",
+          "vendor_ticker": "I:DJUSAL",
+          "vendor_status": "NOT_AUTHORIZED",
+          "requested_window": {
+            "label": "recent",
+            "from": "2026-10-01",
+            "to": "2026-10-02"
+          }
         }
       ],
       "errors": [],
@@ -3226,7 +3290,7 @@
           "sha256": "79e2ef75b8704d03ac1bd4175d400fe50d266ab6e5c7951124b917e2d96f6843"
         }
       ],
-      "basic_download_state": "actual_candidate_http403_current_account_denied_original_price_basis_pending",
+      "basic_download_state": "activated_Basic_actual_2023_2024_recent_http403_account_permission_denied",
       "historical_runtime_failures": [],
       "historical_failures_resolved_in_current_state": false,
       "same_original_yahoo_5m": {
@@ -3243,7 +3307,48 @@
         "null_ohlc": 0,
         "wrong_currency_timezone": 0
       },
-      "same_original_source_note": "Source rows are separate providers for the same original market/symbol. Yahoo availability does not turn a Massive DELAYED request into an OK window or prove an exchange-calendar bar at every interval."
+      "same_original_source_note": "Source rows are separate providers for the same original market/symbol. Yahoo availability does not turn a Massive DELAYED request into an OK window or prove an exchange-calendar bar at every interval.",
+      "historical_permission_windows": [
+        {
+          "vendor_ticker": "I:DJUSAL",
+          "requested_window": {
+            "label": "recent",
+            "from": "2026-10-01",
+            "to": "2026-10-02"
+          },
+          "http_status": 403,
+          "vendor_status": "NOT_AUTHORIZED",
+          "raw_path": "Z:\\Project\\Python\\A-share-quant-trading-v15-industry-map\\dev-tools\\cross-market-yahoo\\massive_verify\\aggs_4e6a805d6580a41f_recent.attempt1.body",
+          "raw_sha256": "d5e138589d2d380ada57afd7d799277ac09eaa647be58710802b6dd735010bf7"
+        },
+        {
+          "vendor_ticker": "I:DJUSAL",
+          "requested_window": {
+            "label": "2024",
+            "from": "2024-06-03",
+            "to": "2024-06-04"
+          },
+          "http_status": 403,
+          "vendor_status": "NOT_AUTHORIZED",
+          "raw_path": "Z:\\Project\\Python\\A-share-quant-trading-v15-industry-map\\dev-tools\\cross-market-yahoo\\massive_verify\\aggs_4e6a805d6580a41f_2024.attempt1.body",
+          "raw_sha256": "83b480241973b659694a74d4be4ae7801ba52aea05aadd6000b6d25e98bb79f5"
+        },
+        {
+          "vendor_ticker": "I:DJUSAL",
+          "requested_window": {
+            "label": "2023",
+            "from": "2023-03-06",
+            "to": "2023-03-07"
+          },
+          "http_status": 403,
+          "vendor_status": "NOT_AUTHORIZED",
+          "raw_path": "Z:\\Project\\Python\\A-share-quant-trading-v15-industry-map\\dev-tools\\cross-market-yahoo\\massive_verify\\aggs_4e6a805d6580a41f_2023.attempt1.body",
+          "raw_sha256": "40b88726d84bb913dbce06d0f5cad1890e1a3a565440d4e3ccf45eae495f4a61"
+        }
+      ],
+      "historical_permission_windows_activation_timing_unproven": true,
+      "official_basic_list_member": true,
+      "official_basic_list_and_account_permission_discrepancy_unresolved": true
     },
     {
       "index_id": "US:YAHOO:^DJUSCF",
@@ -3258,43 +3363,106 @@
       "source_first_date": null,
       "source_last_date": null,
       "status": "candidate_download_permission_denied_original_price_basis_pending",
-      "reason": "Actual candidate requests were HTTP403; original price/total-return identity remains pending.",
+      "reason": "Current activated Indices Basic account actually returned NOT_AUTHORIZED for all three windows. Exact ticker is in official Basic CSV; entitlement/list discrepancy unresolved, not rate limit or no-data. Original price/total-return identity remains pending. No verified2023 minute history or automatic purchase/substitution.",
       "permission_windows": [
         {
-          "vendor_ticker": "I:DJUSCF",
-          "requested_window": {
-            "label": "recent",
-            "from": "2026-10-01",
-            "to": "2026-10-02"
+          "label": "DJUSCF_2023",
+          "requested_at_utc": "2026-10-07T07:46:02.810181+00:00",
+          "completed_at_utc": "2026-10-07T07:46:03.499260+00:00",
+          "path": "/v2/aggs/ticker/I%3ADJUSCF/range/5/minute/2023-03-06/2023-03-07",
+          "params": {
+            "sort": "asc",
+            "limit": 50000
           },
           "http_status": 403,
-          "vendor_status": "NOT_AUTHORIZED",
-          "raw_path": "Z:\\Project\\Python\\A-share-quant-trading-v15-industry-map\\dev-tools\\cross-market-yahoo\\massive_verify\\aggs_b6aca559e4942c46_recent.attempt1.body",
-          "raw_sha256": "a2b9b23ccafb0311897e5506dba482cbc6b099cd4b1163151b16a9ffa3f6b7d0"
-        },
-        {
+          "status": "NOT_AUTHORIZED",
+          "ticker": null,
+          "results_count": 0,
+          "query_count": null,
+          "classification": "permission_denied",
+          "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+          "body_sha256": "0e47d185506f0664b079b0e47ff52dff6da00ad6da9c3cfa257bfc680ea9224a",
+          "credential_redacted": false,
+          "date_header": "Wed, 07 Oct 2026 07:46:02 GMT",
+          "count": null,
+          "next_url_present": false,
+          "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSCF_2023.json",
+          "receipt_sha256": "f8aff94246f8272d2a705bdcd750976532b5a7bceb778b014529a5f6a3d7f29a",
+          "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSCF_2023.body",
+          "raw_sha256": "0e47d185506f0664b079b0e47ff52dff6da00ad6da9c3cfa257bfc680ea9224a",
           "vendor_ticker": "I:DJUSCF",
-          "requested_window": {
-            "label": "2024",
-            "from": "2024-06-03",
-            "to": "2024-06-04"
-          },
-          "http_status": 403,
           "vendor_status": "NOT_AUTHORIZED",
-          "raw_path": "Z:\\Project\\Python\\A-share-quant-trading-v15-industry-map\\dev-tools\\cross-market-yahoo\\massive_verify\\aggs_b6aca559e4942c46_2024.attempt1.body",
-          "raw_sha256": "28c0711246db91e8f7c54c131b23f417ff5d1dda4b44c026727d8293adb4fdab"
-        },
-        {
-          "vendor_ticker": "I:DJUSCF",
           "requested_window": {
             "label": "2023",
             "from": "2023-03-06",
             "to": "2023-03-07"
+          }
+        },
+        {
+          "label": "DJUSCF_2024",
+          "requested_at_utc": "2026-10-07T07:46:15.820841+00:00",
+          "completed_at_utc": "2026-10-07T07:46:16.744058+00:00",
+          "path": "/v2/aggs/ticker/I%3ADJUSCF/range/5/minute/2024-06-03/2024-06-04",
+          "params": {
+            "sort": "asc",
+            "limit": 50000
           },
           "http_status": 403,
+          "status": "NOT_AUTHORIZED",
+          "ticker": null,
+          "results_count": 0,
+          "query_count": null,
+          "classification": "permission_denied",
+          "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+          "body_sha256": "f6a0431402af0b05ac77f6d6294776d391976e9a5e0c046f56c67e3eec8cd39a",
+          "credential_redacted": false,
+          "date_header": "Wed, 07 Oct 2026 07:46:16 GMT",
+          "count": null,
+          "next_url_present": false,
+          "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSCF_2024.json",
+          "receipt_sha256": "12846067578a075d388fcf6cf7989551b8f6f6c9a1898a7dce08628927acbd7e",
+          "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSCF_2024.body",
+          "raw_sha256": "f6a0431402af0b05ac77f6d6294776d391976e9a5e0c046f56c67e3eec8cd39a",
+          "vendor_ticker": "I:DJUSCF",
           "vendor_status": "NOT_AUTHORIZED",
-          "raw_path": "Z:\\Project\\Python\\A-share-quant-trading-v15-industry-map\\dev-tools\\cross-market-yahoo\\massive_verify\\aggs_b6aca559e4942c46_2023.attempt1.body",
-          "raw_sha256": "0180fb2d46cb3ebec9502c69d47afce28306fb8952ff85ab6aa7b8e882be3a7c"
+          "requested_window": {
+            "label": "2024",
+            "from": "2024-06-03",
+            "to": "2024-06-04"
+          }
+        },
+        {
+          "label": "DJUSCF_recent",
+          "requested_at_utc": "2026-10-07T07:46:28.831671+00:00",
+          "completed_at_utc": "2026-10-07T07:46:29.940622+00:00",
+          "path": "/v2/aggs/ticker/I%3ADJUSCF/range/5/minute/2026-10-01/2026-10-02",
+          "params": {
+            "sort": "asc",
+            "limit": 50000
+          },
+          "http_status": 403,
+          "status": "NOT_AUTHORIZED",
+          "ticker": null,
+          "results_count": 0,
+          "query_count": null,
+          "classification": "permission_denied",
+          "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+          "body_sha256": "9bbcbbe75f155bd1f07b8e1109abe97305f806c6d9862ebd5753f716dab48bb1",
+          "credential_redacted": false,
+          "date_header": "Wed, 07 Oct 2026 07:46:29 GMT",
+          "count": null,
+          "next_url_present": false,
+          "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSCF_recent.json",
+          "receipt_sha256": "a6ae8f3967ddc280f66a4b0b127226179593a0550b474930e8ab45c6a3268430",
+          "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSCF_recent.body",
+          "raw_sha256": "9bbcbbe75f155bd1f07b8e1109abe97305f806c6d9862ebd5753f716dab48bb1",
+          "vendor_ticker": "I:DJUSCF",
+          "vendor_status": "NOT_AUTHORIZED",
+          "requested_window": {
+            "label": "recent",
+            "from": "2026-10-01",
+            "to": "2026-10-02"
+          }
         }
       ],
       "errors": [],
@@ -3340,7 +3508,7 @@
           "sha256": "79e2ef75b8704d03ac1bd4175d400fe50d266ab6e5c7951124b917e2d96f6843"
         }
       ],
-      "basic_download_state": "actual_candidate_http403_current_account_denied_original_price_basis_pending",
+      "basic_download_state": "activated_Basic_actual_2023_2024_recent_http403_account_permission_denied",
       "historical_runtime_failures": [],
       "historical_failures_resolved_in_current_state": false,
       "same_original_yahoo_5m": {
@@ -3357,7 +3525,48 @@
         "null_ohlc": 0,
         "wrong_currency_timezone": 0
       },
-      "same_original_source_note": "Source rows are separate providers for the same original market/symbol. Yahoo availability does not turn a Massive DELAYED request into an OK window or prove an exchange-calendar bar at every interval."
+      "same_original_source_note": "Source rows are separate providers for the same original market/symbol. Yahoo availability does not turn a Massive DELAYED request into an OK window or prove an exchange-calendar bar at every interval.",
+      "historical_permission_windows": [
+        {
+          "vendor_ticker": "I:DJUSCF",
+          "requested_window": {
+            "label": "recent",
+            "from": "2026-10-01",
+            "to": "2026-10-02"
+          },
+          "http_status": 403,
+          "vendor_status": "NOT_AUTHORIZED",
+          "raw_path": "Z:\\Project\\Python\\A-share-quant-trading-v15-industry-map\\dev-tools\\cross-market-yahoo\\massive_verify\\aggs_b6aca559e4942c46_recent.attempt1.body",
+          "raw_sha256": "a2b9b23ccafb0311897e5506dba482cbc6b099cd4b1163151b16a9ffa3f6b7d0"
+        },
+        {
+          "vendor_ticker": "I:DJUSCF",
+          "requested_window": {
+            "label": "2024",
+            "from": "2024-06-03",
+            "to": "2024-06-04"
+          },
+          "http_status": 403,
+          "vendor_status": "NOT_AUTHORIZED",
+          "raw_path": "Z:\\Project\\Python\\A-share-quant-trading-v15-industry-map\\dev-tools\\cross-market-yahoo\\massive_verify\\aggs_b6aca559e4942c46_2024.attempt1.body",
+          "raw_sha256": "28c0711246db91e8f7c54c131b23f417ff5d1dda4b44c026727d8293adb4fdab"
+        },
+        {
+          "vendor_ticker": "I:DJUSCF",
+          "requested_window": {
+            "label": "2023",
+            "from": "2023-03-06",
+            "to": "2023-03-07"
+          },
+          "http_status": 403,
+          "vendor_status": "NOT_AUTHORIZED",
+          "raw_path": "Z:\\Project\\Python\\A-share-quant-trading-v15-industry-map\\dev-tools\\cross-market-yahoo\\massive_verify\\aggs_b6aca559e4942c46_2023.attempt1.body",
+          "raw_sha256": "0180fb2d46cb3ebec9502c69d47afce28306fb8952ff85ab6aa7b8e882be3a7c"
+        }
+      ],
+      "historical_permission_windows_activation_timing_unproven": true,
+      "official_basic_list_member": true,
+      "official_basic_list_and_account_permission_discrepancy_unresolved": true
     },
     {
       "index_id": "US:YAHOO:^DJUSDB",
@@ -3372,43 +3581,106 @@
       "source_first_date": null,
       "source_last_date": null,
       "status": "candidate_download_permission_denied_original_price_basis_pending",
-      "reason": "Actual candidate requests were HTTP403; original price/total-return identity remains pending.",
+      "reason": "Current activated Indices Basic account actually returned NOT_AUTHORIZED for all three windows. Exact ticker is in official Basic CSV; entitlement/list discrepancy unresolved, not rate limit or no-data. Original price/total-return identity remains pending. No verified2023 minute history or automatic purchase/substitution.",
       "permission_windows": [
         {
-          "vendor_ticker": "I:DJUSDB",
-          "requested_window": {
-            "label": "recent",
-            "from": "2026-10-01",
-            "to": "2026-10-02"
+          "label": "DJUSDB_2023",
+          "requested_at_utc": "2026-10-07T07:46:41.844032+00:00",
+          "completed_at_utc": "2026-10-07T07:46:42.362031+00:00",
+          "path": "/v2/aggs/ticker/I%3ADJUSDB/range/5/minute/2023-03-06/2023-03-07",
+          "params": {
+            "sort": "asc",
+            "limit": 50000
           },
           "http_status": 403,
-          "vendor_status": "NOT_AUTHORIZED",
-          "raw_path": "Z:\\Project\\Python\\A-share-quant-trading-v15-industry-map\\dev-tools\\cross-market-yahoo\\massive_verify\\aggs_c157faad2741d274_recent.attempt1.body",
-          "raw_sha256": "139768eba150c69339ebe497bf842cbdadd4de61afdb9ec12258d47b6ac4c701"
-        },
-        {
+          "status": "NOT_AUTHORIZED",
+          "ticker": null,
+          "results_count": 0,
+          "query_count": null,
+          "classification": "permission_denied",
+          "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+          "body_sha256": "2de4a5399b33ae78c9bfd1d2cdff71e43a47a7202596120f195326f241aa9e64",
+          "credential_redacted": false,
+          "date_header": "Wed, 07 Oct 2026 07:46:41 GMT",
+          "count": null,
+          "next_url_present": false,
+          "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSDB_2023.json",
+          "receipt_sha256": "5b75efaf798135aeeb5ece3a5cb9f1740941d8c29b173566407517220e6a3774",
+          "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSDB_2023.body",
+          "raw_sha256": "2de4a5399b33ae78c9bfd1d2cdff71e43a47a7202596120f195326f241aa9e64",
           "vendor_ticker": "I:DJUSDB",
-          "requested_window": {
-            "label": "2024",
-            "from": "2024-06-03",
-            "to": "2024-06-04"
-          },
-          "http_status": 403,
           "vendor_status": "NOT_AUTHORIZED",
-          "raw_path": "Z:\\Project\\Python\\A-share-quant-trading-v15-industry-map\\dev-tools\\cross-market-yahoo\\massive_verify\\aggs_c157faad2741d274_2024.attempt1.body",
-          "raw_sha256": "ebc3ca9a8654b290ec3922377cfb9ea52b74c495360ec6f78850ba6f5ab72e32"
-        },
-        {
-          "vendor_ticker": "I:DJUSDB",
           "requested_window": {
             "label": "2023",
             "from": "2023-03-06",
             "to": "2023-03-07"
+          }
+        },
+        {
+          "label": "DJUSDB_2024",
+          "requested_at_utc": "2026-10-07T07:46:54.858762+00:00",
+          "completed_at_utc": "2026-10-07T07:46:55.701262+00:00",
+          "path": "/v2/aggs/ticker/I%3ADJUSDB/range/5/minute/2024-06-03/2024-06-04",
+          "params": {
+            "sort": "asc",
+            "limit": 50000
           },
           "http_status": 403,
+          "status": "NOT_AUTHORIZED",
+          "ticker": null,
+          "results_count": 0,
+          "query_count": null,
+          "classification": "permission_denied",
+          "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+          "body_sha256": "ab79a469c3872b0260a1d6db1b70671d4ac3873d60478ec22031c6800457a85b",
+          "credential_redacted": false,
+          "date_header": "Wed, 07 Oct 2026 07:46:55 GMT",
+          "count": null,
+          "next_url_present": false,
+          "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSDB_2024.json",
+          "receipt_sha256": "b98d855ef3847d7073e42ec1d0bf2b73bf61e410b4680ed2f807608409ab8884",
+          "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSDB_2024.body",
+          "raw_sha256": "ab79a469c3872b0260a1d6db1b70671d4ac3873d60478ec22031c6800457a85b",
+          "vendor_ticker": "I:DJUSDB",
           "vendor_status": "NOT_AUTHORIZED",
-          "raw_path": "Z:\\Project\\Python\\A-share-quant-trading-v15-industry-map\\dev-tools\\cross-market-yahoo\\massive_verify\\aggs_c157faad2741d274_2023.attempt1.body",
-          "raw_sha256": "620df174723a3094112ba233c6f74a07675c7f0a647033499b1deae5012a884b"
+          "requested_window": {
+            "label": "2024",
+            "from": "2024-06-03",
+            "to": "2024-06-04"
+          }
+        },
+        {
+          "label": "DJUSDB_recent",
+          "requested_at_utc": "2026-10-07T07:47:07.870473+00:00",
+          "completed_at_utc": "2026-10-07T07:47:08.371989+00:00",
+          "path": "/v2/aggs/ticker/I%3ADJUSDB/range/5/minute/2026-10-01/2026-10-02",
+          "params": {
+            "sort": "asc",
+            "limit": 50000
+          },
+          "http_status": 403,
+          "status": "NOT_AUTHORIZED",
+          "ticker": null,
+          "results_count": 0,
+          "query_count": null,
+          "classification": "permission_denied",
+          "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+          "body_sha256": "e94960a32675836dbbb9bd13581017fb3707681bcef77bc1b63c1eed4fb4501d",
+          "credential_redacted": false,
+          "date_header": "Wed, 07 Oct 2026 07:47:07 GMT",
+          "count": null,
+          "next_url_present": false,
+          "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSDB_recent.json",
+          "receipt_sha256": "00ff55f8a35a59b35076e39b127da7cc5b191b2745b43e7d0def277943e3a4f6",
+          "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSDB_recent.body",
+          "raw_sha256": "e94960a32675836dbbb9bd13581017fb3707681bcef77bc1b63c1eed4fb4501d",
+          "vendor_ticker": "I:DJUSDB",
+          "vendor_status": "NOT_AUTHORIZED",
+          "requested_window": {
+            "label": "recent",
+            "from": "2026-10-01",
+            "to": "2026-10-02"
+          }
         }
       ],
       "errors": [],
@@ -3454,7 +3726,7 @@
           "sha256": "79e2ef75b8704d03ac1bd4175d400fe50d266ab6e5c7951124b917e2d96f6843"
         }
       ],
-      "basic_download_state": "actual_candidate_http403_current_account_denied_original_price_basis_pending",
+      "basic_download_state": "activated_Basic_actual_2023_2024_recent_http403_account_permission_denied",
       "historical_runtime_failures": [],
       "historical_failures_resolved_in_current_state": false,
       "same_original_yahoo_5m": {
@@ -3471,7 +3743,48 @@
         "null_ohlc": 0,
         "wrong_currency_timezone": 0
       },
-      "same_original_source_note": "Source rows are separate providers for the same original market/symbol. Yahoo availability does not turn a Massive DELAYED request into an OK window or prove an exchange-calendar bar at every interval."
+      "same_original_source_note": "Source rows are separate providers for the same original market/symbol. Yahoo availability does not turn a Massive DELAYED request into an OK window or prove an exchange-calendar bar at every interval.",
+      "historical_permission_windows": [
+        {
+          "vendor_ticker": "I:DJUSDB",
+          "requested_window": {
+            "label": "recent",
+            "from": "2026-10-01",
+            "to": "2026-10-02"
+          },
+          "http_status": 403,
+          "vendor_status": "NOT_AUTHORIZED",
+          "raw_path": "Z:\\Project\\Python\\A-share-quant-trading-v15-industry-map\\dev-tools\\cross-market-yahoo\\massive_verify\\aggs_c157faad2741d274_recent.attempt1.body",
+          "raw_sha256": "139768eba150c69339ebe497bf842cbdadd4de61afdb9ec12258d47b6ac4c701"
+        },
+        {
+          "vendor_ticker": "I:DJUSDB",
+          "requested_window": {
+            "label": "2024",
+            "from": "2024-06-03",
+            "to": "2024-06-04"
+          },
+          "http_status": 403,
+          "vendor_status": "NOT_AUTHORIZED",
+          "raw_path": "Z:\\Project\\Python\\A-share-quant-trading-v15-industry-map\\dev-tools\\cross-market-yahoo\\massive_verify\\aggs_c157faad2741d274_2024.attempt1.body",
+          "raw_sha256": "ebc3ca9a8654b290ec3922377cfb9ea52b74c495360ec6f78850ba6f5ab72e32"
+        },
+        {
+          "vendor_ticker": "I:DJUSDB",
+          "requested_window": {
+            "label": "2023",
+            "from": "2023-03-06",
+            "to": "2023-03-07"
+          },
+          "http_status": 403,
+          "vendor_status": "NOT_AUTHORIZED",
+          "raw_path": "Z:\\Project\\Python\\A-share-quant-trading-v15-industry-map\\dev-tools\\cross-market-yahoo\\massive_verify\\aggs_c157faad2741d274_2023.attempt1.body",
+          "raw_sha256": "620df174723a3094112ba233c6f74a07675c7f0a647033499b1deae5012a884b"
+        }
+      ],
+      "historical_permission_windows_activation_timing_unproven": true,
+      "official_basic_list_member": true,
+      "official_basic_list_and_account_permission_discrepancy_unresolved": true
     },
     {
       "index_id": "US:YAHOO:^DJUSHD",
@@ -3486,43 +3799,106 @@
       "source_first_date": null,
       "source_last_date": null,
       "status": "candidate_download_permission_denied_original_price_basis_pending",
-      "reason": "Actual candidate requests were HTTP403; original price/total-return identity remains pending.",
+      "reason": "Current activated Indices Basic account actually returned NOT_AUTHORIZED for all three windows. Exact ticker is in official Basic CSV; entitlement/list discrepancy unresolved, not rate limit or no-data. Original price/total-return identity remains pending. No verified2023 minute history or automatic purchase/substitution.",
       "permission_windows": [
         {
-          "vendor_ticker": "I:DJUSHD",
-          "requested_window": {
-            "label": "recent",
-            "from": "2026-10-01",
-            "to": "2026-10-02"
+          "label": "DJUSHD_2023",
+          "requested_at_utc": "2026-10-07T07:47:20.877169+00:00",
+          "completed_at_utc": "2026-10-07T07:47:21.399595+00:00",
+          "path": "/v2/aggs/ticker/I%3ADJUSHD/range/5/minute/2023-03-06/2023-03-07",
+          "params": {
+            "sort": "asc",
+            "limit": 50000
           },
           "http_status": 403,
-          "vendor_status": "NOT_AUTHORIZED",
-          "raw_path": "Z:\\Project\\Python\\A-share-quant-trading-v15-industry-map\\dev-tools\\cross-market-yahoo\\massive_verify\\aggs_c57f57997db1c2ba_recent.attempt1.body",
-          "raw_sha256": "ed24195a635902cd6aaec2279e7bccb50067c04904cae5d9fc5302da844aeeeb"
-        },
-        {
+          "status": "NOT_AUTHORIZED",
+          "ticker": null,
+          "results_count": 0,
+          "query_count": null,
+          "classification": "permission_denied",
+          "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+          "body_sha256": "f2fe16ffc47970aa44f05239f396f40fd848ba5bbf46b8e2a50f9cc7a2a54977",
+          "credential_redacted": false,
+          "date_header": "Wed, 07 Oct 2026 07:47:20 GMT",
+          "count": null,
+          "next_url_present": false,
+          "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSHD_2023.json",
+          "receipt_sha256": "c2d353d63c6d1bbd1a255c855c69225caee45effd3276cfffcc0a8530dcc86c1",
+          "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSHD_2023.body",
+          "raw_sha256": "f2fe16ffc47970aa44f05239f396f40fd848ba5bbf46b8e2a50f9cc7a2a54977",
           "vendor_ticker": "I:DJUSHD",
-          "requested_window": {
-            "label": "2024",
-            "from": "2024-06-03",
-            "to": "2024-06-04"
-          },
-          "http_status": 403,
           "vendor_status": "NOT_AUTHORIZED",
-          "raw_path": "Z:\\Project\\Python\\A-share-quant-trading-v15-industry-map\\dev-tools\\cross-market-yahoo\\massive_verify\\aggs_c57f57997db1c2ba_2024.attempt1.body",
-          "raw_sha256": "42b07703674a4e4b953b5404cab31d9e174a0251c6dabdbe032e7c11acfde113"
-        },
-        {
-          "vendor_ticker": "I:DJUSHD",
           "requested_window": {
             "label": "2023",
             "from": "2023-03-06",
             "to": "2023-03-07"
+          }
+        },
+        {
+          "label": "DJUSHD_2024",
+          "requested_at_utc": "2026-10-07T07:47:33.883477+00:00",
+          "completed_at_utc": "2026-10-07T07:47:34.820148+00:00",
+          "path": "/v2/aggs/ticker/I%3ADJUSHD/range/5/minute/2024-06-03/2024-06-04",
+          "params": {
+            "sort": "asc",
+            "limit": 50000
           },
           "http_status": 403,
+          "status": "NOT_AUTHORIZED",
+          "ticker": null,
+          "results_count": 0,
+          "query_count": null,
+          "classification": "permission_denied",
+          "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+          "body_sha256": "72fe03187737c92979b970c948c1f6c8f330e43837e54b67ac56e6036340285f",
+          "credential_redacted": false,
+          "date_header": "Wed, 07 Oct 2026 07:47:34 GMT",
+          "count": null,
+          "next_url_present": false,
+          "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSHD_2024.json",
+          "receipt_sha256": "70261e949d457fee07661e3ec003dc0d8c1aa98b6050aa297385bb0527210d8c",
+          "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSHD_2024.body",
+          "raw_sha256": "72fe03187737c92979b970c948c1f6c8f330e43837e54b67ac56e6036340285f",
+          "vendor_ticker": "I:DJUSHD",
           "vendor_status": "NOT_AUTHORIZED",
-          "raw_path": "Z:\\Project\\Python\\A-share-quant-trading-v15-industry-map\\dev-tools\\cross-market-yahoo\\massive_verify\\aggs_c57f57997db1c2ba_2023.attempt1.body",
-          "raw_sha256": "581ced08da1491f62f8d66df8de561ea12e5f75d41b7799783fbf9e5ff762d5d"
+          "requested_window": {
+            "label": "2024",
+            "from": "2024-06-03",
+            "to": "2024-06-04"
+          }
+        },
+        {
+          "label": "DJUSHD_recent",
+          "requested_at_utc": "2026-10-07T07:47:46.890948+00:00",
+          "completed_at_utc": "2026-10-07T07:47:47.799053+00:00",
+          "path": "/v2/aggs/ticker/I%3ADJUSHD/range/5/minute/2026-10-01/2026-10-02",
+          "params": {
+            "sort": "asc",
+            "limit": 50000
+          },
+          "http_status": 403,
+          "status": "NOT_AUTHORIZED",
+          "ticker": null,
+          "results_count": 0,
+          "query_count": null,
+          "classification": "permission_denied",
+          "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+          "body_sha256": "2414b04ac495334a209ef2aadee7d172da55f1b48f13a5c22bb14d4175b625c5",
+          "credential_redacted": false,
+          "date_header": "Wed, 07 Oct 2026 07:47:47 GMT",
+          "count": null,
+          "next_url_present": false,
+          "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSHD_recent.json",
+          "receipt_sha256": "ea02147ece5a0ab4ee1b770563f9f13aabebfd1d0448762906bbd023e7c5ee9c",
+          "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSHD_recent.body",
+          "raw_sha256": "2414b04ac495334a209ef2aadee7d172da55f1b48f13a5c22bb14d4175b625c5",
+          "vendor_ticker": "I:DJUSHD",
+          "vendor_status": "NOT_AUTHORIZED",
+          "requested_window": {
+            "label": "recent",
+            "from": "2026-10-01",
+            "to": "2026-10-02"
+          }
         }
       ],
       "errors": [],
@@ -3568,7 +3944,7 @@
           "sha256": "79e2ef75b8704d03ac1bd4175d400fe50d266ab6e5c7951124b917e2d96f6843"
         }
       ],
-      "basic_download_state": "actual_candidate_http403_current_account_denied_original_price_basis_pending",
+      "basic_download_state": "activated_Basic_actual_2023_2024_recent_http403_account_permission_denied",
       "historical_runtime_failures": [],
       "historical_failures_resolved_in_current_state": false,
       "same_original_yahoo_5m": {
@@ -3585,7 +3961,48 @@
         "null_ohlc": 0,
         "wrong_currency_timezone": 0
       },
-      "same_original_source_note": "Source rows are separate providers for the same original market/symbol. Yahoo availability does not turn a Massive DELAYED request into an OK window or prove an exchange-calendar bar at every interval."
+      "same_original_source_note": "Source rows are separate providers for the same original market/symbol. Yahoo availability does not turn a Massive DELAYED request into an OK window or prove an exchange-calendar bar at every interval.",
+      "historical_permission_windows": [
+        {
+          "vendor_ticker": "I:DJUSHD",
+          "requested_window": {
+            "label": "recent",
+            "from": "2026-10-01",
+            "to": "2026-10-02"
+          },
+          "http_status": 403,
+          "vendor_status": "NOT_AUTHORIZED",
+          "raw_path": "Z:\\Project\\Python\\A-share-quant-trading-v15-industry-map\\dev-tools\\cross-market-yahoo\\massive_verify\\aggs_c57f57997db1c2ba_recent.attempt1.body",
+          "raw_sha256": "ed24195a635902cd6aaec2279e7bccb50067c04904cae5d9fc5302da844aeeeb"
+        },
+        {
+          "vendor_ticker": "I:DJUSHD",
+          "requested_window": {
+            "label": "2024",
+            "from": "2024-06-03",
+            "to": "2024-06-04"
+          },
+          "http_status": 403,
+          "vendor_status": "NOT_AUTHORIZED",
+          "raw_path": "Z:\\Project\\Python\\A-share-quant-trading-v15-industry-map\\dev-tools\\cross-market-yahoo\\massive_verify\\aggs_c57f57997db1c2ba_2024.attempt1.body",
+          "raw_sha256": "42b07703674a4e4b953b5404cab31d9e174a0251c6dabdbe032e7c11acfde113"
+        },
+        {
+          "vendor_ticker": "I:DJUSHD",
+          "requested_window": {
+            "label": "2023",
+            "from": "2023-03-06",
+            "to": "2023-03-07"
+          },
+          "http_status": 403,
+          "vendor_status": "NOT_AUTHORIZED",
+          "raw_path": "Z:\\Project\\Python\\A-share-quant-trading-v15-industry-map\\dev-tools\\cross-market-yahoo\\massive_verify\\aggs_c57f57997db1c2ba_2023.attempt1.body",
+          "raw_sha256": "581ced08da1491f62f8d66df8de561ea12e5f75d41b7799783fbf9e5ff762d5d"
+        }
+      ],
+      "historical_permission_windows_activation_timing_unproven": true,
+      "official_basic_list_member": true,
+      "official_basic_list_and_account_permission_discrepancy_unresolved": true
     },
     {
       "index_id": "US:YAHOO:^DJUSNF",
@@ -3600,43 +4017,106 @@
       "source_first_date": null,
       "source_last_date": null,
       "status": "candidate_download_permission_denied_original_price_basis_pending",
-      "reason": "Actual candidate requests were HTTP403; original price/total-return identity remains pending.",
+      "reason": "Current activated Indices Basic account actually returned NOT_AUTHORIZED for all three windows. Exact ticker is in official Basic CSV; entitlement/list discrepancy unresolved, not rate limit or no-data. Original price/total-return identity remains pending. No verified2023 minute history or automatic purchase/substitution.",
       "permission_windows": [
         {
-          "vendor_ticker": "I:DJUSNF",
-          "requested_window": {
-            "label": "recent",
-            "from": "2026-10-01",
-            "to": "2026-10-02"
+          "label": "DJUSNF_2023",
+          "requested_at_utc": "2026-10-07T07:47:59.899497+00:00",
+          "completed_at_utc": "2026-10-07T07:48:00.537739+00:00",
+          "path": "/v2/aggs/ticker/I%3ADJUSNF/range/5/minute/2023-03-06/2023-03-07",
+          "params": {
+            "sort": "asc",
+            "limit": 50000
           },
           "http_status": 403,
-          "vendor_status": "NOT_AUTHORIZED",
-          "raw_path": "Z:\\Project\\Python\\A-share-quant-trading-v15-industry-map\\dev-tools\\cross-market-yahoo\\massive_verify\\aggs_65e82a01b3fb544c_recent.attempt1.body",
-          "raw_sha256": "62828d46591d13bc97dcc5c4be0db10480dbe95c405bac54367de72d5c1cddf3"
-        },
-        {
+          "status": "NOT_AUTHORIZED",
+          "ticker": null,
+          "results_count": 0,
+          "query_count": null,
+          "classification": "permission_denied",
+          "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+          "body_sha256": "c8446d7b862171bc08e0a337ebbdd1d13d47114b5aa930e4f890fb75407d8b50",
+          "credential_redacted": false,
+          "date_header": "Wed, 07 Oct 2026 07:47:59 GMT",
+          "count": null,
+          "next_url_present": false,
+          "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSNF_2023.json",
+          "receipt_sha256": "13c0c4a4155bee2308d5c75703ad387f1cec7d2eab09b118328ed0b468399a42",
+          "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSNF_2023.body",
+          "raw_sha256": "c8446d7b862171bc08e0a337ebbdd1d13d47114b5aa930e4f890fb75407d8b50",
           "vendor_ticker": "I:DJUSNF",
-          "requested_window": {
-            "label": "2024",
-            "from": "2024-06-03",
-            "to": "2024-06-04"
-          },
-          "http_status": 403,
           "vendor_status": "NOT_AUTHORIZED",
-          "raw_path": "Z:\\Project\\Python\\A-share-quant-trading-v15-industry-map\\dev-tools\\cross-market-yahoo\\massive_verify\\aggs_65e82a01b3fb544c_2024.attempt1.body",
-          "raw_sha256": "db8766b6b86cb58d4744b191e5c5195f47feb0223901022f986bfeab6d937c98"
-        },
-        {
-          "vendor_ticker": "I:DJUSNF",
           "requested_window": {
             "label": "2023",
             "from": "2023-03-06",
             "to": "2023-03-07"
+          }
+        },
+        {
+          "label": "DJUSNF_2024",
+          "requested_at_utc": "2026-10-07T07:48:12.914129+00:00",
+          "completed_at_utc": "2026-10-07T07:48:13.747893+00:00",
+          "path": "/v2/aggs/ticker/I%3ADJUSNF/range/5/minute/2024-06-03/2024-06-04",
+          "params": {
+            "sort": "asc",
+            "limit": 50000
           },
           "http_status": 403,
+          "status": "NOT_AUTHORIZED",
+          "ticker": null,
+          "results_count": 0,
+          "query_count": null,
+          "classification": "permission_denied",
+          "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+          "body_sha256": "d4514ed805a6e8b1994284de7adc43d289d8d4697dc1858b3bcb348b9ca2431f",
+          "credential_redacted": false,
+          "date_header": "Wed, 07 Oct 2026 07:48:13 GMT",
+          "count": null,
+          "next_url_present": false,
+          "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSNF_2024.json",
+          "receipt_sha256": "fd4229007397369d4c014fc2ac1bccc0d3e6777aa39eb5fe2a0ff5a315bed9c6",
+          "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSNF_2024.body",
+          "raw_sha256": "d4514ed805a6e8b1994284de7adc43d289d8d4697dc1858b3bcb348b9ca2431f",
+          "vendor_ticker": "I:DJUSNF",
           "vendor_status": "NOT_AUTHORIZED",
-          "raw_path": "Z:\\Project\\Python\\A-share-quant-trading-v15-industry-map\\dev-tools\\cross-market-yahoo\\massive_verify\\aggs_65e82a01b3fb544c_2023.attempt1.body",
-          "raw_sha256": "f0dbced8ef89cbfbebbfddf7ad5e82b9d26f9718775d94eaa5832b6a2dbf36d4"
+          "requested_window": {
+            "label": "2024",
+            "from": "2024-06-03",
+            "to": "2024-06-04"
+          }
+        },
+        {
+          "label": "DJUSNF_recent",
+          "requested_at_utc": "2026-10-07T07:48:25.923106+00:00",
+          "completed_at_utc": "2026-10-07T07:48:26.425863+00:00",
+          "path": "/v2/aggs/ticker/I%3ADJUSNF/range/5/minute/2026-10-01/2026-10-02",
+          "params": {
+            "sort": "asc",
+            "limit": 50000
+          },
+          "http_status": 403,
+          "status": "NOT_AUTHORIZED",
+          "ticker": null,
+          "results_count": 0,
+          "query_count": null,
+          "classification": "permission_denied",
+          "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+          "body_sha256": "02d33ba21a743738093c40b0793cbeebf89328c0cf1ea20b34e008ce48d9e3c7",
+          "credential_redacted": false,
+          "date_header": "Wed, 07 Oct 2026 07:48:25 GMT",
+          "count": null,
+          "next_url_present": false,
+          "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSNF_recent.json",
+          "receipt_sha256": "b670cac1f82b3c00fd5af8d9a07133c3e587dd4d72659f6144cb32fa4b2f40a7",
+          "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSNF_recent.body",
+          "raw_sha256": "02d33ba21a743738093c40b0793cbeebf89328c0cf1ea20b34e008ce48d9e3c7",
+          "vendor_ticker": "I:DJUSNF",
+          "vendor_status": "NOT_AUTHORIZED",
+          "requested_window": {
+            "label": "recent",
+            "from": "2026-10-01",
+            "to": "2026-10-02"
+          }
         }
       ],
       "errors": [],
@@ -3682,7 +4162,7 @@
           "sha256": "79e2ef75b8704d03ac1bd4175d400fe50d266ab6e5c7951124b917e2d96f6843"
         }
       ],
-      "basic_download_state": "actual_candidate_http403_current_account_denied_original_price_basis_pending",
+      "basic_download_state": "activated_Basic_actual_2023_2024_recent_http403_account_permission_denied",
       "historical_runtime_failures": [],
       "historical_failures_resolved_in_current_state": false,
       "same_original_yahoo_5m": {
@@ -3699,7 +4179,48 @@
         "null_ohlc": 0,
         "wrong_currency_timezone": 0
       },
-      "same_original_source_note": "Source rows are separate providers for the same original market/symbol. Yahoo availability does not turn a Massive DELAYED request into an OK window or prove an exchange-calendar bar at every interval."
+      "same_original_source_note": "Source rows are separate providers for the same original market/symbol. Yahoo availability does not turn a Massive DELAYED request into an OK window or prove an exchange-calendar bar at every interval.",
+      "historical_permission_windows": [
+        {
+          "vendor_ticker": "I:DJUSNF",
+          "requested_window": {
+            "label": "recent",
+            "from": "2026-10-01",
+            "to": "2026-10-02"
+          },
+          "http_status": 403,
+          "vendor_status": "NOT_AUTHORIZED",
+          "raw_path": "Z:\\Project\\Python\\A-share-quant-trading-v15-industry-map\\dev-tools\\cross-market-yahoo\\massive_verify\\aggs_65e82a01b3fb544c_recent.attempt1.body",
+          "raw_sha256": "62828d46591d13bc97dcc5c4be0db10480dbe95c405bac54367de72d5c1cddf3"
+        },
+        {
+          "vendor_ticker": "I:DJUSNF",
+          "requested_window": {
+            "label": "2024",
+            "from": "2024-06-03",
+            "to": "2024-06-04"
+          },
+          "http_status": 403,
+          "vendor_status": "NOT_AUTHORIZED",
+          "raw_path": "Z:\\Project\\Python\\A-share-quant-trading-v15-industry-map\\dev-tools\\cross-market-yahoo\\massive_verify\\aggs_65e82a01b3fb544c_2024.attempt1.body",
+          "raw_sha256": "db8766b6b86cb58d4744b191e5c5195f47feb0223901022f986bfeab6d937c98"
+        },
+        {
+          "vendor_ticker": "I:DJUSNF",
+          "requested_window": {
+            "label": "2023",
+            "from": "2023-03-06",
+            "to": "2023-03-07"
+          },
+          "http_status": 403,
+          "vendor_status": "NOT_AUTHORIZED",
+          "raw_path": "Z:\\Project\\Python\\A-share-quant-trading-v15-industry-map\\dev-tools\\cross-market-yahoo\\massive_verify\\aggs_65e82a01b3fb544c_2023.attempt1.body",
+          "raw_sha256": "f0dbced8ef89cbfbebbfddf7ad5e82b9d26f9718775d94eaa5832b6a2dbf36d4"
+        }
+      ],
+      "historical_permission_windows_activation_timing_unproven": true,
+      "official_basic_list_member": true,
+      "official_basic_list_and_account_permission_discrepancy_unresolved": true
     },
     {
       "index_id": "US:YAHOO:^DRG",
@@ -3713,8 +4234,8 @@
       "verified_rows": 0,
       "source_first_date": null,
       "source_last_date": null,
-      "status": "not_matched_in_saved_complete_catalog_supplemental_query_cancelled",
-      "reason": "Saved catalog did not establish the same original index; no permanent unsupported claim.",
+      "status": "not_matched_in_complete_catalog_and_current_fullname_queries",
+      "reason": "No same original DRG match in complete catalog or current owner-fullname searches (active/inactive, four HTTP200 empty responses). Not permanent unsupported proof. Free FirstRate sample only covers2026-09-21..2026-10-06; full archive is offered for purchase, no2023/2024 original minute download verified. ICE native history requires an authenticated entitled account.",
       "permission_windows": [],
       "errors": [],
       "original_provider": "ICE/NYSE",
@@ -3733,7 +4254,7 @@
         "original_full_name_evidence": "literal_DRg_method_and_current_ICE_catalog",
         "full_native_feed_review": {}
       },
-      "return_basis_evidence": "inference: primary-market-price capitalization calculation is described separately from a dividend-reinvesting total-return version; retrieved DRG document does not print a price/total-return ticker pair",
+      "return_basis_evidence": "Inference from actual downloaded2014 ICE original-DRG brochure: DRG is market-cap weighted using component primary-market prices; a cash-dividend-reinvesting total-return version is described separately. No Massive original-DRG match/PR ticker pair verified. Search-cached newer-methodology text was not adopted: attempted URL returned404.",
       "return_basis_label": "原指数PR/TR口径待核",
       "primary_sources": [
         {
@@ -3741,8 +4262,11 @@
           "sha256": "c24b4bff92a3740022c15a5ffe1268ea3c67f363f1f2bf7edc7b439b045b413b"
         },
         {
-          "url": "https://www.nyse.com/publicdocs/nyse/indices/nyse_arca_ew_pharmaceutical_index.pdf",
-          "sha256": "d619d9bfba5631f8e621c9254ddd192bf49ef3824b83691823f865a416dd6a28"
+          "url": "https://www.ice.com/publicdocs/nyse/indices/nyse_arca_pharmaceutical_index.pdf",
+          "sha256": "3a0dac40f42165a3e0469b02a4609614fa94c48c94065ebc0a76dff74e58d832",
+          "http_status": 200,
+          "document_year": 2014,
+          "scope": "Original market-cap-weighted DRG, not equal-weight DGE"
         }
       ],
       "basic_download_state": "no_same_index_match_download_not_attempted",
@@ -3762,7 +4286,207 @@
         "null_ohlc": 0,
         "wrong_currency_timezone": 0
       },
-      "same_original_source_note": "Source rows are separate providers for the same original market/symbol. Yahoo availability does not turn a Massive DELAYED request into an OK window or prove an exchange-calendar bar at every interval."
+      "same_original_source_note": "Source rows are separate providers for the same original market/symbol. Yahoo availability does not turn a Massive DELAYED request into an OK window or prove an exchange-calendar bar at every interval.",
+      "current_fullname_catalog_queries": [
+        {
+          "label": "drg_fullname",
+          "requested_at_utc": "2026-10-07T07:49:17.953757+00:00",
+          "completed_at_utc": "2026-10-07T07:49:19.283385+00:00",
+          "path": "/v3/reference/tickers",
+          "params": {
+            "market": "indices",
+            "search": "NYSE Arca Pharmaceutical",
+            "active": "true",
+            "limit": 1000
+          },
+          "http_status": 200,
+          "status": "OK",
+          "ticker": null,
+          "results_count": 0,
+          "query_count": null,
+          "classification": "empty",
+          "message": null,
+          "body_sha256": "89b32a36e4aad796b165704c8369442901812413c14adb814306befcd8cdef8f",
+          "credential_redacted": false,
+          "date_header": "Wed, 07 Oct 2026 07:49:18 GMT",
+          "count": null,
+          "next_url_present": false,
+          "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/drg_fullname.json",
+          "receipt_sha256": "113f57e0daad831ad4233cf5f6d1ebaeac2f56309e5380f8c20560fd3f847e37",
+          "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/drg_fullname.body",
+          "raw_sha256": "89b32a36e4aad796b165704c8369442901812413c14adb814306befcd8cdef8f"
+        },
+        {
+          "label": "drg_owner_fullname",
+          "requested_at_utc": "2026-10-07T07:49:30.962272+00:00",
+          "completed_at_utc": "2026-10-07T07:49:31.930132+00:00",
+          "path": "/v3/reference/tickers",
+          "params": {
+            "market": "indices",
+            "search": "Arca Pharmaceutical Index",
+            "active": "true",
+            "limit": 1000
+          },
+          "http_status": 200,
+          "status": "OK",
+          "ticker": null,
+          "results_count": 0,
+          "query_count": null,
+          "classification": "empty",
+          "message": null,
+          "body_sha256": "7da2ca629f462df2f7f2710d9f4a0b61e5736634ed4242678e984d7b38f81ede",
+          "credential_redacted": false,
+          "date_header": "Wed, 07 Oct 2026 07:49:31 GMT",
+          "count": null,
+          "next_url_present": false,
+          "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/drg_owner_fullname.json",
+          "receipt_sha256": "ce83da03d23e75e37ed62e2bcf5cf856a8cdc2d30450066970c3bf2efb9e659e",
+          "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/drg_owner_fullname.body",
+          "raw_sha256": "7da2ca629f462df2f7f2710d9f4a0b61e5736634ed4242678e984d7b38f81ede"
+        },
+        {
+          "label": "drg_fullname_inactive",
+          "requested_at_utc": "2026-10-07T07:49:43.976222+00:00",
+          "completed_at_utc": "2026-10-07T07:49:44.962030+00:00",
+          "path": "/v3/reference/tickers",
+          "params": {
+            "market": "indices",
+            "search": "NYSE Arca Pharmaceutical",
+            "active": "false",
+            "limit": 1000
+          },
+          "http_status": 200,
+          "status": "OK",
+          "ticker": null,
+          "results_count": 0,
+          "query_count": null,
+          "classification": "empty",
+          "message": null,
+          "body_sha256": "34373b1f15d826dfa285cce2fb6e9b66aa2b2e7aaa70524a5d00e25883127447",
+          "credential_redacted": false,
+          "date_header": "Wed, 07 Oct 2026 07:49:44 GMT",
+          "count": null,
+          "next_url_present": false,
+          "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/drg_fullname_inactive.json",
+          "receipt_sha256": "db62766559324f73affd8e10eb843b1ec29bb868dcbb7e829554a60c923deba8",
+          "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/drg_fullname_inactive.body",
+          "raw_sha256": "34373b1f15d826dfa285cce2fb6e9b66aa2b2e7aaa70524a5d00e25883127447"
+        },
+        {
+          "label": "drg_owner_fullname_inactive",
+          "requested_at_utc": "2026-10-07T07:49:56.980563+00:00",
+          "completed_at_utc": "2026-10-07T07:49:57.646978+00:00",
+          "path": "/v3/reference/tickers",
+          "params": {
+            "market": "indices",
+            "search": "Arca Pharmaceutical Index",
+            "active": "false",
+            "limit": 1000
+          },
+          "http_status": 200,
+          "status": "OK",
+          "ticker": null,
+          "results_count": 0,
+          "query_count": null,
+          "classification": "empty",
+          "message": null,
+          "body_sha256": "b51a0c5d481dc727045cc35458250b20c378a9ec265617379ea4297f48bc3218",
+          "credential_redacted": false,
+          "date_header": "Wed, 07 Oct 2026 07:49:56 GMT",
+          "count": null,
+          "next_url_present": false,
+          "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/drg_owner_fullname_inactive.json",
+          "receipt_sha256": "2227560a72bad2807c491b45fdf5b76eca98b71ea0fb1c5ea90fa97375abb6c7",
+          "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/drg_owner_fullname_inactive.body",
+          "raw_sha256": "b51a0c5d481dc727045cc35458250b20c378a9ec265617379ea4297f48bc3218"
+        }
+      ],
+      "removed_mismatched_primary_document": {
+        "previous_url": "https://www.nyse.com/publicdocs/nyse/indices/nyse_arca_ew_pharmaceutical_index.pdf",
+        "reason": "This describes equal-weight DGE and does not establish original DRG identity/return basis."
+      },
+      "alternative_source_actual_sample": {
+        "vendor": "FirstRate Data",
+        "actual_sample": {
+          "DRG_1min_sample.csv": {
+            "points": 6062,
+            "first": "2026-09-21 09:30:00",
+            "last": "2026-10-06 17:01:00",
+            "actual_dates": [
+              "2026-09-21",
+              "2026-09-22",
+              "2026-09-23",
+              "2026-09-24",
+              "2026-09-25",
+              "2026-09-28",
+              "2026-09-29",
+              "2026-09-30",
+              "2026-10-01",
+              "2026-10-02",
+              "2026-10-05",
+              "2026-10-06"
+            ],
+            "same_day_steps": {
+              "60": 6050
+            },
+            "requested_bar_seconds": 60,
+            "matching_bar_steps": 6050,
+            "nonzero_ohlc_points": 6062,
+            "close_distinct_values": 4675,
+            "is_full_2023_history": false
+          },
+          "DRG_5min_sample.csv": {
+            "points": 1213,
+            "first": "2026-09-21 09:30:00",
+            "last": "2026-10-06 17:00:00",
+            "actual_dates": [
+              "2026-09-21",
+              "2026-09-22",
+              "2026-09-23",
+              "2026-09-24",
+              "2026-09-25",
+              "2026-09-28",
+              "2026-09-29",
+              "2026-09-30",
+              "2026-10-01",
+              "2026-10-02",
+              "2026-10-05",
+              "2026-10-06"
+            ],
+            "same_day_steps": {
+              "300": 1201
+            },
+            "requested_bar_seconds": 300,
+            "matching_bar_steps": 1201,
+            "nonzero_ohlc_points": 1213,
+            "close_distinct_values": 949,
+            "is_full_2023_history": false
+          }
+        },
+        "production_ingested": false,
+        "historical_2023_supported_by_sample": false,
+        "full_archive_downloaded": false
+      },
+      "alternative_kibot_actual_2023_request": {
+        "native_directory_url": "https://www.kibot.com/historical-data/all-indexes-and-indicators-5-minute-intraday-data.html",
+        "native_DRG_description": "AMEX PHARMACEUTICAL",
+        "endpoint": "https://api.kibot.com/",
+        "http_status": 200,
+        "provider_body_status": "402 Unauthorized",
+        "provider_body_error": "402 Unauthorized. 'guest' account is not authorized for $DRG.",
+        "raw_sha256": "616ba0626d2d223e1d8a4462fc35596da34ba9e262bed0ec5920e7d8f5dd20d1",
+        "source_price_rows_received": 0,
+        "not_index_nonexistence_evidence": true,
+        "raw_path": "dev-tools/cross-market-yahoo/kr_probe/review/drg_history_sources_20261007/kibot_explicit_public_guest_drg_2023.body",
+        "request_params": {
+          "symbol": "$DRG",
+          "interval": "5",
+          "startdate": "01/03/2023",
+          "enddate": "01/03/2023",
+          "type": "indexes"
+        },
+        "account": "vendor-documented public guest; no private credential or purchase"
+      }
     },
     {
       "index_id": "US:YAHOO:^DWCFRP",
@@ -3777,43 +4501,106 @@
       "source_first_date": null,
       "source_last_date": null,
       "status": "candidate_download_permission_denied_original_price_basis_pending",
-      "reason": "Actual candidate requests were HTTP403; original price/total-return identity remains pending.",
+      "reason": "Current activated Indices Basic account actually returned NOT_AUTHORIZED for all three windows. Exact ticker is in official Basic CSV; entitlement/list discrepancy unresolved, not rate limit or no-data. Original price/total-return identity remains pending. No verified2023 minute history or automatic purchase/substitution.",
       "permission_windows": [
         {
-          "vendor_ticker": "I:DWCFRP",
-          "requested_window": {
-            "label": "recent",
-            "from": "2026-10-01",
-            "to": "2026-10-02"
+          "label": "DWCFRP_2023",
+          "requested_at_utc": "2026-10-07T07:48:38.929546+00:00",
+          "completed_at_utc": "2026-10-07T07:48:39.434379+00:00",
+          "path": "/v2/aggs/ticker/I%3ADWCFRP/range/5/minute/2023-03-06/2023-03-07",
+          "params": {
+            "sort": "asc",
+            "limit": 50000
           },
           "http_status": 403,
-          "vendor_status": "NOT_AUTHORIZED",
-          "raw_path": "Z:\\Project\\Python\\A-share-quant-trading-v15-industry-map\\dev-tools\\cross-market-yahoo\\massive_verify\\aggs_b28ee629f01aba1a_recent.attempt1.body",
-          "raw_sha256": "da345326dc5b4a029539da8dfc1dac28b05c6597a004ff46e38d41c93e559c70"
-        },
-        {
+          "status": "NOT_AUTHORIZED",
+          "ticker": null,
+          "results_count": 0,
+          "query_count": null,
+          "classification": "permission_denied",
+          "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+          "body_sha256": "03394f0dadbb08714f6b3799ab71b682659cd69d124061d2b7dcd70a683dbd86",
+          "credential_redacted": false,
+          "date_header": "Wed, 07 Oct 2026 07:48:38 GMT",
+          "count": null,
+          "next_url_present": false,
+          "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DWCFRP_2023.json",
+          "receipt_sha256": "9c5def1295613f11d46e524bbc4e5be3ffd3881955e8f548e81d8ea419cbf102",
+          "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DWCFRP_2023.body",
+          "raw_sha256": "03394f0dadbb08714f6b3799ab71b682659cd69d124061d2b7dcd70a683dbd86",
           "vendor_ticker": "I:DWCFRP",
-          "requested_window": {
-            "label": "2024",
-            "from": "2024-06-03",
-            "to": "2024-06-04"
-          },
-          "http_status": 403,
           "vendor_status": "NOT_AUTHORIZED",
-          "raw_path": "Z:\\Project\\Python\\A-share-quant-trading-v15-industry-map\\dev-tools\\cross-market-yahoo\\massive_verify\\aggs_b28ee629f01aba1a_2024.attempt1.body",
-          "raw_sha256": "5161d7fd6dfb76f6153e797f1e9922001aa1406748db2180d86399c05150a264"
-        },
-        {
-          "vendor_ticker": "I:DWCFRP",
           "requested_window": {
             "label": "2023",
             "from": "2023-03-06",
             "to": "2023-03-07"
+          }
+        },
+        {
+          "label": "DWCFRP_2024",
+          "requested_at_utc": "2026-10-07T07:48:51.931898+00:00",
+          "completed_at_utc": "2026-10-07T07:48:52.620487+00:00",
+          "path": "/v2/aggs/ticker/I%3ADWCFRP/range/5/minute/2024-06-03/2024-06-04",
+          "params": {
+            "sort": "asc",
+            "limit": 50000
           },
           "http_status": 403,
+          "status": "NOT_AUTHORIZED",
+          "ticker": null,
+          "results_count": 0,
+          "query_count": null,
+          "classification": "permission_denied",
+          "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+          "body_sha256": "93bd66c3a7b2378087af21f8baa269ced830d31ae9e58aa60b0fa266482a8c14",
+          "credential_redacted": false,
+          "date_header": "Wed, 07 Oct 2026 07:48:51 GMT",
+          "count": null,
+          "next_url_present": false,
+          "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DWCFRP_2024.json",
+          "receipt_sha256": "0a4c1cac4f4f0fe4d636e885edbc534be3e1bc7d4ac5f73802488dfad4f7bb35",
+          "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DWCFRP_2024.body",
+          "raw_sha256": "93bd66c3a7b2378087af21f8baa269ced830d31ae9e58aa60b0fa266482a8c14",
+          "vendor_ticker": "I:DWCFRP",
           "vendor_status": "NOT_AUTHORIZED",
-          "raw_path": "Z:\\Project\\Python\\A-share-quant-trading-v15-industry-map\\dev-tools\\cross-market-yahoo\\massive_verify\\aggs_b28ee629f01aba1a_2023.attempt1.body",
-          "raw_sha256": "57d4d148d932275a7b4921ee044607d6de6fd80a158bfde72e650d00f1d9bbc3"
+          "requested_window": {
+            "label": "2024",
+            "from": "2024-06-03",
+            "to": "2024-06-04"
+          }
+        },
+        {
+          "label": "DWCFRP_recent",
+          "requested_at_utc": "2026-10-07T07:49:04.941769+00:00",
+          "completed_at_utc": "2026-10-07T07:49:05.946989+00:00",
+          "path": "/v2/aggs/ticker/I%3ADWCFRP/range/5/minute/2026-10-01/2026-10-02",
+          "params": {
+            "sort": "asc",
+            "limit": 50000
+          },
+          "http_status": 403,
+          "status": "NOT_AUTHORIZED",
+          "ticker": null,
+          "results_count": 0,
+          "query_count": null,
+          "classification": "permission_denied",
+          "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+          "body_sha256": "96ace1ace5a8631e293268eae73d4bc89d88c95cfaec5e67b1a931fa8079c8fc",
+          "credential_redacted": false,
+          "date_header": "Wed, 07 Oct 2026 07:49:05 GMT",
+          "count": null,
+          "next_url_present": false,
+          "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DWCFRP_recent.json",
+          "receipt_sha256": "ed6a06f505226df0c180d20fc49654b6a417641bb3cb2e4239c4aa06218d68db",
+          "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DWCFRP_recent.body",
+          "raw_sha256": "96ace1ace5a8631e293268eae73d4bc89d88c95cfaec5e67b1a931fa8079c8fc",
+          "vendor_ticker": "I:DWCFRP",
+          "vendor_status": "NOT_AUTHORIZED",
+          "requested_window": {
+            "label": "recent",
+            "from": "2026-10-01",
+            "to": "2026-10-02"
+          }
         }
       ],
       "errors": [],
@@ -3859,7 +4646,7 @@
           "sha256": "26e062da889c9901574699af79bd31c53bf850965efc7329aeda89b055c9a33a"
         }
       ],
-      "basic_download_state": "actual_candidate_http403_current_account_denied_original_price_basis_pending",
+      "basic_download_state": "activated_Basic_actual_2023_2024_recent_http403_account_permission_denied",
       "historical_runtime_failures": [],
       "historical_failures_resolved_in_current_state": false,
       "same_original_yahoo_5m": {
@@ -3876,7 +4663,48 @@
         "null_ohlc": 0,
         "wrong_currency_timezone": 0
       },
-      "same_original_source_note": "Source rows are separate providers for the same original market/symbol. Yahoo availability does not turn a Massive DELAYED request into an OK window or prove an exchange-calendar bar at every interval."
+      "same_original_source_note": "Source rows are separate providers for the same original market/symbol. Yahoo availability does not turn a Massive DELAYED request into an OK window or prove an exchange-calendar bar at every interval.",
+      "historical_permission_windows": [
+        {
+          "vendor_ticker": "I:DWCFRP",
+          "requested_window": {
+            "label": "recent",
+            "from": "2026-10-01",
+            "to": "2026-10-02"
+          },
+          "http_status": 403,
+          "vendor_status": "NOT_AUTHORIZED",
+          "raw_path": "Z:\\Project\\Python\\A-share-quant-trading-v15-industry-map\\dev-tools\\cross-market-yahoo\\massive_verify\\aggs_b28ee629f01aba1a_recent.attempt1.body",
+          "raw_sha256": "da345326dc5b4a029539da8dfc1dac28b05c6597a004ff46e38d41c93e559c70"
+        },
+        {
+          "vendor_ticker": "I:DWCFRP",
+          "requested_window": {
+            "label": "2024",
+            "from": "2024-06-03",
+            "to": "2024-06-04"
+          },
+          "http_status": 403,
+          "vendor_status": "NOT_AUTHORIZED",
+          "raw_path": "Z:\\Project\\Python\\A-share-quant-trading-v15-industry-map\\dev-tools\\cross-market-yahoo\\massive_verify\\aggs_b28ee629f01aba1a_2024.attempt1.body",
+          "raw_sha256": "5161d7fd6dfb76f6153e797f1e9922001aa1406748db2180d86399c05150a264"
+        },
+        {
+          "vendor_ticker": "I:DWCFRP",
+          "requested_window": {
+            "label": "2023",
+            "from": "2023-03-06",
+            "to": "2023-03-07"
+          },
+          "http_status": 403,
+          "vendor_status": "NOT_AUTHORIZED",
+          "raw_path": "Z:\\Project\\Python\\A-share-quant-trading-v15-industry-map\\dev-tools\\cross-market-yahoo\\massive_verify\\aggs_b28ee629f01aba1a_2023.attempt1.body",
+          "raw_sha256": "57d4d148d932275a7b4921ee044607d6de6fd80a158bfde72e650d00f1d9bbc3"
+        }
+      ],
+      "historical_permission_windows_activation_timing_unproven": true,
+      "official_basic_list_member": true,
+      "official_basic_list_and_account_permission_discrepancy_unresolved": true
     },
     {
       "index_id": "US:YAHOO:^HGX",
@@ -58423,7 +59251,7 @@
       {
         "index_id": "US:YAHOO:^DRG",
         "symbol": "^DRG",
-        "status": "not_matched_in_saved_complete_catalog_supplemental_query_cancelled"
+        "status": "not_matched_in_complete_catalog_and_current_fullname_queries"
       },
       {
         "index_id": "US:YAHOO:^DWCFRP",
@@ -58452,5 +59280,745 @@
     "external_key_exact_value_scan": "pass",
     "raw_price_arrays_absent": true,
     "key_values_or_key_fingerprints_not_saved": true
+  },
+  "goal_completion_status": "incomplete_original_us_historical_minute_coverage",
+  "original_us_requested_indices": 131,
+  "original_us_history_with_written_verified_source": 124,
+  "current_gap_verification": {
+    "checked_at_utc": "2026-10-07T07:54:21.706725+00:00",
+    "account_plan": "Indices Basic, user confirmed enabled before these requests",
+    "authenticated_requests": 24,
+    "minimum_request_spacing_seconds_observed": 13.001643896102905,
+    "maximum_requests_in_any_60_seconds_observed": 5,
+    "rate_limited_responses": 0,
+    "aggregate_permission_denied_requests": 18,
+    "snapshot_group_permission_denied_requests": 1,
+    "original_drg_fullname_catalog_queries": 4,
+    "original_drg_fullname_catalog_results": 0,
+    "sox_same_account_2023_positive_control": {
+      "actual_parsed_bars": 158,
+      "source_first_date": "2023-03-06",
+      "source_last_date": "2023-03-07",
+      "http_status": 200,
+      "raw_status": "OK",
+      "not_ingested_again": true
+    },
+    "official_basic_scope": {
+      "url": "https://massive.com/knowledge-base/article/are-all-indices-available-through-the-basic-subscription-tier",
+      "csv_url": "https://docs.google.com/spreadsheets/d/1nJtgUaHeqghPthhYUcNDBi_22lae3zPnOTWy3dCg0KM/export?format=csv&gid=0",
+      "saved_csv_sha256": "c013ef0c3ddb63da7e6cf130f89649cd068b902bb5f3c5e0cbf7a2fbc3a01238",
+      "exact_six_tickers_present": [
+        "I:DJUSAL",
+        "I:DJUSCF",
+        "I:DJUSDB",
+        "I:DJUSHD",
+        "I:DJUSNF",
+        "I:DWCFRP"
+      ]
+    },
+    "conclusion": "Current activated account denies these six candidate values, despite their inclusion in the official Basic list. Both historical aggregates and a grouped snapshot request were denied. Cause unresolved: no claim that buying/upgrading necessarily resolves it. The same account actually returned original SOX2023 five-minute bars.",
+    "drg_conclusion": "No exact match in the complete saved catalog or four current owner-fullname active/inactive queries. This is not permanent provider-unsupported proof. ICE original DRG is market-cap weighted; DGE is not a permitted substitute. No free authorized DRG2023 minute download demonstrated.",
+    "no_purchase_upgrade_or_substitution": true,
+    "requests": [
+      {
+        "label": "DJUSAL_2023",
+        "requested_at_utc": "2026-10-07T07:45:23.794892+00:00",
+        "completed_at_utc": "2026-10-07T07:45:24.422194+00:00",
+        "path": "/v2/aggs/ticker/I%3ADJUSAL/range/5/minute/2023-03-06/2023-03-07",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "d2d2a1e4132d00370ff956457df3a0419e7fd452c58990c0ad2ae0e2b6d9c81b",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:45:23 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSAL_2023.json",
+        "receipt_sha256": "073bd5c3b27316901e369b521d5d4824290e9d0fc86db94017e89de7ccbac3c5",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSAL_2023.body",
+        "raw_sha256": "d2d2a1e4132d00370ff956457df3a0419e7fd452c58990c0ad2ae0e2b6d9c81b"
+      },
+      {
+        "label": "DJUSAL_2024",
+        "requested_at_utc": "2026-10-07T07:45:36.806410+00:00",
+        "completed_at_utc": "2026-10-07T07:45:37.393761+00:00",
+        "path": "/v2/aggs/ticker/I%3ADJUSAL/range/5/minute/2024-06-03/2024-06-04",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "6d095fe64cd781b1a144df1d8324314d1b665016a45403011248d9402bc49bce",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:45:36 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSAL_2024.json",
+        "receipt_sha256": "1527404d5bd3e87cfc037af1b6acc89a8a60b29a2120da1ae3de98107ad28a85",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSAL_2024.body",
+        "raw_sha256": "6d095fe64cd781b1a144df1d8324314d1b665016a45403011248d9402bc49bce"
+      },
+      {
+        "label": "DJUSAL_recent",
+        "requested_at_utc": "2026-10-07T07:45:49.808054+00:00",
+        "completed_at_utc": "2026-10-07T07:45:50.447251+00:00",
+        "path": "/v2/aggs/ticker/I%3ADJUSAL/range/5/minute/2026-10-01/2026-10-02",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "265758dca562a306b32595ec8bc70fd8ad19cd3c3ab44f368c0edc8e75a5551e",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:45:49 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSAL_recent.json",
+        "receipt_sha256": "e43882408a2beb28f8b61732ccd8cae9b27c8cf5be5863f12c3ff04ebe481550",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSAL_recent.body",
+        "raw_sha256": "265758dca562a306b32595ec8bc70fd8ad19cd3c3ab44f368c0edc8e75a5551e"
+      },
+      {
+        "label": "DJUSCF_2023",
+        "requested_at_utc": "2026-10-07T07:46:02.810181+00:00",
+        "completed_at_utc": "2026-10-07T07:46:03.499260+00:00",
+        "path": "/v2/aggs/ticker/I%3ADJUSCF/range/5/minute/2023-03-06/2023-03-07",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "0e47d185506f0664b079b0e47ff52dff6da00ad6da9c3cfa257bfc680ea9224a",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:46:02 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSCF_2023.json",
+        "receipt_sha256": "f8aff94246f8272d2a705bdcd750976532b5a7bceb778b014529a5f6a3d7f29a",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSCF_2023.body",
+        "raw_sha256": "0e47d185506f0664b079b0e47ff52dff6da00ad6da9c3cfa257bfc680ea9224a"
+      },
+      {
+        "label": "DJUSCF_2024",
+        "requested_at_utc": "2026-10-07T07:46:15.820841+00:00",
+        "completed_at_utc": "2026-10-07T07:46:16.744058+00:00",
+        "path": "/v2/aggs/ticker/I%3ADJUSCF/range/5/minute/2024-06-03/2024-06-04",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "f6a0431402af0b05ac77f6d6294776d391976e9a5e0c046f56c67e3eec8cd39a",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:46:16 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSCF_2024.json",
+        "receipt_sha256": "12846067578a075d388fcf6cf7989551b8f6f6c9a1898a7dce08628927acbd7e",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSCF_2024.body",
+        "raw_sha256": "f6a0431402af0b05ac77f6d6294776d391976e9a5e0c046f56c67e3eec8cd39a"
+      },
+      {
+        "label": "DJUSCF_recent",
+        "requested_at_utc": "2026-10-07T07:46:28.831671+00:00",
+        "completed_at_utc": "2026-10-07T07:46:29.940622+00:00",
+        "path": "/v2/aggs/ticker/I%3ADJUSCF/range/5/minute/2026-10-01/2026-10-02",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "9bbcbbe75f155bd1f07b8e1109abe97305f806c6d9862ebd5753f716dab48bb1",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:46:29 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSCF_recent.json",
+        "receipt_sha256": "a6ae8f3967ddc280f66a4b0b127226179593a0550b474930e8ab45c6a3268430",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSCF_recent.body",
+        "raw_sha256": "9bbcbbe75f155bd1f07b8e1109abe97305f806c6d9862ebd5753f716dab48bb1"
+      },
+      {
+        "label": "DJUSDB_2023",
+        "requested_at_utc": "2026-10-07T07:46:41.844032+00:00",
+        "completed_at_utc": "2026-10-07T07:46:42.362031+00:00",
+        "path": "/v2/aggs/ticker/I%3ADJUSDB/range/5/minute/2023-03-06/2023-03-07",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "2de4a5399b33ae78c9bfd1d2cdff71e43a47a7202596120f195326f241aa9e64",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:46:41 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSDB_2023.json",
+        "receipt_sha256": "5b75efaf798135aeeb5ece3a5cb9f1740941d8c29b173566407517220e6a3774",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSDB_2023.body",
+        "raw_sha256": "2de4a5399b33ae78c9bfd1d2cdff71e43a47a7202596120f195326f241aa9e64"
+      },
+      {
+        "label": "DJUSDB_2024",
+        "requested_at_utc": "2026-10-07T07:46:54.858762+00:00",
+        "completed_at_utc": "2026-10-07T07:46:55.701262+00:00",
+        "path": "/v2/aggs/ticker/I%3ADJUSDB/range/5/minute/2024-06-03/2024-06-04",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "ab79a469c3872b0260a1d6db1b70671d4ac3873d60478ec22031c6800457a85b",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:46:55 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSDB_2024.json",
+        "receipt_sha256": "b98d855ef3847d7073e42ec1d0bf2b73bf61e410b4680ed2f807608409ab8884",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSDB_2024.body",
+        "raw_sha256": "ab79a469c3872b0260a1d6db1b70671d4ac3873d60478ec22031c6800457a85b"
+      },
+      {
+        "label": "DJUSDB_recent",
+        "requested_at_utc": "2026-10-07T07:47:07.870473+00:00",
+        "completed_at_utc": "2026-10-07T07:47:08.371989+00:00",
+        "path": "/v2/aggs/ticker/I%3ADJUSDB/range/5/minute/2026-10-01/2026-10-02",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "e94960a32675836dbbb9bd13581017fb3707681bcef77bc1b63c1eed4fb4501d",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:47:07 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSDB_recent.json",
+        "receipt_sha256": "00ff55f8a35a59b35076e39b127da7cc5b191b2745b43e7d0def277943e3a4f6",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSDB_recent.body",
+        "raw_sha256": "e94960a32675836dbbb9bd13581017fb3707681bcef77bc1b63c1eed4fb4501d"
+      },
+      {
+        "label": "DJUSHD_2023",
+        "requested_at_utc": "2026-10-07T07:47:20.877169+00:00",
+        "completed_at_utc": "2026-10-07T07:47:21.399595+00:00",
+        "path": "/v2/aggs/ticker/I%3ADJUSHD/range/5/minute/2023-03-06/2023-03-07",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "f2fe16ffc47970aa44f05239f396f40fd848ba5bbf46b8e2a50f9cc7a2a54977",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:47:20 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSHD_2023.json",
+        "receipt_sha256": "c2d353d63c6d1bbd1a255c855c69225caee45effd3276cfffcc0a8530dcc86c1",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSHD_2023.body",
+        "raw_sha256": "f2fe16ffc47970aa44f05239f396f40fd848ba5bbf46b8e2a50f9cc7a2a54977"
+      },
+      {
+        "label": "DJUSHD_2024",
+        "requested_at_utc": "2026-10-07T07:47:33.883477+00:00",
+        "completed_at_utc": "2026-10-07T07:47:34.820148+00:00",
+        "path": "/v2/aggs/ticker/I%3ADJUSHD/range/5/minute/2024-06-03/2024-06-04",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "72fe03187737c92979b970c948c1f6c8f330e43837e54b67ac56e6036340285f",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:47:34 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSHD_2024.json",
+        "receipt_sha256": "70261e949d457fee07661e3ec003dc0d8c1aa98b6050aa297385bb0527210d8c",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSHD_2024.body",
+        "raw_sha256": "72fe03187737c92979b970c948c1f6c8f330e43837e54b67ac56e6036340285f"
+      },
+      {
+        "label": "DJUSHD_recent",
+        "requested_at_utc": "2026-10-07T07:47:46.890948+00:00",
+        "completed_at_utc": "2026-10-07T07:47:47.799053+00:00",
+        "path": "/v2/aggs/ticker/I%3ADJUSHD/range/5/minute/2026-10-01/2026-10-02",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "2414b04ac495334a209ef2aadee7d172da55f1b48f13a5c22bb14d4175b625c5",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:47:47 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSHD_recent.json",
+        "receipt_sha256": "ea02147ece5a0ab4ee1b770563f9f13aabebfd1d0448762906bbd023e7c5ee9c",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSHD_recent.body",
+        "raw_sha256": "2414b04ac495334a209ef2aadee7d172da55f1b48f13a5c22bb14d4175b625c5"
+      },
+      {
+        "label": "DJUSNF_2023",
+        "requested_at_utc": "2026-10-07T07:47:59.899497+00:00",
+        "completed_at_utc": "2026-10-07T07:48:00.537739+00:00",
+        "path": "/v2/aggs/ticker/I%3ADJUSNF/range/5/minute/2023-03-06/2023-03-07",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "c8446d7b862171bc08e0a337ebbdd1d13d47114b5aa930e4f890fb75407d8b50",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:47:59 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSNF_2023.json",
+        "receipt_sha256": "13c0c4a4155bee2308d5c75703ad387f1cec7d2eab09b118328ed0b468399a42",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSNF_2023.body",
+        "raw_sha256": "c8446d7b862171bc08e0a337ebbdd1d13d47114b5aa930e4f890fb75407d8b50"
+      },
+      {
+        "label": "DJUSNF_2024",
+        "requested_at_utc": "2026-10-07T07:48:12.914129+00:00",
+        "completed_at_utc": "2026-10-07T07:48:13.747893+00:00",
+        "path": "/v2/aggs/ticker/I%3ADJUSNF/range/5/minute/2024-06-03/2024-06-04",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "d4514ed805a6e8b1994284de7adc43d289d8d4697dc1858b3bcb348b9ca2431f",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:48:13 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSNF_2024.json",
+        "receipt_sha256": "fd4229007397369d4c014fc2ac1bccc0d3e6777aa39eb5fe2a0ff5a315bed9c6",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSNF_2024.body",
+        "raw_sha256": "d4514ed805a6e8b1994284de7adc43d289d8d4697dc1858b3bcb348b9ca2431f"
+      },
+      {
+        "label": "DJUSNF_recent",
+        "requested_at_utc": "2026-10-07T07:48:25.923106+00:00",
+        "completed_at_utc": "2026-10-07T07:48:26.425863+00:00",
+        "path": "/v2/aggs/ticker/I%3ADJUSNF/range/5/minute/2026-10-01/2026-10-02",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "02d33ba21a743738093c40b0793cbeebf89328c0cf1ea20b34e008ce48d9e3c7",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:48:25 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSNF_recent.json",
+        "receipt_sha256": "b670cac1f82b3c00fd5af8d9a07133c3e587dd4d72659f6144cb32fa4b2f40a7",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DJUSNF_recent.body",
+        "raw_sha256": "02d33ba21a743738093c40b0793cbeebf89328c0cf1ea20b34e008ce48d9e3c7"
+      },
+      {
+        "label": "DWCFRP_2023",
+        "requested_at_utc": "2026-10-07T07:48:38.929546+00:00",
+        "completed_at_utc": "2026-10-07T07:48:39.434379+00:00",
+        "path": "/v2/aggs/ticker/I%3ADWCFRP/range/5/minute/2023-03-06/2023-03-07",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "03394f0dadbb08714f6b3799ab71b682659cd69d124061d2b7dcd70a683dbd86",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:48:38 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DWCFRP_2023.json",
+        "receipt_sha256": "9c5def1295613f11d46e524bbc4e5be3ffd3881955e8f548e81d8ea419cbf102",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DWCFRP_2023.body",
+        "raw_sha256": "03394f0dadbb08714f6b3799ab71b682659cd69d124061d2b7dcd70a683dbd86"
+      },
+      {
+        "label": "DWCFRP_2024",
+        "requested_at_utc": "2026-10-07T07:48:51.931898+00:00",
+        "completed_at_utc": "2026-10-07T07:48:52.620487+00:00",
+        "path": "/v2/aggs/ticker/I%3ADWCFRP/range/5/minute/2024-06-03/2024-06-04",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "93bd66c3a7b2378087af21f8baa269ced830d31ae9e58aa60b0fa266482a8c14",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:48:51 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DWCFRP_2024.json",
+        "receipt_sha256": "0a4c1cac4f4f0fe4d636e885edbc534be3e1bc7d4ac5f73802488dfad4f7bb35",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DWCFRP_2024.body",
+        "raw_sha256": "93bd66c3a7b2378087af21f8baa269ced830d31ae9e58aa60b0fa266482a8c14"
+      },
+      {
+        "label": "DWCFRP_recent",
+        "requested_at_utc": "2026-10-07T07:49:04.941769+00:00",
+        "completed_at_utc": "2026-10-07T07:49:05.946989+00:00",
+        "path": "/v2/aggs/ticker/I%3ADWCFRP/range/5/minute/2026-10-01/2026-10-02",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "96ace1ace5a8631e293268eae73d4bc89d88c95cfaec5e67b1a931fa8079c8fc",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:49:05 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DWCFRP_recent.json",
+        "receipt_sha256": "ed6a06f505226df0c180d20fc49654b6a417641bb3cb2e4239c4aa06218d68db",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/DWCFRP_recent.body",
+        "raw_sha256": "96ace1ace5a8631e293268eae73d4bc89d88c95cfaec5e67b1a931fa8079c8fc"
+      },
+      {
+        "label": "drg_fullname",
+        "requested_at_utc": "2026-10-07T07:49:17.953757+00:00",
+        "completed_at_utc": "2026-10-07T07:49:19.283385+00:00",
+        "path": "/v3/reference/tickers",
+        "params": {
+          "market": "indices",
+          "search": "NYSE Arca Pharmaceutical",
+          "active": "true",
+          "limit": 1000
+        },
+        "http_status": 200,
+        "status": "OK",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "empty",
+        "message": null,
+        "body_sha256": "89b32a36e4aad796b165704c8369442901812413c14adb814306befcd8cdef8f",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:49:18 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/drg_fullname.json",
+        "receipt_sha256": "113f57e0daad831ad4233cf5f6d1ebaeac2f56309e5380f8c20560fd3f847e37",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/drg_fullname.body",
+        "raw_sha256": "89b32a36e4aad796b165704c8369442901812413c14adb814306befcd8cdef8f"
+      },
+      {
+        "label": "drg_owner_fullname",
+        "requested_at_utc": "2026-10-07T07:49:30.962272+00:00",
+        "completed_at_utc": "2026-10-07T07:49:31.930132+00:00",
+        "path": "/v3/reference/tickers",
+        "params": {
+          "market": "indices",
+          "search": "Arca Pharmaceutical Index",
+          "active": "true",
+          "limit": 1000
+        },
+        "http_status": 200,
+        "status": "OK",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "empty",
+        "message": null,
+        "body_sha256": "7da2ca629f462df2f7f2710d9f4a0b61e5736634ed4242678e984d7b38f81ede",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:49:31 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/drg_owner_fullname.json",
+        "receipt_sha256": "ce83da03d23e75e37ed62e2bcf5cf856a8cdc2d30450066970c3bf2efb9e659e",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/drg_owner_fullname.body",
+        "raw_sha256": "7da2ca629f462df2f7f2710d9f4a0b61e5736634ed4242678e984d7b38f81ede"
+      },
+      {
+        "label": "drg_fullname_inactive",
+        "requested_at_utc": "2026-10-07T07:49:43.976222+00:00",
+        "completed_at_utc": "2026-10-07T07:49:44.962030+00:00",
+        "path": "/v3/reference/tickers",
+        "params": {
+          "market": "indices",
+          "search": "NYSE Arca Pharmaceutical",
+          "active": "false",
+          "limit": 1000
+        },
+        "http_status": 200,
+        "status": "OK",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "empty",
+        "message": null,
+        "body_sha256": "34373b1f15d826dfa285cce2fb6e9b66aa2b2e7aaa70524a5d00e25883127447",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:49:44 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/drg_fullname_inactive.json",
+        "receipt_sha256": "db62766559324f73affd8e10eb843b1ec29bb868dcbb7e829554a60c923deba8",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/drg_fullname_inactive.body",
+        "raw_sha256": "34373b1f15d826dfa285cce2fb6e9b66aa2b2e7aaa70524a5d00e25883127447"
+      },
+      {
+        "label": "drg_owner_fullname_inactive",
+        "requested_at_utc": "2026-10-07T07:49:56.980563+00:00",
+        "completed_at_utc": "2026-10-07T07:49:57.646978+00:00",
+        "path": "/v3/reference/tickers",
+        "params": {
+          "market": "indices",
+          "search": "Arca Pharmaceutical Index",
+          "active": "false",
+          "limit": 1000
+        },
+        "http_status": 200,
+        "status": "OK",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "empty",
+        "message": null,
+        "body_sha256": "b51a0c5d481dc727045cc35458250b20c378a9ec265617379ea4297f48bc3218",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:49:56 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/drg_owner_fullname_inactive.json",
+        "receipt_sha256": "2227560a72bad2807c491b45fdf5b76eca98b71ea0fb1c5ea90fa97375abb6c7",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/drg_owner_fullname_inactive.body",
+        "raw_sha256": "b51a0c5d481dc727045cc35458250b20c378a9ec265617379ea4297f48bc3218"
+      },
+      {
+        "label": "dow_snapshot_control",
+        "requested_at_utc": "2026-10-07T07:50:56.134620+00:00",
+        "completed_at_utc": "2026-10-07T07:50:57.192405+00:00",
+        "path": "/v3/snapshot/indices",
+        "params": {
+          "ticker.any_of": "I:DJUSAL,I:DJUSCF,I:DJUSDB,I:DJUSHD,I:DJUSNF,I:DWCFRP"
+        },
+        "http_status": 403,
+        "status": "NOT_AUTHORIZED",
+        "ticker": null,
+        "results_count": 0,
+        "query_count": null,
+        "classification": "permission_denied",
+        "message": "You are not entitled to this data. Please upgrade your plan at https://massive.com/pricing",
+        "body_sha256": "3d546f8efc5b137b63c6e9f2c91de540477f09a59018cf567cdd957617293f9e",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:50:56 GMT",
+        "count": null,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/dow_snapshot_control.json",
+        "receipt_sha256": "3ac33eaf6d9bad3801344e87cb19145a032237031d4948b32444da1ff5942569",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/dow_snapshot_control.body",
+        "raw_sha256": "3d546f8efc5b137b63c6e9f2c91de540477f09a59018cf567cdd957617293f9e"
+      },
+      {
+        "label": "sox_2023_positive_control",
+        "requested_at_utc": "2026-10-07T07:51:09.145548+00:00",
+        "completed_at_utc": "2026-10-07T07:51:10.604884+00:00",
+        "path": "/v2/aggs/ticker/I%3ASOX/range/5/minute/2023-03-06/2023-03-07",
+        "params": {
+          "sort": "asc",
+          "limit": 50000
+        },
+        "http_status": 200,
+        "status": "OK",
+        "ticker": "I:SOX",
+        "results_count": 158,
+        "query_count": 782,
+        "classification": "data",
+        "message": null,
+        "body_sha256": "e91e962b1cfb09e2a9f2f83b18c1efcd12869a46d91431a20f267189252cc43c",
+        "credential_redacted": false,
+        "date_header": "Wed, 07 Oct 2026 07:51:09 GMT",
+        "count": 158,
+        "next_url_present": false,
+        "receipt_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/sox_2023_positive_control.json",
+        "receipt_sha256": "98a1db5a1aff0596f33da6c48d4ec727271a37243828a4a01bdb1b5d0dd5f11d",
+        "raw_path": "dev-tools/cross-market-yahoo/root_current_gap_probe/sox_2023_positive_control.body",
+        "raw_sha256": "e91e962b1cfb09e2a9f2f83b18c1efcd12869a46d91431a20f267189252cc43c"
+      }
+    ],
+    "source_data_and_database_counts_not_refreshed_by_this_permission_probe": true
+  },
+  "current_gap_evidence_input": {
+    "path": "dev-tools/cross-market-yahoo/root_current_gap_probe/current_gap_evidence.json",
+    "sha256": "c8ca00601fc00fc761d9ef7df7747a8f598d4130723e8ef57321787be3b0492e"
+  },
+  "new_gap_check_does_not_change_previous_history_sql_audit_time": true,
+  "publication_updated_at_utc": "2026-10-07T07:54:21.770193+00:00",
+  "original_us_indices_without_adopted_massive_history": [
+    "^DJUSAL",
+    "^DJUSCF",
+    "^DJUSDB",
+    "^DJUSHD",
+    "^DJUSNF",
+    "^DWCFRP",
+    "^DRG"
+  ],
+  "original_us_indices_with_actual_2023_bars": 123,
+  "original_us_indices_without_actual_2023_bars": [
+    "^DJUSAL",
+    "^DJUSCF",
+    "^DJUSDB",
+    "^DJUSHD",
+    "^DJUSNF",
+    "^DWCFRP",
+    "^DRG",
+    "^NQUSB50206025"
+  ],
+  "current_reference_source_correction": {
+    "corrected_at_utc": "2026-10-07T08:18:53.587901+00:00",
+    "index_id": "US:YAHOO:^DRG",
+    "original_symbol_name_provider_and_selection_preserved": true,
+    "scope": "Original DRG2014 market-cap-weighted source replaces indirect DGE source and copied notes; no2026 membership or new historical availability claim.",
+    "actual_official_url": "https://www.ice.com/publicdocs/nyse/indices/nyse_arca_pharmaceutical_index.pdf",
+    "actual_official_sha256": "3a0dac40f42165a3e0469b02a4609614fa94c48c94065ebc0a76dff74e58d832",
+    "actual_official_http_status": 200,
+    "actual_official_requested_at_utc": "2026-10-07T08:04:51.783390+00:00",
+    "actual_official_retrieved_at_utc": "2026-10-07T08:04:54.381928+00:00",
+    "current_corrected_reference_file_sha256": {
+      "industry_indices.json": "1be0ecb79e37bb45bb710afa41f016fcad08efc47ce6f3d740ef58076af38161",
+      "intraday_indices.json": "c269b63a809db900b07d5f54c538f1c0e36fb9e690ef37b411f10394a4c911cc",
+      "massive_indices.json": "699292cad22e786e6265be60a56981b9199019fef2cb2b07b4338e79994c5ae2"
+    },
+    "previous_history_source_and_sql_reference_sha256_retained_as_actual_old_evidence": true,
+    "all170_originals_all379_intraday_identities_and124_massive_identities_state_paths_unchanged": true,
+    "existing124_history_source_states_preserved": {
+      "rows": 8854906,
+      "completed_windows": 1984,
+      "todo": 0,
+      "pending": 0,
+      "original_state_reference_sha256_retained": true
+    },
+    "reference_preservation_evidence": {
+      "path": "dev-tools/cross-market-yahoo/us_probe/review/drg_metadata_binding_review_20261007/final_ref_correction_preservation_v1.json",
+      "sha256": "4caa73c851c06f0849449af7a5e015270c9d06df80776596087d55bb0234e122"
+    },
+    "pre_release_actual_baseline": {
+      "path": "dev-tools/cross-market-yahoo/feasibility/infrastructure_review/pre_drg_correction_actual_baseline.json",
+      "sha256": "c8368fd1716731ec35adf57dbd4cc86b0dcf337cb2b796d31041f0cdd279b90c",
+      "actual_runtime_revision": "037f306d7b3b6957e33011e40744f755151a7b49"
+    },
+    "regression_check": {
+      "test": "test_original_drg_scope_uses_its_own_market_cap_methodology",
+      "failed_before_correction_on_wrong_DGE_url": true,
+      "reference_and_state_checks_passed_after_correction": 50,
+      "ruff_check_and_format": "passed"
+    },
+    "new_corrected_reference_deployment_status": "pending_new_source_commit_ci_and_actual_production_readback"
   }
 }

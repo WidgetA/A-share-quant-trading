@@ -60,3 +60,26 @@ def test_verified_direct_business_examples_remain_traceable():
     assert "KOSPI-11.KS" in symbols("240400", "KR")  # actual Korea Zinc gold/silver
     assert "^KQ27" in symbols("220900", "KR")  # actual WONIK quartz, not name equivalence
     assert "KOSPI-26.KS" in symbols("710300", "KR")  # actual HYOSUNG ITX ITO
+
+
+def test_original_drg_scope_uses_its_own_market_cap_methodology():
+    document = reference()
+    index = next(item for item in document["indices"] if item["symbol"] == "^DRG")
+    original_method = (
+        "https://www.ice.com/publicdocs/nyse/indices/nyse_arca_pharmaceutical_index.pdf"
+    )
+    assert {source["url"] for source in index["scope_sources"]} == {original_method}
+    matches = [
+        match
+        for industry in document["industries"]
+        for match in industry["markets"]["US"]["matches"]
+        if match["index_id"] == index["index_id"]
+    ]
+    assert matches
+    for match in matches:
+        assert match["provider_scope_sources"] == index["scope_sources"]
+        assert "DGE" not in match["scope_note"]
+        for evidence in match["provider_definition_evidence"]:
+            assert evidence["source_id"] in {source["id"] for source in index["scope_sources"]}
+            assert "DGE" not in evidence["scope_summary"]
+            assert "market-capitalization" in evidence["scope_summary"]
