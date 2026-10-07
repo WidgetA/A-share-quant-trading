@@ -542,7 +542,7 @@ class CollectorDeployer:
         except UnicodeDecodeError as exc:
             raise RemoteJSONError(len(raw), exc.start) from None
 
-    def deploy(self, private: bytes, verify_timeout: float = 900, poll_seconds: float = 5):
+    def deploy(self, private: bytes, verify_timeout: float = 1800, poll_seconds: float = 5):
         manifest = self.release["manifest"]
         revision = manifest["revision"]
         stage = self.root + "/.releases/" + revision + "-" + uuid.uuid4().hex
@@ -878,7 +878,7 @@ def main():
         default=True,
         help="Wait for real complete cycles/readback (always enabled in releases)",
     )
-    parser.add_argument("--verify-timeout", type=float, default=900)
+    parser.add_argument("--verify-timeout", type=float, default=1800)
     args = parser.parse_args()
     if not 0 < args.verify_timeout < float("inf"):
         parser.error("--verify-timeout must be positive and finite")

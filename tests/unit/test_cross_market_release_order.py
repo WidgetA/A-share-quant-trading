@@ -84,7 +84,7 @@ def execute(release, head, deployed, *, fc_error=False):
 
         def deploy(self, private, verify_timeout):
             assert private == b"private_dummy_credentials"
-            assert verify_timeout == 900
+            assert verify_timeout == 1800
             events.append("collectors")
             return {"status": "verified"}
 
@@ -176,6 +176,19 @@ def test_cli_snapshot_failure_reports_only_safe_parse_diagnostics(monkeypatch, c
         "stdout_bytes": 600000,
         "json_error_position": 599990,
     }
+
+
+def test_unified_cli_forwards_the_default_complete_cycle_window(tmp_path, monkeypatch, capsys):
+    received = []
+
+    def deploy_all(**kwargs):
+        received.append(kwargs["verify_timeout"])
+        return {"status": "verified", "revision": "a" * 40, "reason": "not_superseded"}
+
+    monkeypatch.setattr(ORDER, "deploy_all", deploy_all)
+    assert ORDER.main(["--release-dir", str(tmp_path), "--runtime-image", "unused"]) == 0
+    assert received == [1800]
+    assert json.loads(capsys.readouterr().out)["status"] == "verified"
 
 
 def test_unversioned_legacy_target_can_receive_first_ordered_release(release):

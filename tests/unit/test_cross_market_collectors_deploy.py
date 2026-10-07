@@ -500,6 +500,51 @@ def test_timeout_is_not_success_or_rollback_and_collectors_continue(release):
     assert not any("def _rollback(" in " ".join(a) for a in remote.calls)
 
 
+def test_default_window_accepts_both_complete_cycles_after_first_fifteen_minutes(
+    release, monkeypatch
+):
+    remote = Remote(release)
+    ticks = iter((0, 1000))
+    monkeypatch.setattr(deploy.time, "monotonic", lambda: next(ticks, 1000))
+    receipt = deploy.CollectorDeployer(remote, release, IMAGE, "/opt/ashare-cross-market").deploy(
+        b"private"
+    )
+    assert receipt["status"] == "verified"
+    assert len(receipt["completed_cycles"]) == 2
+    assert len(receipt["completed_cycles"][0]["indices"]) == 2
+    assert len(receipt["completed_cycles"][1]["results"]) == 5
+    assert [r["price_keys_verified"] for r in receipt["readbacks"]] == [2, 5]
+
+
+def test_domestic_cli_forwards_default_complete_cycle_window(release, monkeypatch, capsys):
+    received = []
+    monkeypatch.setattr(deploy, "credentials", lambda env: b"private")
+    monkeypatch.setattr(deploy, "SSHRemote", lambda env: SimpleNamespace(close=lambda: None))
+
+    class Collector:
+        def __init__(self, *args):
+            pass
+
+        def deploy(self, private, timeout):
+            received.append(timeout)
+            return {
+                "status": "verified",
+                "revision": REVISION,
+                "bundle_sha256": "c" * 64,
+                "immutable_image_id": IMMUTABLE,
+            }
+
+    monkeypatch.setattr(deploy, "CollectorDeployer", Collector)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["deploy_collectors.py", "--release-dir", str(release), "--runtime-image", IMAGE],
+    )
+    deploy.main()
+    assert received == [1800]
+    assert json.loads(capsys.readouterr().out)["status"] == "verified"
+
+
 def test_completed_hour_seed_is_reused_without_advancing_its_original_target(release):
     remote = Remote(release)
     remote.seed_target = 250

@@ -119,7 +119,7 @@ def deploy_all(
     models=None,
     fc_deploy=None,
     collector_factory=None,
-    verify_timeout: float = 900,
+    verify_timeout: float = 1800,
 ):
     os.environ["DEBUG"] = ""
     if branch != BRANCH:
@@ -180,7 +180,7 @@ def main(argv=None):
     parser.add_argument("--source-root", type=Path, default=Path("."))
     parser.add_argument("--runtime-image", required=True)
     parser.add_argument("--remote-root", default="/opt/ashare-cross-market")
-    parser.add_argument("--verify-timeout", type=float, default=900)
+    parser.add_argument("--verify-timeout", type=float, default=1800)
     args = parser.parse_args(argv)
     os.environ["DEBUG"] = ""
     result = deploy_all(**vars(args))

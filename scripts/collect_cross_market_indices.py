@@ -84,7 +84,7 @@ async def run(args):
             )
         else:
             yahoo = YahooIndexClient(proxy=args.proxy)
-        store = CrossMarketStore(args.greptime_url, batch_size=args.batch_size)
+        store = CrossMarketStore(args.greptime_url, batch_size=args.batch_size, timeout=120)
         producer = CrossMarketIngestor(
             reference_path=args.reference,
             base_reference_path=args.base_reference,
