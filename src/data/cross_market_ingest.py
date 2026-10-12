@@ -120,6 +120,17 @@ def load_reference(reference_path: Path, base_path: Path) -> dict[str, Any]:
             raise ValueError("Index has no verified acquisition capability")
         catalogue[index_id] = index
     selected: dict[str, dict[str, Any]] = {}
+    # A real index can remain collected after a semantic correspondence is
+    # withdrawn. This list is observation scope, never an industry match.
+    observation_only = document.get("collection_only_index_ids", [])
+    if not isinstance(observation_only, list) or len(set(observation_only)) != len(
+        observation_only
+    ):
+        raise ValueError("Invalid collection-only index identities")
+    for index_id in observation_only:
+        if index_id not in catalogue:
+            raise ValueError("Collection-only index has no verified catalogue identity")
+        selected[index_id] = catalogue[index_id]
     fetched_at = int(datetime.now(UTC).timestamp() * 1000)
     mappings = []
     for industry in industries:

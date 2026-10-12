@@ -7658,21 +7658,22 @@
       "sw_code": "650100",
       "sw_name": "航天装备Ⅱ",
       "US": {
-        "matches": [
+        "matches": [],
+        "gap_note": "中国军工与美国国防市场不建立行业走势对应；军事产品名称或业务分类相似不能证明跨国国防需求、订单或行情具有可用对应。 现有混合航空航天与国防基础板块对应已撤回；独立民用航空指数的既有证据在指数层单独保留。",
+        "exclusions": [
           {
             "board_id": "US:SA:aerospace-and-defense",
-            "relation": "broader",
-            "scope_note": "含航天业务(SPCX及火箭/卫星相关)与防务航天分部的企业；板块整体覆盖航空、导弹、地面与海军防务，超出单一航天装备范围",
-            "source_ids": [
-              "sw2021_tushare",
-              "US:SA:aerospace-and-defense"
-            ]
+            "reason": "中国军工与美国国防市场不建立行业走势对应；军事产品名称或业务分类相似不能证明跨国国防需求、订单或行情具有可用对应。"
           }
         ],
-        "gap_note": "无独立航天装备板块",
-        "exclusions": [],
-        "status": "mapped",
-        "reviewed_catalog_source_id": "sa_catalog"
+        "status": "no_match_in_reviewed_catalog",
+        "reviewed_catalog_source_id": "sa_catalog",
+        "correction": {
+          "corrected_at": "2026-10-12T02:45:23.860406+00:00",
+          "reason": "中国军工与美国国防市场不建立行业走势对应；军事产品名称或业务分类相似不能证明跨国国防需求、订单或行情具有可用对应。",
+          "excluded_business_scope": "military_defense",
+          "basis": "2026-10-12 user correction of the China-defense to US-defense semantic mapping; not a price correction."
+        }
       },
       "KR": {
         "matches": [
@@ -7697,21 +7698,22 @@
       "sw_code": "650200",
       "sw_name": "航空装备Ⅱ",
       "US": {
-        "matches": [
+        "matches": [],
+        "gap_note": "中国军工与美国国防市场不建立行业走势对应；军事产品名称或业务分类相似不能证明跨国国防需求、订单或行情具有可用对应。 现有混合航空航天与国防基础板块对应已撤回；独立民用航空指数的既有证据在指数层单独保留。",
+        "exclusions": [
           {
             "board_id": "US:SA:aerospace-and-defense",
-            "relation": "broader",
-            "scope_note": "BA整机、GE航空发动机、HWM/TDG航空部件对应航空装备；板块含航天与地面/海军防务",
-            "source_ids": [
-              "sw2021_tushare",
-              "US:SA:aerospace-and-defense"
-            ]
+            "reason": "中国军工与美国国防市场不建立行业走势对应；军事产品名称或业务分类相似不能证明跨国国防需求、订单或行情具有可用对应。"
           }
         ],
-        "gap_note": "无独立航空装备板块；民航运输属航空公司板块不在此对应",
-        "exclusions": [],
-        "status": "mapped",
-        "reviewed_catalog_source_id": "sa_catalog"
+        "status": "no_match_in_reviewed_catalog",
+        "reviewed_catalog_source_id": "sa_catalog",
+        "correction": {
+          "corrected_at": "2026-10-12T02:45:23.860406+00:00",
+          "reason": "中国军工与美国国防市场不建立行业走势对应；军事产品名称或业务分类相似不能证明跨国国防需求、订单或行情具有可用对应。",
+          "excluded_business_scope": "military_defense",
+          "basis": "2026-10-12 user correction of the China-defense to US-defense semantic mapping; not a price correction."
+        }
       },
       "KR": {
         "matches": [
@@ -7736,21 +7738,22 @@
       "sw_code": "650300",
       "sw_name": "地面兵装Ⅱ",
       "US": {
-        "matches": [
+        "matches": [],
+        "gap_note": "中国军工与美国国防市场不建立行业走势对应；军事产品名称或业务分类相似不能证明跨国国防需求、订单或行情具有可用对应。 现有混合航空航天与国防基础板块对应已撤回；独立民用航空指数的既有证据在指数层单独保留。",
+        "exclusions": [
           {
             "board_id": "US:SA:aerospace-and-defense",
-            "relation": "broader",
-            "scope_note": "GD地面战车、弹药业务对应地面兵装；板块以航空/导弹/航天为主，无独立地面兵装板块",
-            "source_ids": [
-              "sw2021_tushare",
-              "US:SA:aerospace-and-defense"
-            ]
+            "reason": "中国军工与美国国防市场不建立行业走势对应；军事产品名称或业务分类相似不能证明跨国国防需求、订单或行情具有可用对应。"
           }
         ],
-        "gap_note": "地面兵装仅为综合防务板块的一部分，弹药枪械等民用枪支标的另属休闲口径外",
-        "exclusions": [],
-        "status": "mapped",
-        "reviewed_catalog_source_id": "sa_catalog"
+        "status": "no_match_in_reviewed_catalog",
+        "reviewed_catalog_source_id": "sa_catalog",
+        "correction": {
+          "corrected_at": "2026-10-12T02:45:23.860406+00:00",
+          "reason": "中国军工与美国国防市场不建立行业走势对应；军事产品名称或业务分类相似不能证明跨国国防需求、订单或行情具有可用对应。",
+          "excluded_business_scope": "military_defense",
+          "basis": "2026-10-12 user correction of the China-defense to US-defense semantic mapping; not a price correction."
+        }
       },
       "KR": {
         "matches": [
@@ -7775,27 +7778,26 @@
       "sw_code": "650400",
       "sw_name": "航海装备Ⅱ",
       "US": {
-        "matches": [
-          {
-            "board_id": "US:SA:aerospace-and-defense",
-            "relation": "broader",
-            "scope_note": "GD核潜艇建造等舰船业务在内(军用造船商同属该板块方向)；板块主体为航空航天，无独立舰船装备板块",
-            "source_ids": [
-              "sw2021_tushare",
-              "US:SA:aerospace-and-defense",
-              "hii_shipbuilding"
-            ]
-          }
-        ],
-        "gap_note": "已确认军用舰船制造在航空航天与国防宽分类中；没有航海装备同范围专类，本次未建立其他船舶装备业务完整覆盖的对应。",
+        "matches": [],
+        "gap_note": "中国军工与美国国防市场不建立行业走势对应；军事产品名称或业务分类相似不能证明跨国国防需求、订单或行情具有可用对应。 现有混合航空航天与国防基础板块对应已撤回；独立民用航空指数的既有证据在指数层单独保留。",
         "exclusions": [
           {
             "board_id": "US:SA:marine-shipping",
             "reason": "航运运营商，属船舶使用者而非船舶/海洋装备制造"
+          },
+          {
+            "board_id": "US:SA:aerospace-and-defense",
+            "reason": "中国军工与美国国防市场不建立行业走势对应；军事产品名称或业务分类相似不能证明跨国国防需求、订单或行情具有可用对应。"
           }
         ],
-        "status": "mapped",
-        "reviewed_catalog_source_id": "sa_catalog"
+        "status": "no_match_in_reviewed_catalog",
+        "reviewed_catalog_source_id": "sa_catalog",
+        "correction": {
+          "corrected_at": "2026-10-12T02:45:23.860406+00:00",
+          "reason": "中国军工与美国国防市场不建立行业走势对应；军事产品名称或业务分类相似不能证明跨国国防需求、订单或行情具有可用对应。",
+          "excluded_business_scope": "military_defense",
+          "basis": "2026-10-12 user correction of the China-defense to US-defense semantic mapping; not a price correction."
+        }
       },
       "KR": {
         "matches": [
@@ -7825,26 +7827,26 @@
       "sw_code": "650500",
       "sw_name": "军工电子Ⅱ",
       "US": {
-        "matches": [
-          {
-            "board_id": "US:SA:aerospace-and-defense",
-            "relation": "broader",
-            "scope_note": "RTX(雷达/导弹电子)等军用电子业务包含在综合防务板块内；无独立军工电子板块",
-            "source_ids": [
-              "sw2021_tushare",
-              "US:SA:aerospace-and-defense"
-            ]
-          }
-        ],
-        "gap_note": "无独立军工电子板块，军用电子标的与整机防务商合并分类",
+        "matches": [],
+        "gap_note": "中国军工与美国国防市场不建立行业走势对应；军事产品名称或业务分类相似不能证明跨国国防需求、订单或行情具有可用对应。 现有混合航空航天与国防基础板块对应已撤回；独立民用航空指数的既有证据在指数层单独保留。",
         "exclusions": [
           {
             "board_id": "US:SA:electronic-components",
             "reason": "通用电子元件板块，非军工电子专门分类"
+          },
+          {
+            "board_id": "US:SA:aerospace-and-defense",
+            "reason": "中国军工与美国国防市场不建立行业走势对应；军事产品名称或业务分类相似不能证明跨国国防需求、订单或行情具有可用对应。"
           }
         ],
-        "status": "mapped",
-        "reviewed_catalog_source_id": "sa_catalog"
+        "status": "no_match_in_reviewed_catalog",
+        "reviewed_catalog_source_id": "sa_catalog",
+        "correction": {
+          "corrected_at": "2026-10-12T02:45:23.860406+00:00",
+          "reason": "中国军工与美国国防市场不建立行业走势对应；军事产品名称或业务分类相似不能证明跨国国防需求、订单或行情具有可用对应。",
+          "excluded_business_scope": "military_defense",
+          "basis": "2026-10-12 user correction of the China-defense to US-defense semantic mapping; not a price correction."
+        }
       },
       "KR": {
         "matches": [

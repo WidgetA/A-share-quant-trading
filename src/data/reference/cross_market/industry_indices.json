@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "checked_at": "2026-10-05T16:47:05.789015+00:00",
-  "base_reference_sha256": "498f0bb1d9217ac78d6ce80d4891f4c1ca810502a41b30a5209e8006d8b5a2d7",
+  "base_reference_sha256": "304fa7ff3e91a991c3c1f8cf654e0b9e1a3cd12337cfea52043df1a0522fb7af",
   "scope": "SW2021全部134个二级行业对应US/KR已核行业指数。关系说明业务范围交集，不宣称成分、权重或制度等价。",
   "provenance": {
     "production_v15_baseline": "921b273b971383ce98776119f5af5fd716bacca4",
@@ -60916,73 +60916,31 @@
       "sw_name": "航天装备Ⅱ",
       "markets": {
         "US": {
-          "status": "mapped",
-          "matches": [
-            {
-              "index_id": "US:YAHOO:^NQUSB50201020",
-              "symbol": "^NQUSB50201020",
-              "provider": "Nasdaq",
-              "name": "Nasdaq US Benchmark Defense Index",
-              "relation": "partial_overlap",
-              "scope_note": "Defence 明列军事飞机武器等国防部件设备，提供防务航天部分交集；民用通信卫星另类，未声明全航天覆盖。",
-              "scope_difference": "US Benchmark uses Nasdaq country assignment based on incorporation, domicile and primary listing, with specific US exceptions. It is not the entire US-listed universe and can exclude foreign ADRs present in Stock Analysis industry boards.",
-              "board_ids": [
-                "US:SA:aerospace-and-defense"
-              ],
-              "source_ids": [
-                "sw2021_tushare",
-                "US:SA:aerospace-and-defense"
-              ],
-              "provider_definition_evidence": [
-                {
-                  "code": "50201020",
-                  "name_text": "50201020 Defence",
-                  "source_id": "icb_rules",
-                  "printed_page": 21
-                }
-              ],
-              "provider_scope_sources": [
-                {
-                  "id": "icb_rules",
-                  "url": "https://www.lseg.com/content/dam/ftse-russell/en_us/documents/ground-rules/icb-ground-rules.pdf",
-                  "requested_at": "2026-10-05T15:57:44.596136+00:00",
-                  "tls_verify": true,
-                  "status_code": 200,
-                  "retrieved_at": "2026-10-05T15:57:46.606480+00:00",
-                  "bytes": 646501,
-                  "sha256": "5efd9638da99f2aaa4e374c196f79aef5dc6577be4018e395054601abf7d6cd0",
-                  "content_type": "application/pdf"
-                },
-                {
-                  "id": "nasdaq_global_methodology",
-                  "url": "https://indexes.nasdaq.com/docs/NQGIFamilyMethodology.pdf",
-                  "requested_at": "2026-10-05T15:57:44.389110+00:00",
-                  "tls_verify": true,
-                  "status_code": 200,
-                  "retrieved_at": "2026-10-05T15:57:46.434164+00:00",
-                  "bytes": 777311,
-                  "sha256": "7e8414bd52d8ab5a9960da2473e6d6dd7b3efa09689f1dca6aed326f4223b54b",
-                  "content_type": "application/pdf"
-                }
-              ],
-              "provider_scope_evidence_kind": "provider_classification_definition",
-              "actual_member_evidence_used": [],
-              "capability": "snapshot_only",
-              "currency": "USD",
-              "timezone": "America/New_York",
-              "decision_basis": "Independent SW business portion and provider definition; member proof included only where used. Not a transitive native-board join."
-            }
-          ],
-          "gap_note": "无独立航天装备板块 商业航天火箭卫星不等同商业飞机，通信卫星明确另类；防务设备代表不保证民用航天全部覆盖。",
+          "status": "no_match_in_reviewed_catalog",
+          "matches": [],
+          "gap_note": "中国军工与美国国防市场不建立行业走势对应；军事产品名称或业务分类相似不能证明跨国国防需求、订单或行情具有可用对应。 本次未确立替代美国行业指数。",
           "not_promoted": [
             {
               "index_id": "US:YAHOO:^NQUSB502010",
               "symbol": "^NQUSB502010",
               "board_id": "US:SA:aerospace-and-defense",
               "decision": "not_promoted_specific_scope_or_membership",
-              "reason": "商业航天火箭卫星不等同商业飞机，通信卫星明确另类；防务设备代表不保证民用航天全部覆盖。",
+              "reason": "中国军工与美国国防市场不建立行业走势对应；军事产品名称或业务分类相似不能证明跨国国防需求、订单或行情具有可用对应。 该候选仍不采用；original_scope_note 仅保留过去审查原话。",
               "original_scope_note": "含航天业务(SPCX及火箭/卫星相关)与防务航天分部的企业；板块整体覆盖航空、导弹、地面与海军防务，超出单一航天装备范围",
               "index_scope_note": "ICB sector combines commercial aerospace and defence; communication satellites are classified separately."
+            }
+          ],
+          "correction": {
+            "corrected_at": "2026-10-12T02:45:23.860406+00:00",
+            "reason": "中国军工与美国国防市场不建立行业走势对应；军事产品名称或业务分类相似不能证明跨国国防需求、订单或行情具有可用对应。",
+            "excluded_business_scope": "military_defense",
+            "basis": "2026-10-12 user correction of the China-defense to US-defense semantic mapping; not a price correction."
+          },
+          "exclusions": [
+            {
+              "index_id": "US:YAHOO:^NQUSB50201020",
+              "symbol": "^NQUSB50201020",
+              "reason": "中国军工与美国国防市场不建立行业走势对应；军事产品名称或业务分类相似不能证明跨国国防需求、订单或行情具有可用对应。"
             }
           ]
         },
@@ -61391,72 +61349,31 @@
               "currency": "USD",
               "timezone": "America/New_York",
               "decision_basis": "Independent SW business portion and provider definition; member proof included only where used. Not a transitive native-board join."
-            },
-            {
-              "index_id": "US:YAHOO:^NQUSB50201020",
-              "symbol": "^NQUSB50201020",
-              "provider": "Nasdaq",
-              "name": "Nasdaq US Benchmark Defense Index",
-              "relation": "partial_overlap",
-              "scope_note": "Defence 明列军事航空器，提供军用航空装备部分交集；另有雷达武器非航空装备。",
-              "scope_difference": "US Benchmark uses Nasdaq country assignment based on incorporation, domicile and primary listing, with specific US exceptions. It is not the entire US-listed universe and can exclude foreign ADRs present in Stock Analysis industry boards.",
-              "board_ids": [
-                "US:SA:aerospace-and-defense"
-              ],
-              "source_ids": [
-                "sw2021_tushare",
-                "US:SA:aerospace-and-defense"
-              ],
-              "provider_definition_evidence": [
-                {
-                  "code": "50201020",
-                  "name_text": "50201020 Defence",
-                  "source_id": "icb_rules",
-                  "printed_page": 21
-                }
-              ],
-              "provider_scope_sources": [
-                {
-                  "id": "icb_rules",
-                  "url": "https://www.lseg.com/content/dam/ftse-russell/en_us/documents/ground-rules/icb-ground-rules.pdf",
-                  "requested_at": "2026-10-05T15:57:44.596136+00:00",
-                  "tls_verify": true,
-                  "status_code": 200,
-                  "retrieved_at": "2026-10-05T15:57:46.606480+00:00",
-                  "bytes": 646501,
-                  "sha256": "5efd9638da99f2aaa4e374c196f79aef5dc6577be4018e395054601abf7d6cd0",
-                  "content_type": "application/pdf"
-                },
-                {
-                  "id": "nasdaq_global_methodology",
-                  "url": "https://indexes.nasdaq.com/docs/NQGIFamilyMethodology.pdf",
-                  "requested_at": "2026-10-05T15:57:44.389110+00:00",
-                  "tls_verify": true,
-                  "status_code": 200,
-                  "retrieved_at": "2026-10-05T15:57:46.434164+00:00",
-                  "bytes": 777311,
-                  "sha256": "7e8414bd52d8ab5a9960da2473e6d6dd7b3efa09689f1dca6aed326f4223b54b",
-                  "content_type": "application/pdf"
-                }
-              ],
-              "provider_scope_evidence_kind": "provider_classification_definition",
-              "actual_member_evidence_used": [],
-              "capability": "snapshot_only",
-              "currency": "USD",
-              "timezone": "America/New_York",
-              "decision_basis": "Independent SW business portion and provider definition; member proof included only where used. Not a transitive native-board join."
             }
           ],
-          "gap_note": "无独立航空装备板块；民航运输属航空公司板块不在此对应",
+          "gap_note": "中国军工与美国国防市场不建立行业走势对应；军事产品名称或业务分类相似不能证明跨国国防需求、订单或行情具有可用对应。 独立民用 Aerospace 指数的既有对应保留，不覆盖军用部分。",
           "not_promoted": [
             {
               "index_id": "US:YAHOO:^NQUSB502010",
               "symbol": "^NQUSB502010",
               "board_id": "US:SA:aerospace-and-defense",
               "decision": "not_promoted_specific_scope_or_membership",
-              "reason": "已逐项核对原表业务交集；本候选定义不能直接覆盖该部分或已有更明确同业务类别，未由旧 board 关系自动推广。",
+              "reason": "中国军工与美国国防市场不建立行业走势对应；军事产品名称或业务分类相似不能证明跨国国防需求、订单或行情具有可用对应。 该候选仍不采用；original_scope_note 仅保留过去审查原话。",
               "original_scope_note": "BA整机、GE航空发动机、HWM/TDG航空部件对应航空装备；板块含航天与地面/海军防务",
               "index_scope_note": "ICB sector combines commercial aerospace and defence; communication satellites are classified separately."
+            }
+          ],
+          "correction": {
+            "corrected_at": "2026-10-12T02:45:23.860406+00:00",
+            "reason": "中国军工与美国国防市场不建立行业走势对应；军事产品名称或业务分类相似不能证明跨国国防需求、订单或行情具有可用对应。",
+            "excluded_business_scope": "military_defense",
+            "basis": "2026-10-12 user correction of the China-defense to US-defense semantic mapping; not a price correction."
+          },
+          "exclusions": [
+            {
+              "index_id": "US:YAHOO:^NQUSB50201020",
+              "symbol": "^NQUSB50201020",
+              "reason": "中国军工与美国国防市场不建立行业走势对应；军事产品名称或业务分类相似不能证明跨国国防需求、订单或行情具有可用对应。"
             }
           ]
         },
@@ -61810,73 +61727,31 @@
       "sw_name": "地面兵装Ⅱ",
       "markets": {
         "US": {
-          "status": "mapped",
-          "matches": [
-            {
-              "index_id": "US:YAHOO:^NQUSB50201020",
-              "symbol": "^NQUSB50201020",
-              "provider": "Nasdaq",
-              "name": "Nasdaq US Benchmark Defense Index",
-              "relation": "partial_overlap",
-              "scope_note": "Defence 武器及军用装备定义与地面兵装部分交叉；还含军用飞机雷达，不是纯战车弹药。",
-              "scope_difference": "US Benchmark uses Nasdaq country assignment based on incorporation, domicile and primary listing, with specific US exceptions. It is not the entire US-listed universe and can exclude foreign ADRs present in Stock Analysis industry boards.",
-              "board_ids": [
-                "US:SA:aerospace-and-defense"
-              ],
-              "source_ids": [
-                "sw2021_tushare",
-                "US:SA:aerospace-and-defense"
-              ],
-              "provider_definition_evidence": [
-                {
-                  "code": "50201020",
-                  "name_text": "50201020 Defence",
-                  "source_id": "icb_rules",
-                  "printed_page": 21
-                }
-              ],
-              "provider_scope_sources": [
-                {
-                  "id": "icb_rules",
-                  "url": "https://www.lseg.com/content/dam/ftse-russell/en_us/documents/ground-rules/icb-ground-rules.pdf",
-                  "requested_at": "2026-10-05T15:57:44.596136+00:00",
-                  "tls_verify": true,
-                  "status_code": 200,
-                  "retrieved_at": "2026-10-05T15:57:46.606480+00:00",
-                  "bytes": 646501,
-                  "sha256": "5efd9638da99f2aaa4e374c196f79aef5dc6577be4018e395054601abf7d6cd0",
-                  "content_type": "application/pdf"
-                },
-                {
-                  "id": "nasdaq_global_methodology",
-                  "url": "https://indexes.nasdaq.com/docs/NQGIFamilyMethodology.pdf",
-                  "requested_at": "2026-10-05T15:57:44.389110+00:00",
-                  "tls_verify": true,
-                  "status_code": 200,
-                  "retrieved_at": "2026-10-05T15:57:46.434164+00:00",
-                  "bytes": 777311,
-                  "sha256": "7e8414bd52d8ab5a9960da2473e6d6dd7b3efa09689f1dca6aed326f4223b54b",
-                  "content_type": "application/pdf"
-                }
-              ],
-              "provider_scope_evidence_kind": "provider_classification_definition",
-              "actual_member_evidence_used": [],
-              "capability": "snapshot_only",
-              "currency": "USD",
-              "timezone": "America/New_York",
-              "decision_basis": "Independent SW business portion and provider definition; member proof included only where used. Not a transitive native-board join."
-            }
-          ],
-          "gap_note": "地面兵装仅为综合防务板块的一部分，弹药枪械等民用枪支标的另属休闲口径外",
+          "status": "no_match_in_reviewed_catalog",
+          "matches": [],
+          "gap_note": "中国军工与美国国防市场不建立行业走势对应；军事产品名称或业务分类相似不能证明跨国国防需求、订单或行情具有可用对应。 本次未确立替代美国行业指数。",
           "not_promoted": [
             {
               "index_id": "US:YAHOO:^NQUSB502010",
               "symbol": "^NQUSB502010",
               "board_id": "US:SA:aerospace-and-defense",
               "decision": "not_promoted_specific_scope_or_membership",
-              "reason": "已逐项核对原表业务交集；本候选定义不能直接覆盖该部分或已有更明确同业务类别，未由旧 board 关系自动推广。",
+              "reason": "中国军工与美国国防市场不建立行业走势对应；军事产品名称或业务分类相似不能证明跨国国防需求、订单或行情具有可用对应。 该候选仍不采用；original_scope_note 仅保留过去审查原话。",
               "original_scope_note": "GD地面战车、弹药业务对应地面兵装；板块以航空/导弹/航天为主，无独立地面兵装板块",
               "index_scope_note": "ICB sector combines commercial aerospace and defence; communication satellites are classified separately."
+            }
+          ],
+          "correction": {
+            "corrected_at": "2026-10-12T02:45:23.860406+00:00",
+            "reason": "中国军工与美国国防市场不建立行业走势对应；军事产品名称或业务分类相似不能证明跨国国防需求、订单或行情具有可用对应。",
+            "excluded_business_scope": "military_defense",
+            "basis": "2026-10-12 user correction of the China-defense to US-defense semantic mapping; not a price correction."
+          },
+          "exclusions": [
+            {
+              "index_id": "US:YAHOO:^NQUSB50201020",
+              "symbol": "^NQUSB50201020",
+              "reason": "中国军工与美国国防市场不建立行业走势对应；军事产品名称或业务分类相似不能证明跨国国防需求、订单或行情具有可用对应。"
             }
           ]
         },
@@ -62095,74 +61970,31 @@
       "sw_name": "航海装备Ⅱ",
       "markets": {
         "US": {
-          "status": "mapped",
-          "matches": [
-            {
-              "index_id": "US:YAHOO:^NQUSB50201020",
-              "symbol": "^NQUSB50201020",
-              "provider": "Nasdaq",
-              "name": "Nasdaq US Benchmark Defense Index",
-              "relation": "partial_overlap",
-              "scope_note": "Defence 军用设备定义与原表军用舰船部分交叉；另含其他军备，不保证全部民用船舶装备。",
-              "scope_difference": "US Benchmark uses Nasdaq country assignment based on incorporation, domicile and primary listing, with specific US exceptions. It is not the entire US-listed universe and can exclude foreign ADRs present in Stock Analysis industry boards.",
-              "board_ids": [
-                "US:SA:aerospace-and-defense"
-              ],
-              "source_ids": [
-                "sw2021_tushare",
-                "US:SA:aerospace-and-defense",
-                "hii_shipbuilding"
-              ],
-              "provider_definition_evidence": [
-                {
-                  "code": "50201020",
-                  "name_text": "50201020 Defence",
-                  "source_id": "icb_rules",
-                  "printed_page": 21
-                }
-              ],
-              "provider_scope_sources": [
-                {
-                  "id": "icb_rules",
-                  "url": "https://www.lseg.com/content/dam/ftse-russell/en_us/documents/ground-rules/icb-ground-rules.pdf",
-                  "requested_at": "2026-10-05T15:57:44.596136+00:00",
-                  "tls_verify": true,
-                  "status_code": 200,
-                  "retrieved_at": "2026-10-05T15:57:46.606480+00:00",
-                  "bytes": 646501,
-                  "sha256": "5efd9638da99f2aaa4e374c196f79aef5dc6577be4018e395054601abf7d6cd0",
-                  "content_type": "application/pdf"
-                },
-                {
-                  "id": "nasdaq_global_methodology",
-                  "url": "https://indexes.nasdaq.com/docs/NQGIFamilyMethodology.pdf",
-                  "requested_at": "2026-10-05T15:57:44.389110+00:00",
-                  "tls_verify": true,
-                  "status_code": 200,
-                  "retrieved_at": "2026-10-05T15:57:46.434164+00:00",
-                  "bytes": 777311,
-                  "sha256": "7e8414bd52d8ab5a9960da2473e6d6dd7b3efa09689f1dca6aed326f4223b54b",
-                  "content_type": "application/pdf"
-                }
-              ],
-              "provider_scope_evidence_kind": "provider_classification_definition",
-              "actual_member_evidence_used": [],
-              "capability": "snapshot_only",
-              "currency": "USD",
-              "timezone": "America/New_York",
-              "decision_basis": "Independent SW business portion and provider definition; member proof included only where used. Not a transitive native-board join."
-            }
-          ],
-          "gap_note": "已确认军用舰船制造在航空航天与国防宽分类中；没有航海装备同范围专类，本次未建立其他船舶装备业务完整覆盖的对应。",
+          "status": "no_match_in_reviewed_catalog",
+          "matches": [],
+          "gap_note": "中国军工与美国国防市场不建立行业走势对应；军事产品名称或业务分类相似不能证明跨国国防需求、订单或行情具有可用对应。 本次未确立替代美国行业指数。",
           "not_promoted": [
             {
               "index_id": "US:YAHOO:^NQUSB502010",
               "symbol": "^NQUSB502010",
               "board_id": "US:SA:aerospace-and-defense",
               "decision": "not_promoted_specific_scope_or_membership",
-              "reason": "已逐项核对原表业务交集；本候选定义不能直接覆盖该部分或已有更明确同业务类别，未由旧 board 关系自动推广。",
+              "reason": "中国军工与美国国防市场不建立行业走势对应；军事产品名称或业务分类相似不能证明跨国国防需求、订单或行情具有可用对应。 该候选仍不采用；original_scope_note 仅保留过去审查原话。",
               "original_scope_note": "GD核潜艇建造等舰船业务在内(军用造船商同属该板块方向)；板块主体为航空航天，无独立舰船装备板块",
               "index_scope_note": "ICB sector combines commercial aerospace and defence; communication satellites are classified separately."
+            }
+          ],
+          "correction": {
+            "corrected_at": "2026-10-12T02:45:23.860406+00:00",
+            "reason": "中国军工与美国国防市场不建立行业走势对应；军事产品名称或业务分类相似不能证明跨国国防需求、订单或行情具有可用对应。",
+            "excluded_business_scope": "military_defense",
+            "basis": "2026-10-12 user correction of the China-defense to US-defense semantic mapping; not a price correction."
+          },
+          "exclusions": [
+            {
+              "index_id": "US:YAHOO:^NQUSB50201020",
+              "symbol": "^NQUSB50201020",
+              "reason": "中国军工与美国国防市场不建立行业走势对应；军事产品名称或业务分类相似不能证明跨国国防需求、订单或行情具有可用对应。"
             }
           ]
         },
@@ -62516,73 +62348,31 @@
       "sw_name": "军工电子Ⅱ",
       "markets": {
         "US": {
-          "status": "mapped",
-          "matches": [
-            {
-              "index_id": "US:YAHOO:^NQUSB50201020",
-              "symbol": "^NQUSB50201020",
-              "provider": "Nasdaq",
-              "name": "Nasdaq US Benchmark Defense Index",
-              "relation": "partial_overlap",
-              "scope_note": "Defence 明列 radar 等国防部件，与军工电子部分直接交叉；整机武器另有额外范围。",
-              "scope_difference": "US Benchmark uses Nasdaq country assignment based on incorporation, domicile and primary listing, with specific US exceptions. It is not the entire US-listed universe and can exclude foreign ADRs present in Stock Analysis industry boards.",
-              "board_ids": [
-                "US:SA:aerospace-and-defense"
-              ],
-              "source_ids": [
-                "sw2021_tushare",
-                "US:SA:aerospace-and-defense"
-              ],
-              "provider_definition_evidence": [
-                {
-                  "code": "50201020",
-                  "name_text": "50201020 Defence",
-                  "source_id": "icb_rules",
-                  "printed_page": 21
-                }
-              ],
-              "provider_scope_sources": [
-                {
-                  "id": "icb_rules",
-                  "url": "https://www.lseg.com/content/dam/ftse-russell/en_us/documents/ground-rules/icb-ground-rules.pdf",
-                  "requested_at": "2026-10-05T15:57:44.596136+00:00",
-                  "tls_verify": true,
-                  "status_code": 200,
-                  "retrieved_at": "2026-10-05T15:57:46.606480+00:00",
-                  "bytes": 646501,
-                  "sha256": "5efd9638da99f2aaa4e374c196f79aef5dc6577be4018e395054601abf7d6cd0",
-                  "content_type": "application/pdf"
-                },
-                {
-                  "id": "nasdaq_global_methodology",
-                  "url": "https://indexes.nasdaq.com/docs/NQGIFamilyMethodology.pdf",
-                  "requested_at": "2026-10-05T15:57:44.389110+00:00",
-                  "tls_verify": true,
-                  "status_code": 200,
-                  "retrieved_at": "2026-10-05T15:57:46.434164+00:00",
-                  "bytes": 777311,
-                  "sha256": "7e8414bd52d8ab5a9960da2473e6d6dd7b3efa09689f1dca6aed326f4223b54b",
-                  "content_type": "application/pdf"
-                }
-              ],
-              "provider_scope_evidence_kind": "provider_classification_definition",
-              "actual_member_evidence_used": [],
-              "capability": "snapshot_only",
-              "currency": "USD",
-              "timezone": "America/New_York",
-              "decision_basis": "Independent SW business portion and provider definition; member proof included only where used. Not a transitive native-board join."
-            }
-          ],
-          "gap_note": "无独立军工电子板块，军用电子标的与整机防务商合并分类",
+          "status": "no_match_in_reviewed_catalog",
+          "matches": [],
+          "gap_note": "中国军工与美国国防市场不建立行业走势对应；军事产品名称或业务分类相似不能证明跨国国防需求、订单或行情具有可用对应。 本次未确立替代美国行业指数。",
           "not_promoted": [
             {
               "index_id": "US:YAHOO:^NQUSB502010",
               "symbol": "^NQUSB502010",
               "board_id": "US:SA:aerospace-and-defense",
               "decision": "not_promoted_specific_scope_or_membership",
-              "reason": "已逐项核对原表业务交集；本候选定义不能直接覆盖该部分或已有更明确同业务类别，未由旧 board 关系自动推广。",
+              "reason": "中国军工与美国国防市场不建立行业走势对应；军事产品名称或业务分类相似不能证明跨国国防需求、订单或行情具有可用对应。 该候选仍不采用；original_scope_note 仅保留过去审查原话。",
               "original_scope_note": "RTX(雷达/导弹电子)等军用电子业务包含在综合防务板块内；无独立军工电子板块",
               "index_scope_note": "ICB sector combines commercial aerospace and defence; communication satellites are classified separately."
+            }
+          ],
+          "correction": {
+            "corrected_at": "2026-10-12T02:45:23.860406+00:00",
+            "reason": "中国军工与美国国防市场不建立行业走势对应；军事产品名称或业务分类相似不能证明跨国国防需求、订单或行情具有可用对应。",
+            "excluded_business_scope": "military_defense",
+            "basis": "2026-10-12 user correction of the China-defense to US-defense semantic mapping; not a price correction."
+          },
+          "exclusions": [
+            {
+              "index_id": "US:YAHOO:^NQUSB50201020",
+              "symbol": "^NQUSB50201020",
+              "reason": "中国军工与美国国防市场不建立行业走势对应；军事产品名称或业务分类相似不能证明跨国国防需求、订单或行情具有可用对应。"
             }
           ]
         },
@@ -70783,5 +70573,9 @@
         }
       }
     }
-  ]
+  ],
+  "collection_only_index_ids": [
+    "US:YAHOO:^NQUSB50201020"
+  ],
+  "collection_only_scope_note": "保留既有真实美国 Defense 指数行情采集；此身份不构成任何中国军工行业对应。"
 }

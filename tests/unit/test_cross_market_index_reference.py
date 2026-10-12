@@ -83,3 +83,28 @@ def test_original_drg_scope_uses_its_own_market_cap_methodology():
             assert evidence["source_id"] in {source["id"] for source in index["scope_sources"]}
             assert "DGE" not in evidence["scope_summary"]
             assert "market-capitalization" in evidence["scope_summary"]
+
+
+def test_chinese_defense_is_not_a_us_defense_market_correspondence():
+    loaded = load_reference(DIRECTORY / "industry_indices.json", DIRECTORY / "industry_boards.json")
+    targets = {"650100", "650200", "650300", "650400", "650500"}
+    rows = {
+        r["sw_code"]: r["mapping_json"]
+        for r in loaded["mappings"]
+        if r["market"] == "US" and r["sw_code"] in targets
+    }
+    assert set(rows) == targets
+    for code, row in rows.items():
+        assert "^NQUSB50201020" not in {i["symbol"] for i in row["indices"]}
+        assert "^NQUSB50201020" not in {m["symbol"] for m in row["mapping"]["matches"]}
+        assert row["mapping"]["correction"]["excluded_business_scope"] == "military_defense"
+        assert row["base_market"]["matches"] == []
+        assert row["base_market"]["status"] == "no_match_in_reviewed_catalog"
+        if code != "650200":
+            assert row["mapping"]["status"] == "no_match_in_reviewed_catalog"
+        else:
+            assert {i["symbol"] for i in row["indices"]} == {"^NQUSB50201010"}
+    # The real foreign index remains an observation; withdrawing a semantic
+    # relationship must not silently stop its existing price collection.
+    assert "^NQUSB50201020" in {i["symbol"] for i in loaded["indices"]}
+    assert len(loaded["indices"]) == 170
