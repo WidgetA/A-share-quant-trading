@@ -467,6 +467,8 @@ def create_notes_router() -> APIRouter:
         Thin wrapper over `TradeNoteStore.import_today_filled_orders` — the
         same helper used by the post-batch-order hook, so a manual click
         gets the same idempotent semantics (events keyed by broker_<order_id>).
+        On the QMT channel it imports per-fill trade records instead
+        (`import_today_filled_trades`), matching the order poll's path.
         """
         from src.trading.broker_client import BrokerClient
 
@@ -475,7 +477,10 @@ def create_notes_router() -> APIRouter:
         if broker is None:
             raise HTTPException(status_code=503, detail="Broker 未配置")
         try:
-            written, skipped = await store.import_today_filled_orders(broker)
+            if getattr(broker, "backend", "miniqmt") == "qmt":
+                written, skipped = await store.import_today_filled_trades(broker)
+            else:
+                written, skipped = await store.import_today_filled_orders(broker)
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"backfill 失败: {e}") from e
         logger.info(f"trade-notes backfill-today: written={written} skipped={skipped}")

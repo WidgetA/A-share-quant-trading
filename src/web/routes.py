@@ -65,7 +65,10 @@ async def _append_trade_note_event(
     Strips .SZ/.SH suffix so notes are keyed by bare 6-digit code.
     """
     if getattr(getattr(request.app.state, "broker", None), "backend", "miniqmt") == "qmt":
-        return  # QMT has its own durable order ledger; legacy notes are not account-scoped.
+        # QMT fills are journaled by the order poll from per-fill trade
+        # records (import_filled_trades_from_list); writing here too would
+        # double-count the same fill under a different dedupe key.
+        return
     if order_id is None:
         logger.debug("trade-notes hook: no order_id, skipping note for %s", code)
         return
@@ -107,6 +110,8 @@ async def _import_batch_orders_into_notes(request: Request, codes: set[str]) -> 
         storage = getattr(request.app.state, "storage", None)
         broker = getattr(request.app.state, "broker", None)
         if getattr(broker, "backend", "miniqmt") == "qmt":
+            # QMT fills are journaled by the order poll from per-fill trade
+            # records; an order-based import here would double-count them.
             return
         if storage is None or broker is None:
             logger.debug("trade-notes batch hook: storage/broker unavailable, skipping")

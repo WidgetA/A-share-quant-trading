@@ -45,6 +45,73 @@ class _NotReadyBroker(_Broker):
         return "trader not ready"
 
 
+class _QmtBroker(_Broker):
+    backend = "qmt"
+
+    def __init__(self, orders, trades):
+        super().__init__(orders)
+        self.trades = trades
+
+    async def get_trades(self):
+        return self.trades
+
+
+async def test_broker_order_sync_qmt_imports_trades_not_orders(monkeypatch):
+    """QMT fills come from per-fill trades; the orders path must not double-record."""
+    orders = [{"order_id": "qmt-x:1", "code": "002407.SZ", "status": "FILLED", "source": "qmt"}]
+    trades = [{"symbol": "002407.SZ", "side": "SELL", "quantity": 14700, "price": 28.91}]
+    imported = {}
+
+    class Store:
+        def __init__(self, storage):
+            imported["storage"] = storage
+
+        async def import_filled_orders_from_list(self, rows):
+            raise AssertionError("QMT backend must not import fills from orders")
+
+        async def import_filled_trades_from_list(self, rows):
+            imported["trades"] = rows
+            return 1, 0
+
+    monkeypatch.setattr("src.notes.note_store.TradeNoteStore", Store)
+    app = SimpleNamespace(
+        state=SimpleNamespace(broker=_QmtBroker(orders, trades), storage=_Storage())
+    )
+
+    err = await _broker_fetch_orders_once(app)
+
+    assert err is None
+    assert app.state.broker_orders == orders
+    assert imported == {"storage": app.state.storage, "trades": trades}
+
+
+async def test_broker_order_sync_qmt_trade_fetch_failure_keeps_poll_alive(monkeypatch):
+    class Store:
+        def __init__(self, storage):
+            pass
+
+        async def import_filled_orders_from_list(self, rows):
+            raise AssertionError("QMT backend must not import fills from orders")
+
+        async def import_filled_trades_from_list(self, rows):
+            raise AssertionError("no import attempted when trades fetch fails")
+
+    class _FailingTradesBroker(_QmtBroker):
+        async def get_trades(self):
+            raise RuntimeError("snapshot unavailable")
+
+    monkeypatch.setattr("src.notes.note_store.TradeNoteStore", Store)
+    orders = [{"order_id": "qmt-x:1", "code": "002407.SZ", "status": "FILLED", "source": "qmt"}]
+    app = SimpleNamespace(
+        state=SimpleNamespace(broker=_FailingTradesBroker(orders, []), storage=_Storage())
+    )
+
+    err = await _broker_fetch_orders_once(app)
+
+    assert err is None
+    assert app.state.broker_orders == orders
+
+
 async def test_broker_order_sync_caches_orders_and_imports_fills(monkeypatch):
     orders = [{"order_id": 1, "code": "000001.SZ", "status": "FILLED"}]
     imported = {}

@@ -329,14 +329,35 @@ async def _broker_fetch_orders_once(app: FastAPI) -> str | None:
     try:
         from src.notes.note_store import TradeNoteStore
 
-        importable = [o for o in orders if not str(o.get("source", "")).startswith("qmt")]
-        written, skipped = await TradeNoteStore(storage).import_filled_orders_from_list(importable)
-        if written:
-            logger.info(
-                "Broker order sync imported filled orders into trade_notes: written=%d skipped=%d",
-                written,
-                skipped,
-            )
+        store = TradeNoteStore(storage)
+        if getattr(broker, "backend", "miniqmt") == "qmt":
+            # QMT fills are journaled from per-fill trade records: importing
+            # orders as well would double-count the same fill under a second
+            # dedupe key. QMT only serves the current trading day, so this
+            # must run on every poll — a terminal restart drops intraday
+            # fills from the snapshot.
+            try:
+                trades = await broker.get_trades()
+            except Exception as e:
+                logger.warning(f"Broker order sync failed to fetch QMT trades: {e}")
+                return None
+            if revision != getattr(broker, "revision", None):
+                return None
+            written, skipped = await store.import_filled_trades_from_list(trades)
+            if written:
+                logger.info(
+                    "Broker order sync imported QMT fills into trade_notes: written=%d skipped=%d",
+                    written,
+                    skipped,
+                )
+        else:
+            written, skipped = await store.import_filled_orders_from_list(orders)
+            if written:
+                logger.info(
+                    "Broker order sync imported fills into trade_notes: written=%d skipped=%d",
+                    written,
+                    skipped,
+                )
     except Exception as e:
         logger.warning(f"Broker order sync failed to import trade notes: {e}", exc_info=True)
     return None

@@ -144,6 +144,41 @@ def _now_ms() -> int:
     return int(datetime.now(timezone.utc).timestamp() * 1000)
 
 
+def _trade_ts_ms(trade: dict) -> int | None:
+    """Best-effort fill timestamp (epoch ms) from common broker field shapes.
+
+    Accepts epoch seconds/milliseconds (int/float), ISO strings, and the
+    compact "%Y%m%d%H%M%S" form. Naive datetimes are broker-local wall time,
+    interpreted via the process timezone like the order-import path does.
+    Returns None when no usable time exists — the caller skips the row rather
+    than recording a fill at import time.
+    """
+    raw = None
+    for key in ("traded_time", "traded_at", "time", "create_time", "submit_time"):
+        value = trade.get(key)
+        if value not in (None, ""):
+            raw = value
+            break
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        value = float(raw)
+        if value <= 0:
+            return None
+        return int(value * 1000) if value < 1e12 else int(value)
+    if isinstance(raw, datetime):
+        return int(raw.timestamp() * 1000)
+    text = str(raw).strip()
+    try:
+        return int(datetime.fromisoformat(text).timestamp() * 1000)
+    except ValueError:
+        pass
+    try:
+        return int(datetime.strptime(text, "%Y%m%d%H%M%S").timestamp() * 1000)
+    except ValueError:
+        return None
+
+
 def _row_to_card(row) -> NoteCard:
     ts_raw = row["ts"]
     if isinstance(ts_raw, datetime):
@@ -524,8 +559,10 @@ class TradeNoteStore:
         rejected: list[tuple[str, dict]] = []
         for o in orders:
             if str(o.get("source", "")).startswith("qmt"):
-                # This legacy journal is shared by stock code, not by broker/account.
-                # Keep the QMT evidence in its own channel ledger instead of mixing accounts.
+                # QMT fills are journaled from per-fill trade records instead
+                # (import_filled_trades_from_list, called by the order poll for
+                # the qmt backend). Importing QMT orders here too would record
+                # the same fill twice under a different dedupe key.
                 continue
             status_raw = str(o.get("status", ""))
             order_id = o.get("order_id")
@@ -613,6 +650,114 @@ class TradeNoteStore:
                 "import_filled_orders_from_list: %d rows in, 0 imported. Rejections: %s",
                 len(orders),
                 [(reason, o) for reason, o in rejected[:10]],
+            )
+        return written, skipped
+
+    async def import_today_filled_trades(
+        self,
+        broker,
+        code_filter: set[str] | None = None,
+    ) -> tuple[int, int]:
+        """Import today's fills via `broker.get_trades()`; see import_filled_trades_from_list."""
+        trades = await broker.get_trades()
+        return await self.import_filled_trades_from_list(trades, code_filter)
+
+    async def import_filled_trades_from_list(
+        self,
+        trades: list[dict],
+        code_filter: set[str] | None = None,
+    ) -> tuple[int, int]:
+        """Import per-fill trade records (成交回报) into trade_notes.
+
+        This is the QMT channel's journaling path: 2026-10-13 the user
+        confirmed the QMT and miniQMT routes share one capital account
+        (8889993600), so QMT fills belong in this journal too. Unlike the
+        order-based import, every row here is an actual fill, so partially
+        filled orders land as separate events with real traded price/qty.
+
+        Idempotent: dedupe key is `broker_trade_<trade_id>` when the broker
+        supplies a trade id, else a stable synthesis from
+        (code, side, qty, price, time). Field names are read defensively
+        across the miniQMT /v1/trades and QMT snapshot `trades` shapes; rows
+        missing code, side, quantity, price or time are skipped and logged —
+        never fabricated.
+        """
+        side_map = {
+            "buy": "buy",
+            "b": "buy",
+            "买入": "buy",
+            "23": "buy",  # xtquant stock buy
+            "sell": "sell",
+            "s": "sell",
+            "卖出": "sell",
+            "24": "sell",  # xtquant stock sell
+        }
+        written = 0
+        skipped = 0
+        rejected: list[tuple[str, dict]] = []
+        for t in trades:
+            code = str(t.get("symbol") or t.get("code") or t.get("stock_code") or "")
+            if not code:
+                rejected.append(("no_code", t))
+                continue
+            bare_code = code.split(".")[0]
+            if code_filter is not None and bare_code not in code_filter:
+                continue
+            side_raw = str(t.get("side") or t.get("order_type") or "").strip().lower()
+            side = side_map.get(side_raw)
+            if side is None:
+                rejected.append((f"bad_side={side_raw!r}", t))
+                continue
+            qty_raw = (
+                t.get("quantity")
+                or t.get("qty")
+                or t.get("traded_qty")
+                or t.get("volume")
+                or t.get("traded_volume")
+            )
+            qty = 0
+            if qty_raw is not None:
+                try:
+                    qty = int(qty_raw)
+                except (TypeError, ValueError):
+                    qty = 0
+            if qty <= 0:
+                rejected.append((f"bad_qty={qty_raw!r}", t))
+                continue
+            price_raw = t.get("price") or t.get("traded_price") or t.get("avg_price")
+            price = 0.0
+            if price_raw is not None:
+                try:
+                    price = float(price_raw)
+                except (TypeError, ValueError):
+                    price = 0.0
+            if price <= 0:
+                rejected.append((f"bad_price={price_raw!r}", t))
+                continue
+            ts_ms = _trade_ts_ms(t)
+            if ts_ms is None:
+                rejected.append(("no_time", t))
+                continue
+            trade_id = t.get("trade_id") or t.get("id") or t.get("traded_id")
+            effective_id: int | str = (
+                f"trade_{trade_id}"
+                if trade_id
+                else f"trade_{bare_code}_{side}_{qty}_{price}_{ts_ms}"
+            )
+            await self.upsert_broker_event_by_order_id(
+                order_id=effective_id,
+                code=bare_code,
+                side=side,
+                qty=qty,
+                price=price,
+                ts_ms=ts_ms,
+            )
+            written += 1
+        if rejected and written == 0 and trades:
+            logger.warning(
+                "import_filled_trades_from_list: %d rows in, 0 imported. Rejections: %s",
+                len(trades),
+                [(reason, t) for reason, t in rejected[:10]],
             )
         return written, skipped
 
