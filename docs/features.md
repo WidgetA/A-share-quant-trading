@@ -1,5 +1,15 @@
 # Feature Specifications
 
+## V16 automatic selection paused (2026-11-02)
+
+The user requested stopping the V16 automatic morning selection task while
+retaining its implementation, models and backtests. Production sets
+`V16_AUTO_SCAN_ENABLED=false`; the V16 startup task initializes the resources
+needed by existing position monitoring, then exits without scheduling scans.
+V22 and existing position monitoring keep their own
+lifecycle. `/api/status` reports the V16 automatic-task setting and whether its
+scheduler is running. The setting defaults to `true` for existing deployments.
+
 ## V22-slim — replace V20 morning selection (2026-09-11)
 
 User-authorized implementation and rollout: frozen V22 ranking and complete

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import traceback
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -1262,6 +1263,11 @@ async def run_v16_scan_singleflight(
 # --- Scan scheduler ---
 
 
+def automatic_scan_enabled() -> bool:
+    """Control only the daily V16 selection task, preserving its implementation."""
+    return os.getenv("V16_AUTO_SCAN_ENABLED", "true").strip().lower() == "true"
+
+
 async def _scan_scheduler(scan_state: V15ScanState) -> None:
     """Autonomous scan scheduler. Runs from app startup, independent of iQuant.
 
@@ -1282,6 +1288,13 @@ async def _scan_scheduler(scan_state: V15ScanState) -> None:
         except Exception as e:
             logger.error(f"V16 scan resource init failed, retry in 60s: {e}")
             await asyncio.sleep(60)
+
+    if not automatic_scan_enabled():
+        logger.info(
+            "V16 automatic scan scheduler disabled by V16_AUTO_SCAN_ENABLED=false; "
+            "quote resources retained for existing position monitoring"
+        )
+        return
 
     # Pre-load trade calendar
     try:

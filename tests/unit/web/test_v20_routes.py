@@ -900,6 +900,45 @@ def test_service_failures_are_mapped_without_a_500(
 
 
 @pytest.mark.asyncio
+async def test_v16_auto_scan_can_pause_without_stopping_v22_or_monitoring(monkeypatch) -> None:
+    monkeypatch.setenv("V16_AUTO_SCAN_ENABLED", "false")
+    service = LifecycleV20Service(enabled=True, deployment_mode="forward_shadow")
+    service.config.strategy_version = "V22-slim"
+    app = _lifecycle_app(service)
+    original_scan_state = app.state.v15_scan_state
+    legacy_starts: list[object] = []
+    monkeypatch.setattr(web_app, "start_scan_scheduler", legacy_starts.append)
+
+    await web_app._start_strategy_services(app)
+    await _wait_for_background_v20_start(app)
+
+    # Its startup task retains shared quote initialization, then exits before
+    # the automatic-selection loop (checked by the scheduler regression).
+    assert legacy_starts == [original_scan_state]
+    assert app.state.legacy_v15_scan_allowed is False
+    assert app.state.v15_scan_state is original_scan_state
+    assert service.start_calls == 1
+    assert app.state.v20_service_started is True
+    assert app.state.iquant_router.start_calls == 1
+
+
+def test_public_status_reports_paused_v16_scheduler_without_secrets() -> None:
+    app = FastAPI()
+    app.state.pending_store = []
+    app.state.legacy_v15_scan_allowed = False
+    app.state.v15_scan_state = SimpleNamespace(scheduler_task=None)
+    app.include_router(web_app.create_router())
+
+    response = TestClient(app).get("/api/status")
+
+    assert response.status_code == 200
+    assert response.json()["v16"] == {
+        "automatic_scan_enabled": False,
+        "scheduler_running": False,
+    }
+
+
+@pytest.mark.asyncio
 async def test_forward_shadow_starts_beside_legacy_and_keeps_iquant(monkeypatch) -> None:
     service = LifecycleV20Service(enabled=True, deployment_mode="forward_shadow")
     app = _lifecycle_app(service)

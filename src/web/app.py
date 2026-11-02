@@ -32,7 +32,12 @@ from src.web.routes import (
     create_trade_backtest_router,
     create_v15_backtest_router,
 )
-from src.web.v15_scan_service import V15ScanState, inject_cache, start_scan_scheduler
+from src.web.v15_scan_service import (
+    V15ScanState,
+    automatic_scan_enabled,
+    inject_cache,
+    start_scan_scheduler,
+)
 from src.web.v20_routes import create_v20_router
 from src.web.v20_runtime_supervisor import attach_v20_supervisor
 
@@ -314,7 +319,7 @@ async def _run_v20_lifecycle_background(app: FastAPI) -> None:
 
 
 async def _start_strategy_services(app: FastAPI) -> None:
-    """Start V16 immediately and launch the isolated V20 lifecycle in background."""
+    """Start enabled automatic scanning and the isolated V20/V22 lifecycle."""
 
     # iQuant trading monitoring is independent of scan ownership and must
     # remain active in every V20 deployment mode.
@@ -325,9 +330,11 @@ async def _start_strategy_services(app: FastAPI) -> None:
 
     v15_scan_state = getattr(app.state, "v15_scan_state", None)
     if v15_scan_state:
+        # Initialization also owns the quote client used by existing holdings.
+        # With automatic scanning paused, this task initializes it then exits.
         start_scan_scheduler(v15_scan_state)
-        logger.info("V15 scan scheduler started independently of V20")
-    app.state.legacy_v15_scan_allowed = True
+        logger.info("V15 scan resources starting independently of V20")
+    app.state.legacy_v15_scan_allowed = automatic_scan_enabled()
 
     existing = getattr(app.state, "v20_lifecycle_task", None)
     if existing is None or existing.done():
