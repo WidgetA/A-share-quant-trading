@@ -285,6 +285,8 @@ async def _init_v20_scan_resources_with_token(
     if fundamentals is None:
         raise V20ConfigError("V20 scan requires prevalidated fundamentals resources")
     tushare = TushareRealtimeClient(token=token)
+    if scan_state.selection_version == "V22-slim":
+        tushare.EARLY_MARKET_CONCURRENCY = 10
     try:
         # ``start`` may allocate sockets before reporting a failure.  Keep it
         # inside the rollback boundary so every retry owns exactly one client.

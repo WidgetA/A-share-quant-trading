@@ -207,6 +207,7 @@ class TushareRealtimeClient:
     BATCH_SIZE = 500  # rt_min: 1 row per stock, limit 1000
     TIMEOUT = 30.0
     MAX_CONCURRENCY = 5
+    EARLY_MARKET_CONCURRENCY: int | None = None
     MAX_RETRIES = 3
     RETRY_BACKOFF = 1.0  # base seconds; doubles each attempt
     # ``stk_mins`` accepts comma-separated equity codes even though the public
@@ -1029,7 +1030,8 @@ class TushareRealtimeClient:
 
         unique_codes = list(dict.fromkeys(stock_codes))
         started_at = perf_counter()
-        sem = asyncio.Semaphore(self.MAX_CONCURRENCY)
+        concurrency = self.EARLY_MARKET_CONCURRENCY or self.MAX_CONCURRENCY
+        sem = asyncio.Semaphore(concurrency)
 
         async def _fetch_one(
             bare_code: str,
@@ -1080,10 +1082,11 @@ class TushareRealtimeClient:
                 ", ".join(failed_codes[:20]),
             )
         logger.info(
-            "rt_min_daily: fetched %d/%d stocks elapsed_seconds=%.3f",
+            "rt_min_daily: fetched %d/%d stocks elapsed_seconds=%.3f concurrency=%d",
             len(all_data),
             len(unique_codes),
             perf_counter() - started_at,
+            concurrency,
         )
         return all_data
 
