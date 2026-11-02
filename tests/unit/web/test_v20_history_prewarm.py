@@ -165,7 +165,7 @@ async def test_warm_and_cold_history_match_without_repeated_holiday_requests(mon
     cold_adapter = IQuantHistoricalAdapter(realtime, tushare_token="test")
     cold = await _fetch_history_ohlcv(cold_adapter, codes, DAY)
     cold_holiday_calls = calls.count("20260619")
-    assert cold_holiday_calls > 1
+    assert cold_holiday_calls == 1  # one full-pool read, including an uncached empty date
 
     calls.clear()
     service, context, _history = make_service(monkeypatch)
