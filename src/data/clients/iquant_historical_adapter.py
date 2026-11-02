@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Mapping
 from datetime import date, datetime, timedelta
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 _TUSHARE_API_URL = "https://api.tushare.pro"
 _TUSHARE_DAILY_TIMEOUT = 30.0
+_TUSHARE_DAILY_CONCURRENCY = 5
 
 
 class IQuantHistoricalAdapterError(RuntimeError):
@@ -74,6 +76,7 @@ class IQuantHistoricalAdapter:
         self._daily_data: dict[str, dict[str, dict]] = {}
         self._daily_data_loaded_date: str = ""  # YYYY-MM-DD of last load
         self._exchange_trade_dates: frozenset[date] | None = None
+        self._daily_fetch_semaphore = asyncio.Semaphore(_TUSHARE_DAILY_CONCURRENCY)
 
         logger.info("IQuantHistoricalAdapter: using Tushare Pro daily for history_quotes")
 
@@ -161,7 +164,7 @@ class IQuantHistoricalAdapter:
         return {"errorcode": 0, "tables": tables}
 
     async def _ensure_daily_range(self, start_date: str, end_date: str) -> None:
-        """Download missing dates from Tushare `daily` API (one call per trade_date)."""
+        """Fetch one full-market day per call, with at most five calls in flight."""
         from src.common.config import get_tushare_token
 
         d = datetime.strptime(start_date, "%Y-%m-%d").date()
@@ -192,7 +195,8 @@ class IQuantHistoricalAdapter:
 
         failures: list[str] = []
         async with httpx.AsyncClient(timeout=httpx.Timeout(_TUSHARE_DAILY_TIMEOUT)) as client:
-            for i, day_date in enumerate(dates_needed):
+
+            async def fetch_day(day_date: date) -> None:
                 ds_iso = day_date.strftime("%Y-%m-%d")
                 ts_date = day_date.strftime("%Y%m%d")
                 day_data: dict[str, dict] = {}
@@ -206,28 +210,29 @@ class IQuantHistoricalAdapter:
                 }
 
                 try:
-                    resp = await client.post(_TUSHARE_API_URL, json=body)
-                    resp.raise_for_status()
-                    data = resp.json()
+                    async with self._daily_fetch_semaphore:
+                        resp = await client.post(_TUSHARE_API_URL, json=body)
+                        resp.raise_for_status()
+                        data = resp.json()
                 except (httpx.HTTPError, ValueError, TypeError) as e:
                     logger.warning(f"tushare daily {ts_date}: {e}")
                     failures.append(f"{ts_date}:TRANSPORT_OR_JSON")
-                    continue
+                    return
 
                 if not isinstance(data, Mapping):
                     logger.warning("tushare daily %s returned a non-object payload", ts_date)
                     failures.append(f"{ts_date}:SCHEMA")
-                    continue
+                    return
                 if data.get("code") != 0:
                     logger.warning(f"tushare daily {ts_date} error: {data.get('msg', 'unknown')}")
                     failures.append(f"{ts_date}:API_{data.get('code')}")
-                    continue
+                    return
 
                 data_payload = data.get("data")
                 if not isinstance(data_payload, Mapping):
                     logger.warning("tushare daily %s returned an invalid data object", ts_date)
                     failures.append(f"{ts_date}:SCHEMA")
-                    continue
+                    return
                 fields = data_payload.get("fields", [])
                 items = data_payload.get("items", [])
                 required_fields = {"ts_code", "open", "high", "low", "close", "vol"}
@@ -238,7 +243,7 @@ class IQuantHistoricalAdapter:
                 ):
                     logger.warning("tushare daily %s returned an invalid schema", ts_date)
                     failures.append(f"{ts_date}:SCHEMA")
-                    continue
+                    return
                 if items:
                     idx = {f: i for i, f in enumerate(fields)}
                     for row in items:
@@ -324,13 +329,22 @@ class IQuantHistoricalAdapter:
                             ts_date,
                         )
 
-                if (i + 1) % 20 == 0:
-                    logger.info(f"  tushare daily progress: {i + 1}/{len(dates_needed)}")
+            tasks = [asyncio.create_task(fetch_day(day)) for day in dates_needed]
+            try:
+                for completed, task in enumerate(asyncio.as_completed(tasks), start=1):
+                    await task
+                    if completed % 20 == 0:
+                        logger.info("  tushare daily progress: %d/%d", completed, len(dates_needed))
+            except BaseException:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
 
         trading_days = sum(1 for d in self._daily_data.values() if d)
         logger.info(f"tushare daily data ready: {trading_days} trading days")
         if failures:
-            sample = ",".join(failures[:5])
+            sample = ",".join(sorted(failures)[:5])
             raise IQuantHistoricalAdapterError(
                 f"tushare daily source failed for {len(failures)} requested dates: {sample}"
             )
