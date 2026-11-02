@@ -525,6 +525,8 @@ def create_iquant_router() -> APIRouter:
 
     async def _send_readiness_report(now_bj: datetime) -> None:
         """Send daily readiness report at 09:30."""
+        from src.web.v15_scan_service import automatic_scan_enabled
+
         holdings = _state["holdings"]
         scan_state = _state.get("scan_state")
         last_poll = _state.get("last_poll_time")
@@ -549,6 +551,9 @@ def create_iquant_router() -> APIRouter:
             for h in holdings:
                 buy_date = h.get("buy_date", "?")
                 lines.append(f"  - {h['code']} {h.get('name', '')} (买入: {buy_date})")
+        if not automatic_scan_enabled():
+            lines.append("V16自动选股已暂停，不执行每日选股任务")
+        elif holdings:
             lines.append("扫描仍将执行(09:38-10:00)，有推荐会推送飞书")
             if _state["initialized"]:
                 lines.append("有持仓，BUY信号不会下单")

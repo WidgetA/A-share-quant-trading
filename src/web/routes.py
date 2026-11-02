@@ -328,12 +328,20 @@ def create_router() -> APIRouter:
         v20_start_error = getattr(request.app.state, "v20_start_error", None)
         v20_error_type = str(v20_start_error).split(":", 1)[0] if v20_start_error else None
         v20_health = await _v20_public_health(v20_service)
+        v16_scan_state = getattr(request.app.state, "v15_scan_state", None)
+        v16_scheduler = getattr(v16_scan_state, "scheduler_task", None)
         return {
             "status": "ok",
             "pending_count": len(store),
             "git_commit": os.environ.get("GIT_COMMIT", "unknown"),
             "git_branch": os.environ.get("GIT_BRANCH", "unknown"),
             "build_time": os.environ.get("BUILD_TIME", "unknown"),
+            "v16": {
+                "automatic_scan_enabled": bool(
+                    getattr(request.app.state, "legacy_v15_scan_allowed", False)
+                ),
+                "scheduler_running": v16_scheduler is not None and not v16_scheduler.done(),
+            },
             "v20": {
                 "configured": v20_service is not None,
                 "strategy_version": getattr(v20_config, "strategy_version", None),

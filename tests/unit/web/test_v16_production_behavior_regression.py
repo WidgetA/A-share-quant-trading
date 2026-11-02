@@ -39,6 +39,34 @@ async def _post_trigger(app: FastAPI) -> httpx.Response:
 
 
 @pytest.mark.asyncio
+async def test_paused_automatic_scan_keeps_quote_resources_without_entering_scan_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("V16_AUTO_SCAN_ENABLED", "false")
+    client = object()
+    state = v15_scan_service.V15ScanState()
+    initializations = []
+
+    async def initialize(scan_state):
+        initializations.append(scan_state)
+        scan_state.realtime_client = client
+        scan_state.initialized = True
+
+    async def must_not_enter_scan_calendar():
+        pytest.fail("paused automatic selection must exit before the daily scan loop")
+
+    monkeypatch.setattr(v15_scan_service, "init_scan_resources", initialize)
+    monkeypatch.setattr(v15_scan_service, "get_trade_calendar", must_not_enter_scan_calendar)
+
+    await v15_scan_service._scan_scheduler(state)
+
+    assert initializations == [state]
+    assert state.initialized is True
+    assert state.realtime_client is client
+    assert state.today_recommendation is None
+
+
+@pytest.mark.asyncio
 async def test_each_v16_run_reloads_providers_rescores_and_republishes_top10(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
