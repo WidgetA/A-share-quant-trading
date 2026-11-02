@@ -25,6 +25,7 @@ import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from math import isfinite
+from time import perf_counter
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -205,7 +206,7 @@ class TushareRealtimeClient:
     API_URL = "https://api.tushare.pro"
     BATCH_SIZE = 500  # rt_min: 1 row per stock, limit 1000
     TIMEOUT = 30.0
-    MAX_CONCURRENCY = 40
+    MAX_CONCURRENCY = 5
     MAX_RETRIES = 3
     RETRY_BACKOFF = 1.0  # base seconds; doubles each attempt
     # ``stk_mins`` accepts comma-separated equity codes even though the public
@@ -1027,6 +1028,7 @@ class TushareRealtimeClient:
             expected_trade_date = datetime.now(BEIJING_TZ).date()
 
         unique_codes = list(dict.fromkeys(stock_codes))
+        started_at = perf_counter()
         sem = asyncio.Semaphore(self.MAX_CONCURRENCY)
 
         async def _fetch_one(
@@ -1077,7 +1079,12 @@ class TushareRealtimeClient:
                 len(failed_codes),
                 ", ".join(failed_codes[:20]),
             )
-        logger.info("rt_min_daily: fetched %d/%d stocks", len(all_data), len(unique_codes))
+        logger.info(
+            "rt_min_daily: fetched %d/%d stocks elapsed_seconds=%.3f",
+            len(all_data),
+            len(unique_codes),
+            perf_counter() - started_at,
+        )
         return all_data
 
     async def batch_get_early_quotes(

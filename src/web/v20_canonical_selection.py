@@ -17,8 +17,10 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from enum import Enum
+from functools import lru_cache
 from math import isfinite
 from pathlib import Path
+from time import perf_counter
 from types import MappingProxyType
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -274,6 +276,7 @@ class CanonicalV16ScanBundle:
     model_sha256: str
     feature_list_sha256: str
     computed_at: datetime
+    # Empty when the direct runtime uses its durable projection identity instead.
     input_hash: str
     _integrity_hash: str
     computation_calendar: tuple[date, ...] = ()
@@ -662,37 +665,38 @@ async def _fetch_history_ohlcv(
     start = ref_date - timedelta(days=calendar_buffer)
     end = ref_date - timedelta(days=1)
 
+    # The adapter downloads full-market days into its own cache. Read the
+    # entire requested stock pool once so empty dates are not re-requested for
+    # each 50-stock formatting batch.
+    codes_str = ",".join(f"{c}.SH" if c.startswith("6") else f"{c}.SZ" for c in codes)
+    data = await hist_adapter.history_quotes(
+        codes=codes_str,
+        indicators="open,high,low,close,volume",
+        start_date=start.strftime("%Y-%m-%d"),
+        end_date=end.strftime("%Y-%m-%d"),
+    )
     result: dict[str, dict] = {}
-    batch_size = 50
-
-    for i in range(0, len(codes), batch_size):
-        batch = codes[i : i + batch_size]
-        codes_str = ",".join(f"{c}.SH" if c.startswith("6") else f"{c}.SZ" for c in batch)
-
-        data = await hist_adapter.history_quotes(
-            codes=codes_str,
-            indicators="open,high,low,close,volume",
-            start_date=start.strftime("%Y-%m-%d"),
-            end_date=end.strftime("%Y-%m-%d"),
-        )
-
-        for table_entry in data.get("tables", []):
-            thscode = table_entry.get("thscode", "")
-            bare_code = thscode.split(".")[0] if thscode else ""
-            if not bare_code:
-                continue
-
-            tbl = table_entry.get("table", {})
-            result[bare_code] = {
-                "time": tbl.get("time", []),
-                "open": tbl.get("open", []),
-                "high": tbl.get("high", []),
-                "low": tbl.get("low", []),
-                "close": tbl.get("close", []),
-                "volume": tbl.get("volume", []),
-            }
+    for table_entry in data.get("tables", []):
+        thscode = table_entry.get("thscode", "")
+        bare_code = thscode.split(".")[0] if thscode else ""
+        if not bare_code:
+            continue
+        table = table_entry.get("table", {})
+        result[bare_code] = {
+            key: table.get(key, []) for key in ("time", "open", "high", "low", "close", "volume")
+        }
 
     return result
+
+
+@lru_cache(maxsize=4096)
+def _history_timestamp_day(normalized: pd.Timestamp) -> str:
+    """Reuse timezone/date formatting without retaining per-stock histories."""
+    if normalized.tzinfo is None:
+        normalized = normalized.tz_localize(BEIJING_TZ)
+    else:
+        normalized = normalized.tz_convert(BEIJING_TZ)
+    return normalized.strftime("%Y-%m-%d")
 
 
 def _normalize_history_inputs(
@@ -739,11 +743,7 @@ def _normalize_history_inputs(
             raise ValueError(f"{code} history input normalization failed: invalid time type")
         if pd.isna(normalized):
             raise ValueError(f"{code} history input normalization failed: NaT time")
-        if normalized.tzinfo is None:
-            normalized = normalized.tz_localize(BEIJING_TZ)
-        else:
-            normalized = normalized.tz_convert(BEIJING_TZ)
-        return normalized.strftime("%Y-%m-%d")
+        return _history_timestamp_day(normalized)
 
     normalized: dict[str, dict[str, Any]] = {}
     for code in sorted(history_raw):
@@ -937,6 +937,19 @@ def _canonical_json_value(value: Any) -> Any:
     Naive datetimes/Timestamps are localized to Asia/Shanghai; aware values are
     converted to Asia/Shanghai. ``pd.NaT`` and ``np.datetime64('NaT')`` are rejected.
     """
+    # Exact builtin containers/scalars dominate the production payload. Keep
+    # the generic path below for subclasses and numpy/pandas special values.
+    kind = type(value)
+    if kind is dict:
+        return {str(key): _canonical_json_value(item) for key, item in value.items()}
+    if kind is list or kind is tuple:
+        return [_canonical_json_value(item) for item in value]
+    if value is None or kind is str or kind is int or kind is bool:
+        return value
+    if kind is float:
+        if not isfinite(value):
+            raise ValueError(f"non-finite float cannot be canonicalized: {value!r}")
+        return value
     if value is None:
         return None
     if isinstance(value, bool):
@@ -1672,6 +1685,7 @@ async def compute_canonical_v16_scan(
     st_eligible_codes_override: Sequence[str] | None = None,
     early_data_seed: Mapping[str, TushareEarlyMarketData] | None = None,
     allow_realtime_fetch: bool = True,
+    include_legacy_fingerprints: bool = True,
 ) -> CanonicalV16ScanBundle:
     """Canonical V16 scan computation; does not send V16 Top10 or day-gate messages.
 
@@ -1688,6 +1702,8 @@ async def compute_canonical_v16_scan(
     the seeded coverage.
     """
     from dataclasses import replace
+
+    compute_started = perf_counter()
 
     validated_calendar_override = (
         _validated_computation_calendar(calendar_override, trade_date)
@@ -2163,23 +2179,25 @@ async def compute_canonical_v16_scan(
     computed_at = datetime.now(BEIJING_TZ)
     recommended_names = {s.code: s.name for s in getattr(scan_result, "recommended", [])}
     try:
-        input_hash = _stable_input_hash(
-            trade_date,
-            tuple(universe_list),
-            clean_boards,
-            scorer.model_sha256,
-            scorer.feature_list_sha256,
-            early_source_hashes,
-            prev_closes,
-            hist_raw,
-            stock_data,
-            tuple(errors_no_prev_close),
-            tuple(errors_no_hist),
-            tuple(errors_build),
-            tuple(skipped_new_listings),
-            recommended_names,
-            getattr(scan_result, "st_eligible_codes", []),
-        )
+        input_hash = ""
+        if include_legacy_fingerprints:
+            input_hash = _stable_input_hash(
+                trade_date,
+                tuple(universe_list),
+                clean_boards,
+                scorer.model_sha256,
+                scorer.feature_list_sha256,
+                early_source_hashes,
+                prev_closes,
+                hist_raw,
+                stock_data,
+                tuple(errors_no_prev_close),
+                tuple(errors_no_hist),
+                tuple(errors_build),
+                tuple(skipped_new_listings),
+                recommended_names,
+                getattr(scan_result, "st_eligible_codes", []),
+            )
         external_market_fact_hash = _stable_external_market_fact_hash(
             trade_date,
             tuple(universe_list),
@@ -2257,4 +2275,17 @@ async def compute_canonical_v16_scan(
         history_min_date_coverage=history_min_date_coverage,
         external_market_fact_hash=external_market_fact_hash,
     )
-    return replace(pre_bundle, _integrity_hash=_bundle_fingerprint(pre_bundle))
+    result = (
+        replace(pre_bundle, _integrity_hash=_bundle_fingerprint(pre_bundle))
+        if include_legacy_fingerprints
+        else pre_bundle
+    )
+    logger.info(
+        "Canonical selection timing trade_date=%s version=%s elapsed_seconds=%.3f "
+        "legacy_fingerprints=%s",
+        trade_date,
+        scan_state.selection_version,
+        perf_counter() - compute_started,
+        include_legacy_fingerprints,
+    )
+    return result

@@ -6,6 +6,7 @@ import hashlib
 import json
 from dataclasses import replace
 from datetime import date
+from functools import lru_cache
 from math import isfinite
 from pathlib import Path
 
@@ -139,21 +140,37 @@ def exact_early(data: TushareEarlyMarketData, day: date) -> TushareEarlyMarketDa
     return replace(data, quote=quote)
 
 
-def build_stock(code: str, name: str, quote, history: dict, calendar: tuple[date, ...], day: date):
-    previous = [d.isoformat() for d in calendar if d < day][-37:]
+@lru_cache(maxsize=8)
+def _history_sessions(
+    calendar: tuple[date, ...], day: date
+) -> tuple[tuple[str, ...], frozenset[str]]:
+    previous = tuple(d.isoformat() for d in calendar if d < day)[-37:]
     if len(previous) != 37:
         raise ValueError("V22-slim requires 37 previous exchange sessions")
+    return previous, frozenset(previous)
+
+
+def build_stock(code: str, name: str, quote, history: dict, calendar: tuple[date, ...], day: date):
+    previous, allowed = _history_sessions(tuple(calendar), day)
     fields = ("time", "open", "high", "low", "close", "volume")
     if len({len(history.get(field, [])) for field in fields}) != 1:
         raise ValueError("unequal history columns")
+    # Keep the original column construction, including dtype inference across
+    # all source rows and alignment of Series inputs. Select numeric rows once
+    # instead of repeatedly mapping/filtering/sorting whole DataFrames.
     frame = pd.DataFrame({field: history[field] for field in fields})
-    frame["time"] = frame.time.map(lambda value: str(value)[:10])
-    frame = frame.loc[frame.time.isin(previous)].sort_values("time")
-    if frame.time.duplicated().any():
+    selected = sorted(
+        (label, index)
+        for index, value in enumerate(frame["time"])
+        if (label := str(value)[:10]) in allowed
+    )
+    selected_days = {label for label, _index in selected}
+    if len(selected_days) != len(selected):
         raise ValueError("duplicate historical daily bar")
-    if len(frame) < 5 or previous[-1] not in set(frame.time):
+    if len(selected) < 5 or previous[-1] not in selected_days:
         return None
-    values = frame[list(fields[1:])].to_numpy(dtype=float)
+    frame = frame.iloc[[index for _label, index in selected], 1:]
+    values = frame.to_numpy(dtype=float)
     if (
         not np.isfinite(values).all()
         or not (values[:, :4] > 0).all()
@@ -190,7 +207,7 @@ def build_stock(code: str, name: str, quote, history: dict, calendar: tuple[date
         avg_daily_return_20d=float(returns.mean()),
         volatility_20d=float(returns.std()) if len(returns) >= 2 else 0.0,
         consecutive_up_days=consecutive,
-        history_df=frame[list(fields[1:])].reset_index(drop=True),
+        history_df=frame.reset_index(drop=True),
     )
 
 

@@ -11,8 +11,8 @@
 - Tests for any minute-data routing change must assert both sides of the boundary: today uses realtime APIs and never `stk_mins`; T-1 or earlier uses historical APIs and never `rt_*`.
 - Keep the two full-market current-day pulls staggered: V16 starts at 09:38 and V20 may start its complete `rt_min_daily` acquisition only at or after 09:39. Do not move V20's full pull earlier.
 - A V16 manual scan must not start during `09:39 <= Shanghai wall time < 09:45`; before 09:39 its realtime fan-out must settle by the absolute 09:39 cutoff, while a request after that protected window (including after hours) remains a fresh V16-only scan.
-- One `rt_min_daily` call serves one stock. The approved client fan-out is one service-level acquisition with at most 40 concurrent per-stock requests. Same-provider-minute scheduled, manual, cold-start, and retry contenders must join the same in-process singleflight rather than starting another acquisition; bounded per-stock transport retries remain inside the client.
-- Never overlap two 40-worker V20 acquisitions or combine the V16 and V20 paths into an intentional 80-worker burst. The measured stable case is about 3,000 symbols at concurrency 40; about 6,000 requests at concurrency 80 produced terminal failures under the provider's per-minute limit.
+- User correction on 2026-11-02: do not use 40 concurrent minute requests; the production minute client ceiling is 5. One `rt_min_daily` call serves one stock, and a free slot is filled as soon as a request completes. Same-provider-minute scheduled, manual, cold-start, and retry contenders must join the same in-process singleflight rather than starting another acquisition; bounded per-stock transport retries remain inside the client.
+- Never overlap two full-market V20 acquisitions or combine the V16 and V20 paths to increase fan-out. Earlier measurements at concurrency 40/80 are historical observations, not authorization to exceed the current ceiling of 5.
 
 ## Selection task contract — user correction, 2026-09-12
 

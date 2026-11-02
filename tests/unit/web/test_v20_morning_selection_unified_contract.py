@@ -326,7 +326,7 @@ async def test_failed_0939_full_acquisition_is_not_restarted_until_0940(
 async def test_0939_scheduled_and_manual_contenders_share_one_full_acquisition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    assert TushareRealtimeClient.MAX_CONCURRENCY == 40
+    assert TushareRealtimeClient.MAX_CONCURRENCY == 5
     service, repository, _artifact = _service_and_artifact(
         monkeypatch,
         now=AT_DECISION_BAR,

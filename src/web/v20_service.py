@@ -19,6 +19,7 @@ import socket
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Awaitable, Callable, Iterable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
@@ -5573,6 +5574,24 @@ class V20Service:
             if callable(store_hydrate):
                 durable_payload: Any = canonical
             else:
+                canonical_calendar = tuple(canonical.computation_calendar)
+                canonical_integrity_hash = canonical._integrity_hash
+                projected = None
+                portable_payload = None
+                if (
+                    getattr(self._scan_state, "selection_version", None)
+                    or self.config.strategy_version
+                ) == "V22-slim" and not canonical._integrity_hash:
+                    projected = self._project_canonical_v16(
+                        canonical,
+                        calendar=canonical_calendar,
+                    )
+                    canonical_integrity_hash = projected.snapshot_hash
+                    portable_payload = encode_v16_canonical_artifact(
+                        projected,
+                        calendar=canonical_calendar,
+                        canonical_integrity_hash=canonical_integrity_hash,
+                    )
                 existing = await store.load(
                     official_stream_id=self.config.official_stream_id,
                     trade_date=canonical.trade_date,
@@ -5581,7 +5600,20 @@ class V20Service:
                 if existing is not None:
                     hydrated_existing = await self._hydrate_canonical_artifact_record(existing)
                     existing_integrity = existing.payload.get("canonical_integrity_hash")
-                    if existing_integrity == canonical._integrity_hash:
+                    same_identity = existing_integrity == canonical._integrity_hash
+                    if projected is not None and portable_payload is not None:
+                        # Old rows retain their legacy full-object digest. Both
+                        # generations share the validated portable snapshot.
+                        same_identity = (
+                            hydrated_existing.snapshot_hash == projected.snapshot_hash
+                            and dict(hydrated_existing.snapshot) == dict(projected.snapshot)
+                            and (
+                                "legacy_recommendation" not in existing.payload
+                                or existing.payload["legacy_recommendation"]
+                                == portable_payload["legacy_recommendation"]
+                            )
+                        )
+                    if same_identity:
                         if hydrated_existing.trade_date != canonical.trade_date:
                             raise V20SemanticConflict("canonical V16 artifact reuse date differs")
                         # ``computed_at`` is deliberately outside canonical
@@ -5591,15 +5623,19 @@ class V20Service:
                         if callable(getattr(self._repository, "save_rolling7_market_health", None)):
                             await self._record_rolling7_intent_from_artifact(existing)
                         return
-                canonical_calendar = tuple(canonical.computation_calendar)
-                projected = self._project_canonical_v16(
-                    canonical,
-                    calendar=canonical_calendar,
-                )
-                durable_payload = encode_v16_canonical_artifact(
-                    projected,
-                    calendar=canonical_calendar,
-                    canonical_integrity_hash=canonical._integrity_hash,
+                if projected is None:
+                    projected = self._project_canonical_v16(
+                        canonical,
+                        calendar=canonical_calendar,
+                    )
+                durable_payload = (
+                    portable_payload
+                    if portable_payload is not None
+                    else encode_v16_canonical_artifact(
+                        projected,
+                        calendar=canonical_calendar,
+                        canonical_integrity_hash=canonical_integrity_hash,
+                    )
                 )
             await store.save_once(
                 durable_payload,
@@ -7198,6 +7234,11 @@ class V20Service:
         if trade_date > today:
             raise V20StateConflict("canonical V16 replay cannot target a future trade date")
         frozen = await self._historical_canonical_inputs(context)
+        fingerprint_options: dict[str, Any] = {}
+        if (
+            getattr(self._scan_state, "selection_version", None) or self.config.strategy_version
+        ) == "V22-slim":
+            fingerprint_options["include_legacy_fingerprints"] = False
         canonical = await compute_canonical_v16_scan(
             self._scan_state,
             trade_date,
@@ -7211,6 +7252,7 @@ class V20Service:
             prior_daily_override=frozen.prior_daily,
             st_eligible_codes_override=frozen.st_eligible_codes,
             allow_realtime_fetch=False,
+            **fingerprint_options,
         )
         if getattr(context, "canonical_fact_persist_raw", True):
             await self._persist_canonical_raw_minute_bars(canonical)
@@ -8341,6 +8383,12 @@ class V20Service:
         The caller holds the decision lock. Request identity controls retry
         deduplication only; it never selects a different algorithm or renderer.
         """
+        task_started = perf_counter()
+        logger.info(
+            "Selection task request_id=%s trade_date=%s stage=START",
+            request_id,
+            context.trade_date,
+        )
         await self._repository.assert_runtime_leader()
         run_id = named_hash(
             "V20_SELECTION_TASK_RUN_V1",
@@ -8361,17 +8409,41 @@ class V20Service:
             await self._expire_reference_gaps(context, now)
             await self._process_mature_shadow(context, now)
             self.kick_mews_for_selection_trigger(now)
+            calculation_started = perf_counter()
+            logger.info("Selection task request_id=%s stage=CALCULATION_START", request_id)
             try:
                 calculation = await self._orchestrate_morning_selection(
                     context.trade_date, allow_legacy_terminal_fresh_theoretical=True
                 )
             except _NoCurrentSelectionData:
                 context.last_phase = "NO_CURRENT_DATA"
+                logger.info(
+                    "Selection task request_id=%s stage=NO_CURRENT_DATA total_seconds=%.6f",
+                    request_id,
+                    perf_counter() - task_started,
+                )
                 return None, False
+            logger.info(
+                "Selection task request_id=%s stage=CALCULATION_END seconds=%.6f",
+                request_id,
+                perf_counter() - calculation_started,
+            )
             context.canonical_bundle = calculation.bundle
             context.canonical_first_received_at = calculation.canonical_first_received_at
             commit = await self._prepare_entry_timing_commit(calculation)
+            logger.info(
+                "Selection task request_id=%s stage=TIMING_PREPARED total_seconds=%.6f",
+                request_id,
+                perf_counter() - task_started,
+            )
+            persist_started = perf_counter()
             existing_id = await self._repository.commit_selection_run(commit, run_id=run_id)
+            logger.info(
+                "Selection task request_id=%s stage=COMMITTED seconds=%.6f total_seconds=%.6f",
+                request_id,
+                perf_counter() - persist_started,
+                perf_counter() - task_started,
+            )
         assert existing_id is not None
         record = await self._repository.seal_event(existing_id, seal_v20_payload)
         if self.config.strategy_version == "V22-slim":
@@ -8384,6 +8456,12 @@ class V20Service:
         if context.entry_status is not None:
             self._verify_entry_binding(context.entry_status)
         context.last_phase = "DECISION_COMMITTED"
+        logger.info(
+            "Selection task request_id=%s stage=SEALED created=%s total_seconds=%.6f",
+            request_id,
+            created,
+            perf_counter() - task_started,
+        )
         # Both sources feed the same durable outbox and the same running
         # publisher. PENDING means accepted, not end-to-end success.
         return record, created
