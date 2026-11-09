@@ -280,6 +280,14 @@ async def test_new_alert_failure_and_old_exit_failure_do_not_skip_the_other(monk
 
     service = _service(monkeypatch, SimpleNamespace())
     service.config = replace(service.config, strategy_version="V22-slim")
+    service._calendar_provider = AsyncMock(
+        return_value=[
+            DAY - timedelta(days=1),
+            DAY,
+            DAY + timedelta(days=1),
+            DAY + timedelta(days=2),
+        ]
+    )
     completed = []
 
     async def operation(name):

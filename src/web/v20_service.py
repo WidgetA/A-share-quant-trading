@@ -2880,6 +2880,33 @@ class V20Service:
                 config=self.config,
             )
 
+    def _selection_not_run_response(
+        self, request_id: str, now: datetime, *, non_trading: bool = False
+    ) -> Mapping[str, Any]:
+        return {
+            "accepted": True,
+            "created": False,
+            "manual_request_id": request_id,
+            "trade_date": now.date().isoformat(),
+            "cycle_result": "NON_TRADING_DAY" if non_trading else "NO_CURRENT_DATA",
+            "entry_event_id": None,
+            "selection_version": self.config.strategy_version,
+            "symbols": [],
+            "reference_symbols": [],
+            "calculation_result": "NOT_RUN",
+            "data_source": None if non_trading else "rt_min_daily",
+            "delivery_status": "NOT_REQUIRED",
+            "feishu_delivery_confirmed": False,
+            "task_success": False,
+            "official_state_changed": False,
+            "orders_changed": False,
+            "message": (
+                "今天是中国股票市场非交易日，本次不请求行情、不出票。"
+                if non_trading
+                else "实时接口没有返回可用的当日数据，本次不出票。"
+            ),
+        }
+
     async def trigger_morning_selection(self, request_id: str) -> Mapping[str, Any]:
         """Invoke the ordinary task for today; never substitute a historical day."""
         await self._require_manual_trigger_ready()
@@ -2888,6 +2915,8 @@ class V20Service:
         now = self._aware_now()
         calendar = tuple(await self._load_trade_calendar(now.date()))
         trade_date = now.date()
+        if await self._is_non_trading_market_day(now):
+            return self._selection_not_run_response(request_id, now, non_trading=True)
         if now.time() < time(9, 39):
             raise V20StateConflict("09:39 selection input is not ready")
         async with self._decision_cycle_lock:
@@ -2899,25 +2928,7 @@ class V20Service:
                 context, now, request_id=request_id
             )
         if record is None:
-            return {
-                "accepted": True,
-                "created": False,
-                "manual_request_id": request_id,
-                "trade_date": trade_date.isoformat(),
-                "cycle_result": "NO_CURRENT_DATA",
-                "entry_event_id": None,
-                "selection_version": self.config.strategy_version,
-                "symbols": [],
-                "reference_symbols": [],
-                "calculation_result": "NOT_RUN",
-                "data_source": "rt_min_daily",
-                "delivery_status": "NOT_REQUIRED",
-                "feishu_delivery_confirmed": False,
-                "task_success": False,
-                "official_state_changed": False,
-                "orders_changed": False,
-                "message": "实时接口没有返回可用的当日数据，本次不出票。",
-            }
+            return self._selection_not_run_response(request_id, now)
         semantic = record.semantic
         timing_alert_id = semantic.get("entry_timing_alert_event_id")
         timing_delivery_status = "NOT_REQUIRED"
@@ -3332,6 +3343,10 @@ class V20Service:
         self._require_running()
         await self._repository.assert_runtime_leader()
         current = self._aware_now(now)
+        if await self._is_non_trading_market_day(current):
+            if include_outbox_recovery:
+                await self._seal_pending_outbox()
+            return
         # Today's D1/D2 dates are already frozen exchange-calendar evidence, so
         # their live protection may start before today's calendar refresh.  A
         # stale leg waits for the refresh in the normal path, avoiding a false
@@ -3640,6 +3655,8 @@ class V20Service:
 
     async def _run_live_exit_tick(self, context: _DayContext, now: datetime) -> None:
         """Run today's D1/D2 protection under a budget shorter than its cadence."""
+        if await self._is_non_trading_market_day(now):
+            return
         loop = asyncio.get_running_loop()
         budget = self._live_exit_tick_budget()
         tick_started_at = loop.time()
@@ -4124,6 +4141,8 @@ class V20Service:
 
         self._require_running()
         await self._repository.assert_runtime_leader()
+        if await self._is_non_trading_market_day(self._aware_now()):
+            return False
         calendar: Sequence[date] = ()
         try:
             if source_trade_date is None:
@@ -4626,6 +4645,16 @@ class V20Service:
             context.entry_status = status
             context.last_phase = "DECISION_COMMITTED"
         return status
+
+    async def _is_non_trading_market_day(self, now: datetime) -> bool:
+        """Use the cached exchange calendar, including weekday holidays.
+
+        Calendar failures propagate; an unavailable calendar is not a closure.
+        """
+        if self.config.strategy_version != "V22-slim":
+            return False
+        today = now.astimezone(SHANGHAI).date()
+        return today not in await self._load_trade_calendar(today)
 
     async def _load_trade_calendar(self, current_date: date) -> tuple[date, ...]:
         """Load one bounded, refreshable and validated exchange calendar."""
@@ -6228,6 +6257,8 @@ class V20Service:
         """Keep heavyweight historical reconstruction off live trading lanes."""
 
         local_now = now.astimezone(SHANGHAI)
+        if await self._is_non_trading_market_day(local_now):
+            return False
         calendar = await self._load_trade_calendar(local_now.date())
         wall = local_now.timetz().replace(tzinfo=None)
         return not (
@@ -8385,6 +8416,9 @@ class V20Service:
         The caller holds the decision lock. Request identity controls retry
         deduplication only; it never selects a different algorithm or renderer.
         """
+        if await self._is_non_trading_market_day(now):
+            context.last_phase = "NON_TRADING_DAY"
+            return None, False
         task_started = perf_counter()
         logger.info(
             "Selection task request_id=%s trade_date=%s stage=START",
@@ -9252,6 +9286,8 @@ class V20Service:
         context: _DayContext,
         now: datetime,
     ) -> None:
+        if await self._is_non_trading_market_day(now):
+            return
         active = await self._repository.list_active_legs(context.trade_date, **self._ledger_scope)
         today_legs = self._today_exit_legs(active, context.trade_date)
         await asyncio.gather(

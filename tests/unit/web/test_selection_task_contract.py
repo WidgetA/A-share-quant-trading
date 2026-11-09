@@ -100,7 +100,7 @@ async def test_current_selection_refreshes_whole_universe_despite_saved_rows(
 async def test_empty_current_realtime_returns_no_tickets_for_both_triggers(
     monkeypatch, day, profile
 ):
-    """The provider is called on Saturday too; no calendar-based shortcut or Friday replay."""
+    """V22 skips exchange closures; trading-day empty data never replays old tickets."""
     now = datetime.combine(day, datetime.min.time(), tzinfo=TZ).replace(hour=10)
     service, repository, _ = _service_and_artifact(monkeypatch, now=now)
     if profile == "V22-slim":
@@ -150,6 +150,23 @@ async def test_empty_current_realtime_returns_no_tickets_for_both_triggers(
     repository.enqueue_alert = AsyncMock(side_effect=AssertionError("empty input generated a push"))
     await service._run_decision_iteration_with_cutoff(now)
     realtime_calls = [c for c in client._api_call.await_args_list if c.args[0] == "rt_min_daily"]
+    if profile == "V22-slim" and day not in calendar:
+        client._api_call.assert_not_awaited()
+        client.fetch_daily_bars.assert_not_awaited()
+        result = await _dispatch_manual_trigger(service, f"closed-day-{day.isoformat()}")
+        assert result["trade_date"] == day.isoformat()
+        assert result["cycle_result"] == "NON_TRADING_DAY"
+        assert result["symbols"] == result["reference_symbols"] == []
+        assert result["entry_event_id"] is None and result["created"] is False
+        assert result["calculation_result"] == "NOT_RUN"
+        assert result["delivery_status"] == "NOT_REQUIRED"
+        client._api_call.assert_not_awaited()
+        client.fetch_daily_bars.assert_not_awaited()
+        repository.commit_selection_run.assert_not_awaited()
+        repository.seal_event.assert_not_awaited()
+        repository.enqueue_alert.assert_not_awaited()
+        assert not repository.selection_runs and repository.state.revision == 0
+        return
     assert len(realtime_calls) == len(codes), "timer must fetch current realtime"
     assert service._context.last_phase == "NO_CURRENT_DATA"
     assert service._lane_health["decision"].last_error is None
