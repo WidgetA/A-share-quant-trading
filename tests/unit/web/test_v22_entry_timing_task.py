@@ -25,6 +25,7 @@ class _Commit:
 def _task():
     service = object.__new__(V20Service)
     service._clock = lambda: NOW
+    service._load_trade_calendar = AsyncMock(return_value=(NOW.date(),))
     service.config = SimpleNamespace(
         official_stream_id="stream",
         state_lineage_id="lineage",
