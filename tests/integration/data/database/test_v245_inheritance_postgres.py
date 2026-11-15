@@ -1,27 +1,33 @@
 """A mid-stream upgrade inherits original gates without replaying old orders.
 
 Uses the existing isolated PostgreSQL fixture and real V22 preparation/commit
-path. No V24.5 policy state is seeded and no production database is involved.
+path. A schema-local database clock advances through the historical sessions;
+the original same-date and expiry predicates remain in force. No V24.5 policy
+state is seeded and no production database is involved.
 """
 
 import json
 from dataclasses import replace
 from datetime import date, datetime, time
 
+import asyncpg
 import pytest
 
-from src.data.database.v20_repository import sha256_json
+from src.data.database.v20_repository import V20EntryDeadlineExceeded, sha256_json
 from src.strategy.v20.artifacts import load_g_artifacts
 from src.strategy.v20.decision_engine import prepare_entry, prepare_invalid_entry
 from src.strategy.v20.runtime_config import load_v20_runtime_config
 from src.strategy.v24_5.entry import apply_turtle
+from tests.integration.data.database.test_v20_outbox_postgres import (
+    DSN,
+)
 from tests.integration.data.database.test_v20_outbox_postgres import (
     repository as _repository_fixture,
 )
 from tests.unit.strategy.test_v22_slim_entry import ROOT, TZ, fixture
 
 pytestmark = pytest.mark.postgres
-repository = _repository_fixture
+_base_repository = _repository_fixture
 
 UPGRADE_DAY = date(2026, 11, 12)
 CALENDAR = (
@@ -51,6 +57,52 @@ LEGACY_TABLES = (
     "v22_alert_batches",
     "v22_alert_positions",
 )
+
+
+@pytest.fixture
+async def repository(_base_repository):
+    """Use real PostgreSQL transactions while replaying a test-only DB clock.
+
+    Explicit pg_catalog placement makes unqualified clock_timestamp() resolve
+    to this disposable schema's function. Production SQL and its cutoff/date
+    guards are unchanged, and the other integration fixtures use their normal
+    pools. Schema/function/table disappear with the existing isolated fixture.
+    """
+    instance, original_pool, schema = _base_repository
+    await original_pool.execute(
+        f"CREATE TABLE {schema}.inheritance_clock_control (as_of TIMESTAMPTZ NOT NULL);"
+        f"CREATE FUNCTION {schema}.clock_timestamp() RETURNS TIMESTAMPTZ "
+        "LANGUAGE SQL VOLATILE AS $$ "
+        f"SELECT as_of FROM {schema}.inheritance_clock_control $$"
+    )
+    await original_pool.execute(
+        f"INSERT INTO {schema}.inheritance_clock_control (as_of) VALUES ($1)",
+        datetime.combine(UPGRADE_DAY, time(9, 46), tzinfo=TZ),
+    )
+    pool = await asyncpg.create_pool(
+        dsn=DSN,
+        min_size=1,
+        max_size=4,
+        server_settings={"search_path": f"{schema},pg_catalog"},
+    )
+    instance._pool = pool
+    try:
+        assert await pool.fetchval("SELECT clock_timestamp()") == datetime.combine(
+            UPGRADE_DAY, time(9, 46), tzinfo=TZ
+        )
+        yield instance, pool, schema
+    finally:
+        instance._pool = original_pool
+        await pool.close()
+
+
+async def set_database_day(pool, schema, day):
+    expected = datetime.combine(day, time(9, 46), tzinfo=TZ)
+    await pool.execute(
+        f"UPDATE {schema}.inheritance_clock_control SET as_of=$1",
+        expected,
+    )
+    assert await pool.fetchval("SELECT clock_timestamp()") == expected
 
 
 async def legacy_snapshot(pool, schema):
@@ -139,6 +191,7 @@ async def seed_original_history(
             payload=v20_config.frozen_payload,
         )
     for index, (day, raw_open) in enumerate(zip(history_days, sequence, strict=True)):
+        await set_database_day(pool, schema, day)
         current = await instance.load_state(config.state_lineage_id)
         if (invalid_then_valid and index == 1) or (canonical_v20 and index == 0):
             invalid = prepare_invalid_entry(
@@ -159,6 +212,7 @@ async def seed_original_history(
     assert await pool.fetchval(f"SELECT count(*) FROM {schema}.selection_runs") == len(sequence)
     assert await pool.fetchval(f"SELECT count(*) FROM {schema}.v245_policy_state") == 0
     assert await pool.fetchval(f"SELECT count(*) FROM {schema}.v245_policy_days") == 0
+    await set_database_day(pool, schema, UPGRADE_DAY)
     return config
 
 
@@ -346,3 +400,40 @@ async def test_v20_daily_slot_is_not_reclassified_by_later_v22_manual_rerun(repo
     )
     assert len(audit["source_events"]) == 2
     assert await legacy_snapshot(pool, schema) == prior
+
+
+@pytest.mark.parametrize("database_day", [date(2026, 11, 11), date(2026, 11, 13)])
+async def test_historical_clock_fixture_still_rejects_nonmatching_commit_date(
+    repository, database_day
+):
+    instance, pool, schema = repository
+    original = await seed_original_history(repository, (True, True))
+    config = load_v20_runtime_config(ROOT, ROOT / "config/v24-5.yaml")
+    await instance.register_config(
+        config_id=config.config_hash[:24],
+        config_hash=config.config_hash,
+        strategy_version=config.strategy_version,
+        deployment_mode=config.deployment_mode,
+        effective_trade_date=UPGRADE_DAY,
+        payload=config.frozen_payload,
+    )
+    context = await instance.load_v245_state_before(
+        official_stream_id=config.official_stream_id,
+        lineage_id=config.state_lineage_id,
+        trade_date=UPGRADE_DAY,
+    )
+    prepared = prepared_original(
+        config, await instance.load_state(original.state_lineage_id), UPGRADE_DAY, True
+    )
+    commit = apply_turtle(prepared, context, date(2026, 11, 11)).commit
+    prior = await legacy_snapshot(pool, schema)
+    await set_database_day(pool, schema, database_day)
+    clock = await pool.fetchval("SELECT clock_timestamp()")
+    assert clock.astimezone(TZ).date() != UPGRADE_DAY
+    # The earlier date is unexpired; the later date is also past expiry. This
+    # verifies nonmatching-date rejection, not an independently isolated expiry.
+    assert (clock < commit.action_expiry_ts) is (database_day < UPGRADE_DAY)
+    with pytest.raises(V20EntryDeadlineExceeded):
+        await instance.commit_selection_run(commit, run_id="f" * 64)
+    assert await legacy_snapshot(pool, schema) == prior
+    assert await pool.fetchval(f"SELECT count(*) FROM {schema}.v245_policy_days") == 0
