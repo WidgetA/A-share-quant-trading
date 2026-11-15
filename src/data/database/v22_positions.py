@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import json
 from datetime import date
 from typing import Any
@@ -15,8 +16,12 @@ def public(row: Any) -> dict[str, Any]:
 
 
 async def register_selection(connection: Any, schema: str, commit: Any, event_id: str) -> None:
-    if commit.strategy_version != "V22-slim" or commit.action != "ENTER":
+    if commit.strategy_version not in {"V22-slim", "V24.5"} or commit.action != "ENTER":
         return
+    if commit.strategy_version == "V24.5":
+        transition = commit.semantic.get("v245_transition", {})
+        if transition.get("signal_status") != "KNOWN" or transition.get("permit") is not True:
+            return
     batch_id = sha256_json(
         ["V22_ASSUMED_BUYS", commit.official_stream_id, commit.lineage_id, str(commit.trade_date)]
     )
@@ -24,7 +29,8 @@ async def register_selection(connection: Any, schema: str, commit: Any, event_id
         f"INSERT INTO {schema}.v22_alert_batches "
         "(batch_id,official_stream_id,lineage_id,trade_date,source_event_id) "
         "VALUES ($1,$2,$3,$4,$5) "
-        "ON CONFLICT (official_stream_id,lineage_id,trade_date) DO NOTHING RETURNING batch_id",
+        "ON CONFLICT (official_stream_id,lineage_id,trade_date,reference_kind) "
+        "DO NOTHING RETURNING batch_id",
         batch_id,
         commit.official_stream_id,
         commit.lineage_id,
@@ -35,15 +41,35 @@ async def register_selection(connection: Any, schema: str, commit: Any, event_id
         return
     symbols = commit.semantic["symbols"][:3]
     for stock in symbols:
-        await connection.execute(
-            f"INSERT INTO {schema}.v22_alert_positions "
-            "(position_id,batch_id,code,stock_name,entry_date) VALUES ($1,$2,$3,$4,$5)",
+        args = (
             sha256_json([batch_id, stock["code"]]),
             batch_id,
             stock["code"],
             stock.get("name") or stock["code"],
             commit.trade_date,
         )
+        if commit.strategy_version == "V22-slim":
+            await connection.execute(
+                f"INSERT INTO {schema}.v22_alert_positions "
+                "(position_id,batch_id,code,stock_name,entry_date) VALUES ($1,$2,$3,$4,$5)",
+                *args,
+            )
+        else:
+            # A notification cannot establish when bank proceeds became available.
+            # Explicit reference time is supplied by the live action plan, not inferred
+            # from a historical 09:41/09:42 backtest fill.
+            from src.data.database.v245_switch_positions import reference_clock
+
+            clock = reference_clock(commit.semantic.get("v245_reference_clock"))
+            await connection.execute(
+                f"INSERT INTO {schema}.v22_alert_positions "
+                "(position_id,batch_id,code,stock_name,entry_date,asset_kind,"
+                "strategy_version,reference_clock) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+                *args,
+                "STOCK",
+                "V24.5",
+                clock,
+            )
 
 
 class V22PositionStore:
@@ -51,14 +77,26 @@ class V22PositionStore:
         self.repository, self.config = repository, config
         self.schema = repository.schema
 
-    async def list(self, *, active: bool = False) -> list[dict[str, Any]]:
+    async def list(self, *, active: bool = False, unclosed: bool = False) -> list[dict[str, Any]]:
+        if active and unclosed:
+            raise ValueError("choose R33-active or all-unclosed holdings")
         async with self.repository.pool.acquire() as connection:
             rows = await connection.fetch(
                 f"SELECT p.*,b.source_event_id,b.trade_date AS recommendation_date "
                 f"FROM {self.schema}.v22_alert_positions p "
                 f"JOIN {self.schema}.v22_alert_batches b USING(batch_id) "
                 "WHERE b.official_stream_id=$1 AND b.lineage_id=$2 "
-                + ("AND p.status='MONITORING' AND p.alert_event_id IS NULL " if active else "")
+                + (
+                    "AND p.status='MONITORING' AND p.alert_event_id IS NULL "
+                    "AND p.asset_kind='STOCK' "
+                    if active
+                    else ""
+                )
+                + (
+                    "AND p.status='MONITORING' AND (p.quantity IS NULL OR p.quantity>0) "
+                    if unclosed
+                    else ""
+                )
                 + "ORDER BY p.entry_date,p.position_id",
                 self.config.official_stream_id,
                 self.config.state_lineage_id,
@@ -78,6 +116,17 @@ class V22PositionStore:
         if row is None:
             raise V20StateConflict("V22 holding record does not exist")
         return row
+
+    async def pending_switches(self) -> builtins.list[dict[str, Any]]:
+        from src.data.database.v245_switch_positions import pending_switch_positions
+
+        async with self.repository.pool.acquire() as connection:
+            return await pending_switch_positions(connection, self.schema, self.config)
+
+    async def apply_switch(self, position: dict[str, Any], **quote: Any) -> str | None:
+        from src.data.database.v245_switch_positions import apply_switch
+
+        return await apply_switch(self, position, **quote)
 
     async def calibrate(
         self, position_id: str, request_id: str, change: dict[str, Any]
@@ -149,12 +198,15 @@ class V22PositionStore:
         position: dict[str, Any],
         *,
         reference: float | None = None,
+        reference_clock: Any = None,
         extended: bool = False,
         signal: Any = None,
     ) -> str | None:
         async with self.repository.pool.acquire() as connection:
             async with connection.transaction():
                 row = await self._locked(connection, position["position_id"])
+                if row.get("asset_kind", "STOCK") != "STOCK":
+                    return None  # Bank references never use the ordinary R33 exit engine.
                 if row["revision"] != position["revision"] or row["status"] != "MONITORING":
                     return None
                 if row["alert_event_id"] is not None:
@@ -165,6 +217,14 @@ class V22PositionStore:
                     if row["entry_price"] is not None or reference is None
                     else "STRATEGY_REFERENCE"
                 )
+                if reference is not None and reference_clock is not None:
+                    from src.data.database.v245_switch_positions import (
+                        reference_clock as parse_clock,
+                    )
+
+                    reference_clock = parse_clock(reference_clock)
+                    if row.get("strategy_version") == "V24.5" and row["entry_price"] is None:
+                        price_source = "STRATEGY_REFERENCE_AFTER_DELIVERY"
                 alert_id = None
                 if signal is not None:
                     alert_id = sha256_json(["V22_EXIT_ALERT", position["position_id"]])
@@ -175,7 +235,7 @@ class V22PositionStore:
                         "event_type": "DATA_ALERT",
                         "alert_code": "V22_EXIT_ALERT",
                         "deployment_mode": self.config.deployment_mode,
-                        "strategy_version": "V22-slim",
+                        "strategy_version": row.get("strategy_version", "V22-slim"),
                         "event_trade_date": signal.at.date().isoformat(),
                         "position_id": position["position_id"],
                         "code": row["code"],
@@ -207,11 +267,13 @@ class V22PositionStore:
                 await connection.execute(
                     f"UPDATE {self.schema}.v22_alert_positions "
                     "SET entry_price=$2,price_source=$3,extended=$4,alert_event_id=$5,"
+                    "reference_clock=COALESCE($6,reference_clock),"
                     "revision=revision+1,updated_at=clock_timestamp() WHERE position_id=$1",
                     position["position_id"],
                     price,
                     price_source,
                     extended,
                     alert_id,
+                    reference_clock,
                 )
                 return alert_id

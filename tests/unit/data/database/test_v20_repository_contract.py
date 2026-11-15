@@ -1090,6 +1090,10 @@ def test_runtime_migration_is_mechanically_identical_to_all_standalone_migration
         + "\n"
         + (root / "migrations/v20/006_legacy_position_sync.sql").read_text(encoding="utf-8")
         + "\n"
+        + (root / "migrations/v20/007_v245_policy.sql").read_text(encoding="utf-8")
+        + "\n"
+        + (root / "migrations/v20/008_v245_positions.sql").read_text(encoding="utf-8")
+        + "\n"
     )
     assert "CONSTRAINT ck_rolling7_market_health_d0_references_positive" in sql
     assert "CONSTRAINT ck_rolling7_market_health_d2_closes_positive" in sql
@@ -1200,15 +1204,16 @@ async def test_begin_delivery_attempt_is_atomic_owned_and_audited() -> None:
     )
 
     assert (attempt.attempt_number, attempt.delivery_variant) == (3, "PRIMARY")
-    lock_sql = _compact_sql(connection.calls[1][1])
+    dispatch_calls = [call for call in connection.calls if call[0] == "fetchrow"]
+    lock_sql = _compact_sql(dispatch_calls[0][1])
     assert "delivery_status='LEASED' AND lease_owner=$2" in lock_sql
     assert "FOR UPDATE" in lock_sql
-    insert_call = connection.calls[2]
+    insert_call = dispatch_calls[1]
     insert_sql = _compact_sql(insert_call[1])
     assert "phase,worker_id,delivery_variant" in insert_sql
     assert "'STARTED'" in insert_sql
     assert insert_call[2][-2:] == ("worker-1", "PRIMARY")
-    update_sql = _compact_sql(connection.calls[3][1])
+    update_sql = _compact_sql(dispatch_calls[2][1])
     assert "delivery_status='DELIVERY_UNKNOWN',attempt_count=$1" in update_sql
     assert "lease_owner=$3" in update_sql
     assert "RETURNING event_id" in update_sql

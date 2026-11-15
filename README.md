@@ -1,8 +1,10 @@
 # A-share-quant-trading
 
-V22-slim replaces V20 morning selection with frozen V22
-ranking, the complete entry gates, and Top3 recommendations. See
-[scope and acceptance](docs/strategies/v22-slim/README.md).
+V24.5 replaces V22-slim in the default runtime. It preserves V22 selection,
+ranking and normal exits, adds the three-open/five-closed turtle state, and
+issues ICBC parking/return instructions through the existing notification flow.
+See the [implementation plan](docs/strategies/v24-5/implementation-plan.md) and
+[release checks](docs/strategies/v24-5/release-checklist.md).
 
 V16 notifications show each calculation price with its actual source minute.
 Report generation time is separate. Missing source times are explicitly unknown;

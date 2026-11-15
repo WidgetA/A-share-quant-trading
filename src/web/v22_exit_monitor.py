@@ -139,6 +139,8 @@ class V22ExitMonitor:
     async def position(
         self, position: dict[str, Any], calendar: tuple[date, ...], now: datetime
     ) -> None:
+        if position.get("asset_kind", "STOCK") != "STOCK":
+            return
         entry_day = date.fromisoformat(position["entry_date"])
         if entry_day not in calendar or entry_day > now.date():
             raise ValueError("V22 buy date lacks an exchange calendar session")
@@ -148,17 +150,50 @@ class V22ExitMonitor:
         code = position["code"]
         price = position["entry_price"]
         reference = None
+        reference_clock: time | None = None
         if price is None:
             entry_bars = await self.bars(code, entry_day, now)
-            reference_bars = [
-                b for b in entry_bars if b.at.time().replace(tzinfo=None) == time(9, 41) and b.valid
-            ]
+            if position.get("strategy_version") == "V24.5":
+                # Delivery is evidence that an instruction became available, not
+                # evidence of a fill or of bank-sale proceeds. Keep this basis
+                # explicitly STRATEGY_REFERENCE_AFTER_DELIVERY until calibrated.
+                async with self.service._repository.pool.acquire() as connection:
+                    delivery = await connection.fetchrow(
+                        f"SELECT delivery_status,delivered_at FROM "
+                        f"{self.service._repository.schema}.outbox_events WHERE event_id=$1",
+                        position.get("source_event_id"),
+                    )
+                if delivery is None or delivery["delivery_status"] != "SENT":
+                    return
+                delivered = delivery["delivered_at"]
+                if isinstance(delivered, str):
+                    delivered = datetime.fromisoformat(delivered)
+                if not isinstance(delivered, datetime) or delivered.tzinfo is None:
+                    return
+                delivered = delivered.astimezone(now.tzinfo)
+                if delivered.date() != entry_day or delivered > now:
+                    return
+                eligible = [b for b in entry_bars if b.valid and b.at > delivered]
+                reference_bars = eligible[:1]
+                if reference_bars:
+                    reference_clock = reference_bars[0].at.time().replace(tzinfo=None)
+            else:
+                reference_bars = [
+                    b
+                    for b in entry_bars
+                    if b.at.time().replace(tzinfo=None) == time(9, 41) and b.valid
+                ]
             if len(reference_bars) != 1:
                 return
             reference = price = reference_bars[0].open
         if now.date() == entry_day:
             if reference is not None:
-                await self.store.apply(position, reference=reference)
+                if reference_clock is None:
+                    await self.store.apply(position, reference=reference)
+                else:
+                    await self.store.apply(
+                        position, reference=reference, reference_clock=reference_clock
+                    )
             return
         daily = await self.daily(code, entry_day, now)
         by_day = {
@@ -204,13 +239,70 @@ class V22ExitMonitor:
             )
             if signal is not None:
                 event_id = await self.store.apply(
-                    position, reference=reference, extended=extended, signal=signal
+                    position,
+                    reference=reference,
+                    extended=extended,
+                    signal=signal,
+                    reference_clock=reference_clock,
                 )
                 if event_id is not None:
                     await self.service._repository.seal_event(event_id, seal_v20_payload)
                 return
         if reference is not None or extended != position["extended"]:
-            await self.store.apply(position, reference=reference, extended=extended)
+            await self.store.apply(
+                position, reference=reference, extended=extended, reference_clock=reference_clock
+            )
+
+    @staticmethod
+    def current_switch(position: dict[str, Any]) -> bool:
+        expected = "STOCKS" if position.get("asset_kind", "STOCK") == "BANK" else "BANK"
+        return position.get("current_target") == position.get("switch_target") == expected
+
+    async def switch_position(
+        self, position: dict[str, Any], calendar: tuple[date, ...], now: datetime
+    ) -> None:
+        if not self.current_switch(position):
+            return
+        entry_day = date.fromisoformat(str(position["entry_date"]))
+        if entry_day not in calendar or now.date() not in calendar:
+            raise ValueError("switch holding date lacks an exchange calendar session")
+        if entry_day >= now.date() or position.get("quantity") == 0:
+            return
+        # A previous alert stays an alert, never a sale. Its outbox recovery is
+        # handled by the ordinary publisher; do not create a second notification.
+        if position.get("switch_alert_event_id"):
+            from src.data.database.v245_switch_positions import can_replace_suppressed_switch
+
+            if not can_replace_suppressed_switch(position):
+                if not position.get("switch_suppression_reason"):
+                    await self.service._repository.seal_event(
+                        position["switch_alert_event_id"], seal_v20_payload
+                    )
+                return
+        bars = await self.bars(position["code"], now.date(), now)
+        completed = [b for b in bars if b.valid and b.at <= now.replace(second=0, microsecond=0)]
+        if not completed:
+            return
+        quote = completed[-1]
+        available_at = position.get("current_target_available_at")
+        if available_at is not None:
+            if isinstance(available_at, str):
+                available_at = datetime.fromisoformat(available_at)
+            if available_at.tzinfo is None or quote.at < available_at:
+                return
+        limit = await self.limits(position["code"], now.date())
+        if limit is None or quote.close <= float(limit["down_limit"]):
+            return
+        event_id = await self.store.apply_switch(
+            position,
+            trigger_at=quote.at,
+            trigger_price=quote.close,
+            quote_volume=quote.volume,
+            down_limit=float(limit["down_limit"]),
+            quote_source="rt_min_daily",
+        )
+        if event_id is not None:
+            await self.service._repository.seal_event(event_id, seal_v20_payload)
 
     async def run(self, now: datetime) -> None:
         key = now.strftime("%Y%m%d%H%M")
@@ -218,7 +310,10 @@ class V22ExitMonitor:
             self.cache = {k: v for k, v in self.cache.items() if k[0] != "rt"}
             self.minute = key
         positions = await self.store.list(active=True)
-        if not positions:
+        switches = []
+        if getattr(self.service.config, "strategy_version", None) == "V24.5":
+            switches = [p for p in await self.store.pending_switches() if self.current_switch(p)]
+        if not positions and not switches:
             self.cache.clear()
             return
         calendar = tuple(await self.service._load_trade_calendar(now.date()))
@@ -227,13 +322,20 @@ class V22ExitMonitor:
         errors = []
         semaphore = asyncio.Semaphore(3)
 
-        async def check(position: dict[str, Any]) -> None:
+        async def check(position: dict[str, Any], switch: bool = False) -> None:
             try:
                 async with semaphore:
-                    await self.position(position, calendar, now)
+                    if switch:
+                        await self.switch_position(position, calendar, now)
+                    else:
+                        await self.position(position, calendar, now)
             except Exception as exc:
                 errors.append(f"{position['code']}: {type(exc).__name__}: {exc}")
 
-        await asyncio.gather(*(check(position) for position in positions))
+        switch_ids = {p["position_id"] for p in switches}
+        await asyncio.gather(
+            *(check(p, True) for p in switches),
+            *(check(p) for p in positions if p.get("position_id") not in switch_ids),
+        )
         if errors:
             raise ValueError("V22 exit monitoring input failed: " + "; ".join(errors))

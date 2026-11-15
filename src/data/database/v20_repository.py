@@ -23,7 +23,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import asyncpg
 
@@ -1018,6 +1018,7 @@ class OutboxRecord:
     delivery_status: str
     attempt_count: int
     lease_db_ts: datetime | None = None
+    last_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1816,6 +1817,14 @@ def migration_sql(schema: str = "v20") -> str:
         .replace("v20.", f"{schema}.")
         + "\n"
         + (_PROJECT_ROOT / "migrations/v20/006_legacy_position_sync.sql")
+        .read_text(encoding="utf-8")
+        .replace("v20.", f"{schema}.")
+        + "\n"
+        + (_PROJECT_ROOT / "migrations/v20/007_v245_policy.sql")
+        .read_text(encoding="utf-8")
+        .replace("v20.", f"{schema}.")
+        + "\n"
+        + (_PROJECT_ROOT / "migrations/v20/008_v245_positions.sql")
         .read_text(encoding="utf-8")
         .replace("v20.", f"{schema}.")
         + "\n"
@@ -2658,6 +2667,71 @@ class V20Repository:
             action_expiry_ts=row["action_expiry_ts"],
         )
 
+    async def get_valid_selection_reference(
+        self, official_stream_id: str, trade_date: date, *, lineage_id: str
+    ) -> EntryStatus | None:
+        """Read the first valid fresh result after a failed immutable daily slot.
+
+        This is reference input recovery, not replacement of the official daily
+        decision. The original slot and state remain immutable. Proposal, event
+        and source snapshot must all agree before exposing the reference.
+        """
+        _require_scope(official_stream_id, lineage_id)
+        async with self.pool.acquire() as connection:
+            row = await connection.fetchrow(
+                f"SELECT run.*,slot.slot_id,slot.slot_status,slot.slot_revision,"
+                "event.semantic_json,event.semantic_content_hash,event.action_expiry_ts,"
+                "snapshot.snapshot_hash,snapshot.snapshot_json "
+                f"FROM {self.schema}.selection_runs run "
+                f"JOIN {self.schema}.decision_slots slot ON "
+                "slot.official_stream_id=run.official_stream_id AND slot.trade_date=run.trade_date "
+                "AND slot.lineage_id=run.lineage_id "
+                f"JOIN {self.schema}.outbox_events event ON event.event_id=run.event_id "
+                f"JOIN {self.schema}.input_snapshots snapshot "
+                "ON snapshot.snapshot_id=run.snapshot_id "
+                "WHERE run.official_stream_id=$1 AND run.lineage_id=$2 AND run.trade_date=$3 "
+                "AND run.proposal_json->'semantic'->>'strategy_version' IN ('V22-slim','V24.5') "
+                "AND run.proposal_json->'semantic'->>'action' IN ('ENTER','BLOCK','NO_SIGNAL') "
+                "ORDER BY run.created_at,run.run_id LIMIT 1",
+                official_stream_id,
+                lineage_id,
+                trade_date,
+            )
+        if row is None:
+            return None
+        proposal = _json_value(row["proposal_json"])
+        semantic = _json_value(row["semantic_json"])
+        snapshot = _json_value(row["snapshot_json"])
+        if (
+            sha256_json(proposal) != row["proposal_hash"]
+            or sha256_json(semantic) != row["semantic_content_hash"]
+            or sha256_json(snapshot) != row["snapshot_hash"]
+            or proposal.get("snapshot_hash") != row["snapshot_hash"]
+            or semantic != {**proposal["semantic"], "event_id": row["event_id"]}
+        ):
+            raise V20SemanticConflict("valid selection reference identity mismatch")
+        return EntryStatus(
+            official_stream_id=row["official_stream_id"],
+            trade_date=row["trade_date"],
+            slot_id=row["slot_id"],
+            slot_status=row["slot_status"],
+            slot_revision=int(row["slot_revision"]),
+            strategy_version=semantic["strategy_version"],
+            config_id=row["config_hash"][:24],
+            config_hash=row["config_hash"],
+            lineage_id=row["lineage_id"],
+            decision_id=semantic["decision_id"],
+            event_id=row["event_id"],
+            action=semantic["action"],
+            final_multiplier=float(semantic["final_multiplier"]),
+            semantic_content_hash=row["semantic_content_hash"],
+            semantic=semantic,
+            snapshot_id=row["snapshot_id"],
+            snapshot_hash=row["snapshot_hash"],
+            snapshot=snapshot,
+            action_expiry_ts=row["action_expiry_ts"],
+        )
+
     async def get_manual_monitor_enrollment(
         self,
         source_event_id: str,
@@ -3045,11 +3119,11 @@ class V20Repository:
         )
         if sha256_json(commit.snapshot) != commit.snapshot_hash:
             raise V20SemanticConflict("snapshot_hash mismatch")
-        entry_only = commit.strategy_version == "V22-slim"
+        entry_only = commit.strategy_version in {"V22-slim", "V24.5"}
         if entry_only and commit.action != "INPUT_INVALID":
             if (
                 commit.semantic.get("entry_only") is not True
-                or commit.semantic.get("strategy_version") != "V22-slim"
+                or commit.semantic.get("strategy_version") != commit.strategy_version
             ):
                 raise ValueError("V22-slim requires its entry-only semantic contract")
             if commit.model_batch is not None:
@@ -3370,6 +3444,311 @@ class V20Repository:
                 official_stream_id,
             )
 
+    @staticmethod
+    def _v245_transition_payload(commit: EntryCommit) -> dict[str, Any] | None:
+        from src.strategy.v24_5.policy import prepare_transition
+
+        payload = commit.semantic.get("v245_transition")
+        if commit.strategy_version != "V24.5":
+            if payload is not None:
+                raise V20SemanticConflict("V24.5 transition attached to another strategy")
+            return None
+        if not isinstance(payload, Mapping):
+            raise V20SemanticConflict("V24.5 selection requires its policy transition")
+        expected_revision = payload.get("expected_revision")
+        if type(expected_revision) is not int or expected_revision < 0:
+            raise V20SemanticConflict("invalid V24.5 expected revision")
+        try:
+            previous = payload.get("previous_trade_date")
+            canonical = prepare_transition(
+                payload["state_before"],
+                trade_date=commit.trade_date,
+                previous_trade_date=date.fromisoformat(previous) if previous else None,
+                raw_open=payload["raw_open"],
+            )
+        except (ValueError, TypeError, KeyError) as exc:
+            raise V20SemanticConflict("invalid V24.5 transition inputs") from exc
+        canonical["expected_revision"] = expected_revision
+        if dict(payload) != canonical:
+            raise V20SemanticConflict("V24.5 transition does not match the pure policy")
+        semantic = commit.semantic
+        expected_input = {
+            "state_before": canonical["state_before"],
+            "expected_revision": expected_revision,
+            "previous_trade_date": canonical["previous_trade_date"],
+        }
+        if commit.snapshot.get("v245_state_input") != expected_input:
+            raise V20SemanticConflict("V24.5 transition is not bound to its input snapshot")
+        if canonical["signal_status"] == "UNKNOWN":
+            if (
+                commit.action != "INPUT_INVALID"
+                or semantic.get("action") != "INPUT_INVALID"
+                or commit.final_multiplier != 0
+                or semantic.get("final_multiplier") != 0
+                or semantic.get("symbols") != []
+                or semantic.get("v245_switch_plan") is not None
+            ):
+                raise V20SemanticConflict("unknown V24.5 input cannot create a switch instruction")
+            return canonical
+        original_action = semantic.get("original_action")
+        raw_open = canonical["raw_open"]
+        raw_multiplier = semantic.get("original_final_multiplier")
+        if type(raw_multiplier) not in (int, float):
+            raise V20SemanticConflict("V24.5 original multiplier must be a finite number")
+        original_multiplier = cast(int | float, raw_multiplier)
+        references = semantic.get("reference_symbols")
+        if (
+            original_action not in {"ENTER", "BLOCK", "NO_SIGNAL"}
+            or semantic.get("original_final_open") is not raw_open
+            or (original_action == "ENTER") is not raw_open
+            or not math.isfinite(original_multiplier)
+            or not 0 <= original_multiplier <= 1
+            or (original_multiplier > 0) is not raw_open
+            or not isinstance(references, list)
+            or references != commit.snapshot.get("symbols")
+        ):
+            raise V20SemanticConflict(
+                "V24.5 original gate/reference facts contradict its transition"
+            )
+        expected_action = (
+            original_action if canonical["permit"] or original_action != "ENTER" else "BLOCK"
+        )
+        expected_multiplier = original_multiplier if canonical["permit"] else 0.0
+        expected_symbols = references[:3] if canonical["permit"] else []
+        plan = semantic.get("v245_switch_plan")
+        if (
+            commit.action != expected_action
+            or semantic.get("action") != expected_action
+            or commit.final_multiplier != expected_multiplier
+            or semantic.get("final_multiplier") != expected_multiplier
+            or semantic.get("symbols") != expected_symbols
+            or (
+                plan is not None
+                and (
+                    not isinstance(plan, Mapping)
+                    or plan.get("target") != ("STOCKS" if canonical["permit"] else "BANK")
+                )
+            )
+        ):
+            raise V20SemanticConflict("V24.5 output does not match its actual turtle permission")
+        return canonical
+
+    @staticmethod
+    def _v245_state_row(row: Mapping[str, Any] | None) -> tuple[dict[str, Any], int]:
+        from src.strategy.v24_5.policy import genesis_state, validate_state
+
+        if row is None:
+            return genesis_state(), 0
+        payload = _json_value(row["state_json"])
+        try:
+            state = validate_state(payload)
+        except (TypeError, ValueError) as exc:
+            raise V20SemanticConflict("invalid stored V24.5 policy state") from exc
+        if sha256_json(state) != row["state_hash"] or int(row["revision"]) < 0:
+            raise V20SemanticConflict("stored V24.5 policy state identity mismatch")
+        return state, int(row["revision"])
+
+    @staticmethod
+    def _v245_day_before(row: Mapping[str, Any]) -> dict[str, Any]:
+        from src.strategy.v24_5.policy import validate_state
+
+        before = validate_state(_json_value(row["state_before_json"]))
+        payload = _json_value(row["transition_json"])
+        if (
+            sha256_json(before) != row["state_before_hash"]
+            or sha256_json(payload) != row["transition_hash"]
+            or payload.get("state_before") != before
+            or payload.get("signal_status") != row["signal_status"]
+            or payload.get("raw_open") is not row["raw_open"]
+        ):
+            raise V20SemanticConflict("stored V24.5 daily transition identity mismatch")
+        return before
+
+    async def load_v245_state_before(
+        self, *, official_stream_id: str, lineage_id: str, trade_date: date
+    ) -> dict[str, Any]:
+        """Read the immutable prestate for a new run; never advance or create state."""
+        if not official_stream_id or not lineage_id or type(trade_date) is not date:
+            raise ValueError("invalid V24.5 state scope/date")
+        async with self.pool.acquire() as connection:
+            async with connection.transaction(isolation="repeatable_read", readonly=True):
+                current = await connection.fetchrow(
+                    f"SELECT revision,state_hash,state_json FROM {self.schema}.v245_policy_state "
+                    "WHERE official_stream_id=$1 AND lineage_id=$2",
+                    official_stream_id,
+                    lineage_id,
+                )
+                daily = await connection.fetchrow(
+                    f"SELECT * FROM {self.schema}.v245_policy_days "
+                    "WHERE official_stream_id=$1 AND lineage_id=$2 AND trade_date=$3",
+                    official_stream_id,
+                    lineage_id,
+                    trade_date,
+                )
+        state, revision = self._v245_state_row(current)
+        if daily is not None:
+            before = self._v245_day_before(daily)
+            status = str(daily["signal_status"])
+        else:
+            if (
+                state["last_trade_date"] is not None
+                and state["last_trade_date"] >= trade_date.isoformat()
+            ):
+                raise V20StateConflict("V24.5 has a later state without the requested daily record")
+            before, status = state, "ABSENT"
+        return {"state_before": before, "expected_revision": revision, "day_status": status}
+
+    async def _commit_v245_transition(
+        self, connection: Any, commit: EntryCommit, event_id: str
+    ) -> bool:
+        """Within the selection transaction, advance the separate policy journal.
+
+        The first known result is the daily state projection. Fresh same-day
+        results remain independently persisted selection runs, without counting
+        the session again. Unknown can be repaired that same day from its frozen
+        prestate, but cannot silently rewrite subsequently processed sessions.
+        """
+        from src.strategy.v24_5.policy import genesis_state
+
+        payload = self._v245_transition_payload(commit)
+        if payload is None:
+            return False
+        seed = genesis_state()
+        await connection.execute(
+            f"INSERT INTO {self.schema}.v245_policy_state "
+            "(official_stream_id,lineage_id,revision,state_hash,state_json) "
+            "VALUES ($1,$2,0,$3,$4::jsonb) ON CONFLICT DO NOTHING",
+            commit.official_stream_id,
+            commit.lineage_id,
+            sha256_json(seed),
+            canonical_json(seed),
+        )
+        current_row = await connection.fetchrow(
+            f"SELECT revision,state_hash,state_json FROM {self.schema}.v245_policy_state "
+            "WHERE official_stream_id=$1 AND lineage_id=$2 FOR UPDATE",
+            commit.official_stream_id,
+            commit.lineage_id,
+        )
+        if current_row is None:
+            raise V20StateConflict("V24.5 policy state was not initialized")
+        current, revision = self._v245_state_row(current_row)
+        daily = await connection.fetchrow(
+            f"SELECT * FROM {self.schema}.v245_policy_days "
+            "WHERE official_stream_id=$1 AND lineage_id=$2 AND trade_date=$3 FOR UPDATE",
+            commit.official_stream_id,
+            commit.lineage_id,
+            commit.trade_date,
+        )
+        before = self._v245_day_before(daily) if daily is not None else current
+        if before != payload["state_before"]:
+            raise V20StateConflict("V24.5 transition is based on a different before state")
+        if daily is not None and (
+            daily["signal_status"] == "KNOWN" or payload["signal_status"] == "UNKNOWN"
+        ):
+            return False
+        if revision != payload["expected_revision"]:
+            raise V20StateConflict("stale V24.5 policy revision")
+        current_day = current["last_trade_date"]
+        if current_day is not None and current_day > commit.trade_date.isoformat():
+            raise V20StateConflict("V24.5 later sessions already depend on this unknown day")
+        if daily is None and current_day == commit.trade_date.isoformat():
+            raise V20StateConflict("V24.5 current day lacks its immutable daily transition")
+        await connection.execute(
+            f"INSERT INTO {self.schema}.v245_policy_days "
+            "(official_stream_id,lineage_id,trade_date,signal_status,raw_open,"
+            "state_before_hash,state_before_json,transition_hash,transition_json,"
+            "first_event_id,effective_event_id) "
+            "VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9::jsonb,$10,$10) "
+            "ON CONFLICT (official_stream_id,lineage_id,trade_date) DO UPDATE SET "
+            "signal_status=EXCLUDED.signal_status,raw_open=EXCLUDED.raw_open,"
+            "transition_hash=EXCLUDED.transition_hash,transition_json=EXCLUDED.transition_json,"
+            "effective_event_id=EXCLUDED.effective_event_id,updated_at=clock_timestamp() "
+            f"WHERE {self.schema}.v245_policy_days.signal_status='UNKNOWN'",
+            commit.official_stream_id,
+            commit.lineage_id,
+            commit.trade_date,
+            payload["signal_status"],
+            payload["raw_open"],
+            sha256_json(before),
+            canonical_json(before),
+            sha256_json(payload),
+            canonical_json(payload),
+            event_id,
+        )
+        after = payload["state_after"]
+        updated = await connection.execute(
+            f"UPDATE {self.schema}.v245_policy_state SET revision=revision+1,"
+            "state_hash=$1,state_json=$2::jsonb,updated_at=clock_timestamp() "
+            "WHERE official_stream_id=$3 AND lineage_id=$4 AND revision=$5",
+            sha256_json(after),
+            canonical_json(after),
+            commit.official_stream_id,
+            commit.lineage_id,
+            revision,
+        )
+        if updated != "UPDATE 1":
+            raise V20StateConflict("V24.5 policy CAS rejected the selection transaction")
+        return True
+
+    async def _repair_v245_reference_shadows(
+        self, connection: Any, commit: EntryCommit, event_id: str
+    ) -> None:
+        """Restore only the first valid run's original reference after a failed slot.
+
+        The daily decision may be INPUT_INVALID forever. Reference recovery has
+        its own event link and a nullable decision_id already supported by the
+        reference engine; it neither manufactures another daily decision nor
+        changes the original health/risk state advancement.
+        """
+        if commit.strategy_version != "V24.5" or commit.action == "INPUT_INVALID":
+            return
+        first_event = await connection.fetchval(
+            f"SELECT event_id FROM {self.schema}.selection_runs "
+            "WHERE official_stream_id=$1 AND lineage_id=$2 AND trade_date=$3 "
+            "AND proposal_json->'semantic'->>'action' IN ('ENTER','BLOCK','NO_SIGNAL') "
+            "ORDER BY created_at,run_id LIMIT 1",
+            commit.official_stream_id,
+            commit.lineage_id,
+            commit.trade_date,
+        )
+        if first_event != event_id:
+            return
+        for shadow in commit.shadow_batches:
+            await connection.execute(
+                f"INSERT INTO {self.schema}.shadow_batches "
+                "(batch_id,decision_id,official_stream_id,lineage_id,"
+                "kind,signal_date,t2_date,batch_json) "
+                "VALUES ($1,NULL,$2,$3,$4,$5,$6,$7::jsonb) ON CONFLICT(batch_id) DO NOTHING",
+                shadow.batch_id,
+                commit.official_stream_id,
+                commit.lineage_id,
+                shadow.kind,
+                shadow.signal_date,
+                shadow.t2_date,
+                canonical_json(shadow.payload),
+            )
+            stored = await connection.fetchrow(
+                f"SELECT * FROM {self.schema}.shadow_batches WHERE batch_id=$1", shadow.batch_id
+            )
+            if stored is None or any(
+                (
+                    stored["official_stream_id"] != commit.official_stream_id,
+                    stored["lineage_id"] != commit.lineage_id,
+                    stored["kind"] != shadow.kind,
+                    stored["signal_date"] != shadow.signal_date,
+                    stored["t2_date"] != shadow.t2_date,
+                    _json_value(stored["batch_json"]) != shadow.payload,
+                )
+            ):
+                raise V20SemanticConflict("recovered reference basket identity mismatch")
+            await connection.execute(
+                f"INSERT INTO {self.schema}.v245_reference_repairs "
+                "(batch_id,source_event_id,source_payload_hash) VALUES ($1,$2,$3)",
+                shadow.batch_id,
+                event_id,
+                sha256_json(shadow.payload),
+            )
+
     async def commit_selection_run(self, commit: EntryCommit, *, run_id: str) -> str:
         """Atomically save every run, with exactly one daily state advancement.
 
@@ -3381,7 +3760,7 @@ class V20Repository:
         _require_sha256(run_id, "selection run_id")
         advisory = commit.semantic.get("entry_timing_advisory")
         timing_notice = (
-            commit.strategy_version == "V22-slim"
+            commit.strategy_version in {"V22-slim", "V24.5"}
             and isinstance(advisory, Mapping)
             and advisory.get("schema") == "v22-entry-timing/v1"
             and advisory.get("status") in ("WAIT", "NO_WAIT", "UNAVAILABLE")
@@ -3498,7 +3877,7 @@ class V20Repository:
                     alert_semantic = {
                         "schema_version": V20_DATA_ALERT_SEMANTIC_SCHEMA,
                         "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
-                        "strategy_version": "V22-slim",
+                        "strategy_version": commit.strategy_version,
                         "deployment_mode": commit.semantic.get("deployment_mode"),
                         "event_id": alert_id,
                         "entry_event_id": event_id,
@@ -3541,8 +3920,13 @@ class V20Repository:
                     advanced,
                 )
                 from src.data.database.v22_positions import register_selection
+                from src.data.database.v245_switch_positions import register_v245_selection
 
+                await self._commit_v245_transition(connection, commit, event_id)
+                if not advanced and slot["slot_status"] == "FAILED":
+                    await self._repair_v245_reference_shadows(connection, commit, event_id)
                 await register_selection(connection, self.schema, commit, event_id)
+                await register_v245_selection(connection, self.schema, commit, event_id)
                 return event_id
 
     async def seal_event(
@@ -3835,6 +4219,12 @@ class V20Repository:
             row = await connection.fetchrow(
                 f"""
                 SELECT
+                    (
+                        SELECT count(*) FROM {self.schema}.v245_delivery_suppressions suppressed
+                        JOIN {self.schema}.outbox_events event USING(event_id)
+                        WHERE event.route_id=$1 AND event.official_stream_id=$2
+                          AND event.lineage_id=$3
+                    ) AS suppressed_count,
                     count(*) FILTER (WHERE seal_status='PENDING') AS unsealed_n,
                     count(*) FILTER (
                         WHERE seal_status='SEALED' AND delivery_status='PENDING'
@@ -3912,6 +4302,10 @@ class V20Repository:
                     max(delivered_at) AS last_delivered_at
                 FROM {self.schema}.outbox_events AS outbox
                 WHERE route_id=$1 AND official_stream_id=$2 AND lineage_id=$3
+                  AND NOT EXISTS (
+                      SELECT 1 FROM {self.schema}.v245_delivery_suppressions suppressed
+                      WHERE suppressed.event_id=outbox.event_id
+                  )
                 """,
                 route_id,
                 official_stream_id,
@@ -3923,6 +4317,7 @@ class V20Repository:
             row["unknown_error_n"] or 0
         )
         return {
+            "suppressed_count": int(row.get("suppressed_count") or 0),
             "unsealed_n": int(row["unsealed_n"] or 0),
             "pending_delivery_n": int(row["pending_delivery_n"] or 0),
             "leased_n": int(row["leased_n"] or 0),
@@ -3982,6 +4377,41 @@ class V20Repository:
                         WHERE seal_status='SEALED'
                           AND route_id=$1 AND official_stream_id=$2 AND lineage_id=$3
                           AND available_at <= clock_timestamp()
+                          AND NOT EXISTS (
+                              SELECT 1 FROM {self.schema}.v245_delivery_suppressions suppressed
+                              WHERE suppressed.event_id=outbox_events.event_id
+                          )
+                          AND (
+                              semantic_json->>'alert_code'
+                                  IS DISTINCT FROM 'V245_SWITCH_EXIT_ALERT'
+                              OR (
+                                  SELECT latest.target FROM {self.schema}.v245_switch_intents latest
+                                  WHERE latest.official_stream_id=outbox_events.official_stream_id
+                                    AND latest.lineage_id=outbox_events.lineage_id
+                                  ORDER BY latest.trade_date DESC,latest.updated_at DESC,
+                                           latest.intent_id DESC LIMIT 1
+                              ) <> outbox_events.semantic_json->>'switch_target'
+                              OR EXISTS (
+                                  SELECT 1 FROM {self.schema}.outbox_events target_event
+                                  JOIN {self.schema}.outbox_events sent_direction ON
+                                      sent_direction.official_stream_id=
+                                          target_event.official_stream_id
+                                      AND sent_direction.lineage_id=target_event.lineage_id
+                                      AND sent_direction.route_id=target_event.route_id
+                                      AND sent_direction.event_type='ENTRY_DECISION'
+                                      AND sent_direction.delivery_status='SENT'
+                                      AND sent_direction.created_at>=target_event.created_at
+                                  WHERE target_event.event_id=
+                                      outbox_events.semantic_json->>'target_event_id'
+                                    AND target_event.event_type='ENTRY_DECISION'
+                                    AND target_event.route_id=outbox_events.route_id
+                                    AND target_event.official_stream_id=
+                                        outbox_events.official_stream_id
+                                    AND target_event.lineage_id=outbox_events.lineage_id
+                                    AND sent_direction.semantic_json->'v245_switch_plan'->>'target'=
+                                        outbox_events.semantic_json->>'switch_target'
+                              )
+                          )
                           AND (
                               event_type <> 'ENTRY_DECISION'
                               OR NOT (semantic_json ? 'entry_timing_alert_event_id')
@@ -4096,6 +4526,89 @@ class V20Repository:
         records.sort(key=delivery_priority)
         return records
 
+    async def _suppress_obsolete_v245_delivery(
+        self,
+        connection: Any,
+        row: Mapping[str, Any],
+        event_id: str,
+        *,
+        official_stream_id: str,
+        lineage_id: str,
+        policy_lock: str,
+    ) -> bool:
+        semantic = _json_value(row.get("semantic_json") or {})
+        switch_exit = semantic.get("alert_code") == "V245_SWITCH_EXIT_ALERT"
+        plan = semantic.get("v245_switch_plan")
+        entry_switch = (
+            row.get("event_type") == "ENTRY_DECISION"
+            and semantic.get("strategy_version") == "V24.5"
+            and isinstance(plan, Mapping)
+            and "target" in plan
+        )
+        if not switch_exit and not entry_switch:
+            return False
+        if policy_lock != "SELECT 1":
+            raise V20StateConflict("V24.5 dispatch requires its existing official state lock")
+        target = semantic.get("switch_target") if switch_exit else plan["target"]
+        if target not in {"BANK", "STOCKS"}:
+            raise V20SemanticConflict("V24.5 message has an invalid switch target")
+        latest = await connection.fetchrow(
+            f"SELECT intent_id,target,last_event_id FROM {self.schema}.v245_switch_intents "
+            "WHERE official_stream_id=$1 AND lineage_id=$2 "
+            "ORDER BY trade_date DESC,updated_at DESC,intent_id DESC LIMIT 1",
+            official_stream_id,
+            lineage_id,
+        )
+        reason = None
+        position = None
+        if latest is None:
+            raise V20StateConflict("V24.5 message has no committed switch target")
+        if latest["target"] != target:
+            reason = "V245_TARGET_SUPERSEDED"
+        elif switch_exit:
+            position = await connection.fetchrow(
+                f"SELECT p.status,p.quantity,p.asset_kind FROM {self.schema}.v22_alert_positions p "
+                f"JOIN {self.schema}.v22_alert_batches b USING(batch_id) "
+                "WHERE p.position_id=$1 AND b.official_stream_id=$2 AND b.lineage_id=$3 "
+                "FOR UPDATE OF p",
+                semantic.get("position_id"),
+                official_stream_id,
+                lineage_id,
+            )
+            expected_kind = "STOCK" if target == "BANK" else "BANK"
+            if (
+                position is None
+                or position["status"] != "MONITORING"
+                or (position["quantity"] is not None and position["quantity"] <= 0)
+                or position["asset_kind"] != expected_kind
+            ):
+                reason = "V245_POSITION_NO_LONGER_SWITCHABLE"
+        if reason is None:
+            return False
+        audit = {
+            "requested_target": target,
+            "latest_target": latest["target"],
+            "latest_event_id": latest["last_event_id"],
+            "position_id": semantic.get("position_id"),
+            "position_status": position["status"] if position else None,
+        }
+        await connection.execute(
+            f"INSERT INTO {self.schema}.v245_delivery_suppressions "
+            "(event_id,reason,latest_intent_id,audit_json) VALUES ($1,$2,$3,$4::jsonb) "
+            "ON CONFLICT(event_id) DO NOTHING",
+            event_id,
+            reason,
+            latest["intent_id"],
+            canonical_json(audit),
+        )
+        await connection.execute(
+            f"UPDATE {self.schema}.outbox_events SET delivery_status='PENDING',"
+            "lease_owner=NULL,lease_until=NULL,last_error=$2 WHERE event_id=$1",
+            event_id,
+            reason,
+        )
+        return True
+
     async def begin_delivery_attempt(
         self,
         event_id: str,
@@ -4116,6 +4629,25 @@ class V20Repository:
             raise ValueError("action_reserve_seconds cannot be negative")
         async with self.pool.acquire() as connection:
             async with connection.transaction():
+                # Match selection's lock order (official state, then outbox and
+                # holding rows). The conditional lock leaves other strategies
+                # unchanged and closes the check/dispatch race with a new run.
+                policy_lock = await connection.execute(
+                    f"SELECT state.lineage_id FROM {self.schema}.official_state state "
+                    "WHERE state.lineage_id=$5 AND EXISTS ("
+                    f"SELECT 1 FROM {self.schema}.outbox_events event WHERE event.event_id=$1 "
+                    "AND event.lease_owner=$2 AND event.route_id=$3 "
+                    "AND event.official_stream_id=$4 AND event.lineage_id=$5 AND ("
+                    "event.semantic_json->>'alert_code'='V245_SWITCH_EXIT_ALERT' OR ("
+                    "event.event_type='ENTRY_DECISION' AND "
+                    "event.semantic_json->>'strategy_version'='V24.5' AND "
+                    "event.semantic_json->'v245_switch_plan' ? 'target'))) FOR UPDATE OF state",
+                    event_id,
+                    worker_id,
+                    route_id,
+                    official_stream_id,
+                    lineage_id,
+                )
                 row = await connection.fetchrow(
                     f"""
                     SELECT attempt_count,action_expiry_ts,clock_timestamp() AS db_now,
@@ -4133,6 +4665,48 @@ class V20Repository:
                 )
                 if row is None:
                     raise V20StateConflict("outbox dispatch lease is missing or not owned")
+
+                if await self._suppress_obsolete_v245_delivery(
+                    connection,
+                    row,
+                    event_id,
+                    official_stream_id=official_stream_id,
+                    lineage_id=lineage_id,
+                    policy_lock=policy_lock,
+                ):
+                    return None
+
+                semantic = _json_value(row.get("semantic_json") or {})
+                if semantic.get("alert_code") == "V245_SWITCH_EXIT_ALERT":
+                    # A lease may have been granted only to suppress an obsolete
+                    # direction. If the target swung back before this boundary,
+                    # that cleanup lease must not bypass the visible-direction
+                    # dependency. SENT receipts are immutable; UNKNOWN is not SENT.
+                    direction_sent = await connection.fetchval(
+                        f"SELECT EXISTS(SELECT 1 FROM {self.schema}.outbox_events target_event "
+                        f"JOIN {self.schema}.outbox_events sent ON "
+                        "sent.official_stream_id=target_event.official_stream_id "
+                        "AND sent.lineage_id=target_event.lineage_id "
+                        "AND sent.route_id=target_event.route_id "
+                        "AND sent.event_type='ENTRY_DECISION' AND sent.delivery_status='SENT' "
+                        "AND sent.created_at>=target_event.created_at "
+                        "WHERE target_event.event_id=$1 AND target_event.route_id=$2 "
+                        "AND target_event.official_stream_id=$3 AND target_event.lineage_id=$4 "
+                        "AND target_event.event_type='ENTRY_DECISION' "
+                        "AND sent.semantic_json->'v245_switch_plan'->>'target'=$5)",
+                        semantic.get("target_event_id"),
+                        route_id,
+                        official_stream_id,
+                        lineage_id,
+                        semantic.get("switch_target"),
+                    )
+                    if direction_sent is not True:
+                        await connection.execute(
+                            f"UPDATE {self.schema}.outbox_events SET delivery_status='PENDING',"
+                            "lease_owner=NULL,lease_until=NULL,last_error=NULL WHERE event_id=$1",
+                            event_id,
+                        )
+                        return None
 
                 if row.get("event_type") in ("EXIT_SIGNAL", "EXIT_REMINDER"):
                     semantic = _json_value(row["semantic_json"])
@@ -6724,6 +7298,7 @@ class V20Repository:
             delivery_status=row["delivery_status"],
             attempt_count=int(row["attempt_count"]),
             lease_db_ts=row.get("lease_db_ts"),
+            last_error=row.get("last_error"),
         )
 
     @staticmethod

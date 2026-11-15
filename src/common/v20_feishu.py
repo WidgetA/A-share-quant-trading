@@ -403,6 +403,8 @@ def _render_entry_strategy_body(semantic: Mapping[str, Any]) -> str:
     action = str(semantic.get("action", "INPUT_INVALID"))
     multiplier = float(semantic.get("final_multiplier", 0.0))
     slim = semantic.get("entry_only") is True
+    turtle = semantic.get("strategy_version") == "V24.5"
+    version = "V24.5" if turtle else "V22-slim"
     lines = [
         f"计算结论：{action}｜最终倍率 {_pct(multiplier, 0)}",
         (
@@ -434,7 +436,7 @@ def _render_entry_strategy_body(semantic: Mapping[str, Any]) -> str:
     funnel = semantic.get("v16_funnel") or {}
     if isinstance(funnel, Mapping) and funnel:
         lines.append(
-            ("V22-slim扫描: " if slim else "V16扫描: ")
+            (f"{version}扫描: " if slim else "V16扫描: ")
             + f"股票池 {funnel.get('step0_universe_count', '-')}只 | "
             f"热门板块 {funnel.get('step2_hot_board_count', '-')}个 | "
             f"最终 {funnel.get('final_candidates', '-')}只"
@@ -446,7 +448,11 @@ def _render_entry_strategy_body(semantic: Mapping[str, Any]) -> str:
         if action == "ENTER" and multiplier > 0 and buy_symbols:
             lines.append(f"计划买入前 {len(buy_symbols)} 只，其余仅供观察。")
         else:
-            lines.append("今天不新开仓，保留现金；候选仅供观察。")
+            lines.append(
+                "今天不买策略票，资金目标为工商银行；候选仅供观察。"
+                if turtle
+                else "今天不新开仓，保留现金；候选仅供观察。"
+            )
     if isinstance(symbols, list) and symbols:
         from src.strategy.filters.board_filter import BROAD_CONCEPT_BOARDS
 
@@ -489,7 +495,7 @@ def _render_entry_strategy_body(semantic: Mapping[str, Any]) -> str:
         lines.extend(
             [
                 "",
-                f"V22-slim选股（{len(symbols)}只）:"
+                f"{version}选股（{len(symbols)}只）:"
                 if slim
                 else f"V16完整推荐（{len(symbols)}只）:",
                 f"推荐 Top-1: {top1['code']} {top1.get('name', '')}",
@@ -525,11 +531,16 @@ def _render_entry_strategy_body(semantic: Mapping[str, Any]) -> str:
                 if slim
                 else f"每只股票占单次买入预算: {_pct(per_leg)}（非账户总资金比例）"
             )
-            lines.append("参考价规则: 使用原始09:41结束标签的bar.open锁定09:40参考价")
+            if not turtle:
+                lines.append("参考价规则: 使用原始09:41结束标签的bar.open锁定09:40参考价")
     else:
         if slim:
             count = len(semantic.get("reference_symbols") or [])
-            lines.append(f"原始候选 {count} 只；今天不新开仓，保留现金。")
+            lines.append(
+                f"原始候选 {count} 只；今天不买策略票。"
+                if turtle
+                else f"原始候选 {count} 只；今天不新开仓，保留现金。"
+            )
         else:
             lines.append("今日V16完整扫描合法无票，不建立新模型批次")
 
@@ -676,6 +687,10 @@ def _render_data_alert_for_operator(
                 headline = "今天不满足延后入场条件。"
                 explanation = {
                     "ORIGINAL_GATE_BLOCKED": "原策略未放行，今天不新开仓。",
+                    "TURTLE_CONFIRMATION_PENDING": (
+                        "原 v22 有开仓信号，乌龟状态尚未连续确认三天，"
+                        "今天继续以工商银行为资金目标。"
+                    ),
                     "NO_CANDIDATES": "本次没有可买入股票。",
                     "NO_ALLOWED_SYMBOLS": "本次没有可买入股票。",
                     "INDEX_NOT_GREEN": "9:40上证指数没有低于昨收。",
@@ -712,6 +727,27 @@ def _render_data_alert_for_operator(
                 "上午未到价，下午13:00后首次到价再考虑。",
             ]
         )
+    if code == "V245_SWITCH_EXIT_ALERT":
+        quantity = semantic.get("quantity")
+        amount = f"剩余 {quantity} 股" if quantity is not None else "按实际剩余数量（尚未校准）"
+        target = semantic.get("switch_target")
+        next_step = (
+            "卖出资金可用后，按最新 V24.5 票单的原资金比例买入策略股票。"
+            if target == "STOCKS"
+            else "卖出资金可用后，转入 601398 工商银行。"
+        )
+        return "\n".join(
+            [
+                "[V24.5] 换仓卖出提醒",
+                f"股票：{semantic.get('code')} {semantic.get('stock_name')}",
+                f"对应推荐日期：{semantic.get('entry_date')}",
+                f"建议卖出：{amount}，以当前实际可卖数量为准。",
+                f"行情时点：{semantic.get('trigger_at')}｜"
+                f"参考价：{float(semantic['trigger_price']):.2f} 元",
+                next_step,
+                "本消息不代表已成交；尚未卖出的数量仍保留跟踪。",
+            ]
+        )
     if code == "V22_EXIT_ALERT":
         quantity = semantic.get("quantity")
         amount = f"{quantity} 股（已校准）" if quantity is not None else "数量尚未校准"
@@ -722,7 +758,9 @@ def _render_data_alert_for_operator(
         quote = f"{float(trigger_price):.2f} 元" if trigger_price is not None else "无对应分钟价格"
         return "\n".join(
             [
-                "[V22] 卖出提醒",
+                "[V24.5] 卖出提醒"
+                if semantic.get("strategy_version") == "V24.5"
+                else "[V22] 卖出提醒",
                 f"股票：{semantic.get('code')} {semantic.get('stock_name')}",
                 f"买入日期：{semantic.get('entry_date')}",
                 f"建议卖出：剩余全部，{amount}",
@@ -796,6 +834,47 @@ def _render_data_alert_for_operator(
     )
 
 
+def _v245_operation_lines(semantic: Mapping[str, Any]) -> list[str]:
+    transition = semantic.get("v245_transition") or {}
+    after = transition.get("state_after") or {}
+    mode = "乌龟状态" if after.get("mode") == "TURTLE" else "正常状态"
+    lines = [
+        f"当前：{mode}｜原 v22 今日{'有' if transition.get('raw_open') else '无'}开仓信号",
+        f"连续有信号 {after.get('open_streak', 0)}/3 天；"
+        f"连续无信号 {after.get('closed_streak', 0)}/5 天。",
+    ]
+    plan = semantic.get("v245_switch_plan") or {}
+    if plan.get("target") == "STOCKS":
+        lines.append(
+            "现在操作：先卖出工商银行的实际可卖数量，资金可用后，"
+            "按原 v22 当天资金份及下面的比例买入策略票。"
+        )
+        lines.append("已有策略股票继续按原卖出规则管理；工商银行尚未卖出的资金不能重复用于买票。")
+    else:
+        lines.append(
+            "现在操作：卖出策略股票的实际可卖数量，"
+            "将全部实际可用资金买入或继续持有 601398 工商银行。"
+        )
+        if after.get("mode") == "TURTLE":
+            lines.append("等待连续三个交易日有开仓信号，第三天才恢复买策略票。")
+        else:
+            lines.append("目前暂时停手；连续停手达到五天才回到乌龟状态。")
+    for item in plan.get("sell_positions") or []:
+        quantity = item.get("quantity")
+        amount = f"剩余 {quantity} 股" if quantity is not None else "按实际剩余数量（尚未校准）"
+        when = (
+            "现在可卖时卖出"
+            if item.get("t1_eligible")
+            else f"T+1 限制，最早 {item.get('earliest_sell_date') or '下一交易日'} 可卖时处理"
+        )
+        lines.append(
+            f"- {item['code']} {item.get('stock_name', '')}（{item['entry_date']} 推荐）："
+            f"{amount}，{when}。"
+        )
+    lines.append("停牌、跌停或尚未卖出的持仓继续保留；本消息是操作建议，不代表成交。")
+    return lines
+
+
 def render_entry_message(
     semantic: Mapping[str, Any],
     *,
@@ -806,7 +885,11 @@ def render_entry_message(
     """Render the one daily V20 entry-decision message."""
     mode = str(semantic.get("deployment_mode", "forward_shadow"))
     shadow = mode == "forward_shadow"
-    version = "V22-slim" if semantic.get("strategy_version") == "V22-slim" else "V20"
+    version = (
+        str(semantic.get("strategy_version"))
+        if semantic.get("strategy_version") in ("V22-slim", "V24.5")
+        else "V20"
+    )
     title = f"[{version}][SHADOW] 每日决策" if shadow else f"[{version}] 每日决策"
     trade_date = str(semantic["trade_date"])
     action = str(semantic.get("action", "INPUT_INVALID"))
@@ -846,14 +929,22 @@ def render_entry_message(
         )
         return "\n".join(lines)
 
+    turtle = version == "V24.5"
+    if turtle:
+        title = "[V24.5] 每日决策"
     lines = [f"{title} ({trade_date} 09:40)"]
-    if shadow:
+    if shadow and not turtle:
         lines.append("⚪ 前向观察：不替代当前正式策略建议")
-    if action != "NO_SIGNAL":
+    if turtle:
+        lines.extend(["", *_v245_operation_lines(semantic)])
+    elif action != "NO_SIGNAL":
         lines.append(_entry_action_text(multiplier, on_time=on_time))
     lines.extend(["", _render_entry_strategy_body(semantic)])
     if semantic.get("entry_only"):
-        lines.extend(["", "V22-slim：本次仅提供选股与开仓判断；放行使用当天资金份，非全账户满仓。"])
+        if not turtle:
+            lines.extend(
+                ["", "V22-slim：本次仅提供选股与开仓判断；放行使用当天资金份，非全账户满仓。"]
+            )
         if action == "BLOCK":
             lines.append("原始候选仅供观察，今天不新买。")
         lines.append("卖出方式：触发退出条件后通知，实际卖出由你操作。")
@@ -874,7 +965,11 @@ def render_expired_entry_delivery_message(semantic: Mapping[str, Any]) -> str:
     """Render a fail-closed notice when transport misses the entry expiry."""
 
     mode = str(semantic.get("deployment_mode", "forward_shadow"))
-    version = "V22-slim" if semantic.get("strategy_version") == "V22-slim" else "V20"
+    version = (
+        str(semantic.get("strategy_version"))
+        if semantic.get("strategy_version") in ("V22-slim", "V24.5")
+        else "V20"
+    )
     title = (
         f"[{version}][SHADOW] 入场消息投递已过期"
         if mode == "forward_shadow"
@@ -1499,7 +1594,7 @@ def _validate_formatter_semantic(record: OutboxRecord, semantic: Mapping[str, An
                 else (advisory.get("status") if isinstance(advisory, Mapping) else None)
             )
             if (
-                semantic.get("strategy_version") != "V22-slim"
+                semantic.get("strategy_version") not in ("V22-slim", "V24.5")
                 or semantic.get("event_id") != record.event_id
                 or not isinstance(semantic.get("entry_event_id"), str)
                 or not re.fullmatch(r"[0-9a-f]{64}", semantic["entry_event_id"])
@@ -1673,7 +1768,11 @@ def seal_v20_payload(
 ) -> Mapping[str, Any]:
     semantic = dict(record.semantic)
     _validate_formatter_semantic(record, semantic)
-    version = "V22-slim" if semantic.get("strategy_version") == "V22-slim" else "V20"
+    version = (
+        str(semantic.get("strategy_version"))
+        if semantic.get("strategy_version") in ("V22-slim", "V24.5")
+        else "V20"
+    )
     title_prefix = (
         f"[{version}][SHADOW]"
         if str(semantic.get("deployment_mode", "forward_shadow")) == "forward_shadow"
@@ -2277,7 +2376,14 @@ class V20OutboxPublisher:
                 relay_enforced=getattr(route, "transport", "v20_relay") == "v20_relay",
             )
             if attempt is None:
-                continue  # User closed the holding after this event was leased.
+                # The dispatch transaction rechecks holding corrections and
+                # V24.5's latest committed target after the lease. A suppressed
+                # immutable message is neither sent nor marked as delivered.
+                # A still-current instruction may also wait for its prerequisite receipt.
+                logger.info(
+                    "V20 outbox event not dispatched after revalidation: %s", record.event_id
+                )
+                continue
             send_error: str | None
             send_started_monotonic = asyncio.get_running_loop().time()
             legacy_transport = getattr(route, "transport", "v20_relay") == "legacy_send"

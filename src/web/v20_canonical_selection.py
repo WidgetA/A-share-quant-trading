@@ -29,6 +29,7 @@ import numpy as np
 import pandas as pd
 
 from src.data.clients.tushare_realtime import TushareDailyBar, TushareEarlyMarketData
+from src.strategy.v22_slim import is_v22_family
 
 logger = logging.getLogger(__name__)
 BEIJING_TZ = ZoneInfo("Asia/Shanghai")
@@ -1639,7 +1640,7 @@ def derive_canonical_v16_universe(
         stock_filter=scan_state.stock_filter,
         scorer=scorer,
     )
-    if scan_state.selection_version == "V22-slim":
+    if is_v22_family(scan_state.selection_version):
         from src.strategy.v22_slim.selection import make_scanner
 
         scanner, scorer, _boards = make_scanner()
@@ -1648,7 +1649,7 @@ def derive_canonical_v16_universe(
         if universe_override is not None and clean_boards_override is not None
         else scanner.get_universe()
     )
-    if scan_state.selection_version == "V22-slim":
+    if is_v22_family(scan_state.selection_version):
         frozen_boards, frozen_universe = scanner.get_universe()
         if set(universe_codes) != frozen_universe or {
             key: sorted(value) for key, value in clean_boards_raw.items()
@@ -1662,7 +1663,7 @@ def derive_canonical_v16_universe(
     clean_boards_for_scan = {
         board: sorted(codes) for board, codes in sorted(clean_boards_raw.items())
     }
-    if scan_state.selection_version == "V22-slim":
+    if is_v22_family(scan_state.selection_version):
         clean_boards_for_scan = {board: list(codes) for board, codes in clean_boards_raw.items()}
     clean_boards = MappingProxyType(
         {board: tuple(codes) for board, codes in clean_boards_for_scan.items()}
@@ -1734,7 +1735,7 @@ async def compute_canonical_v16_scan(
     )
     logger.info(f"V16 scan: universe = {len(universe_list)} stocks")
     clean_boards_for_scan = {board: list(codes) for board, codes in clean_boards.items()}
-    slim = scan_state.selection_version == "V22-slim"
+    slim = is_v22_family(scan_state.selection_version)
     if st_eligible_codes_override is not None and not slim:
         eligible = frozenset(st_eligible_codes_override)
         if any(code not in universe_list for code in eligible):

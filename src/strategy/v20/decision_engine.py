@@ -17,6 +17,7 @@ from src.data.database.v20_repository import (
     StateRecord,
     sha256_json,
 )
+from src.strategy.v22_slim import is_v22_family
 from src.web.v20_scan_pipeline import FrozenV16ScanBundle
 
 from .artifacts import GArtifactBundle
@@ -408,7 +409,7 @@ def prepare_entry(
         )
         for item in completed_health
     ]
-    slim = config.strategy_version == "V22-slim"
+    slim = is_v22_family(config.strategy_version)
     inputs: Mapping[str, Any] = {}
     if slim:
         from src.strategy.v22_slim.policy import advance_health
@@ -574,7 +575,7 @@ def prepare_entry(
     }
     if slim_gate is not None:
         semantic.update(
-            selection_version="V22-slim",
+            selection_version=config.strategy_version,
             reference_symbols=semantic["symbols"],
             symbols=semantic["symbols"][:3] if slim_gate.final_open else [],
             normal_open=slim_gate.normal_open,
