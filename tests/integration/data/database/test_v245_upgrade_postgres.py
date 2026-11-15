@@ -1,4 +1,4 @@
-"""An upgrade must retain populated original state, not reset to turtle history."""
+"""Retain the populated original ledger without inheriting V20 signals as V22."""
 
 from datetime import date
 
@@ -22,6 +22,15 @@ async def test_populated_original_ledger_is_identical_across_version_startup(rep
     original = load_v20_runtime_config(root, root / "config/v22-slim.yaml")
     upgraded = load_v20_runtime_config(root, root / "config/v24-5.yaml")
     before = await _snapshot(pool, schema)
+    # This older registry fixture is intentionally V20, not valid V22 gate
+    # history. The V22 inheritance cases live in test_v245_inheritance_postgres.
+    assert (
+        await pool.fetchval(
+            f"SELECT count(*) FROM {schema}.decision_slots "
+            "WHERE strategy_version IN ('V22-slim','V24.5')"
+        )
+        == 0
+    )
     original_state = await instance.load_state(original.state_lineage_id)
     assert original_state.revision > 0  # Exercise a populated ledger, not an empty genesis.
     genesis = genesis_state()
@@ -45,4 +54,7 @@ async def test_populated_original_ledger_is_identical_across_version_startup(rep
     )
     assert policy["state_before"]["mode"] == "TURTLE"
     assert policy["expected_revision"] == 0
+    assert policy["state_before"]["last_trade_date"] is None
+    assert await pool.fetchval(f"SELECT count(*) FROM {schema}.v245_policy_bootstraps") == 0
+    assert await _snapshot(pool, schema) == before
     assert await instance.load_state(original.state_lineage_id) == original_state

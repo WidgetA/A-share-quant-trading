@@ -125,8 +125,8 @@ def day_row(payload):
     }
 
 
-async def test_read_absent_starts_turtle_without_writing():
-    connection = _FakeConnection(fetchrows=[None, None])
+async def test_read_absent_without_legacy_history_starts_turtle_without_writing():
+    connection = _FakeConnection(fetchrows=[None, None, {"revision": 0}, None, None], fetches=[[]])
     value = await _repository(connection).load_v245_state_before(
         official_stream_id="official", lineage_id="lineage-1", trade_date=date(2026, 8, 31)
     )

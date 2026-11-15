@@ -1828,6 +1828,10 @@ def migration_sql(schema: str = "v20") -> str:
         .read_text(encoding="utf-8")
         .replace("v20.", f"{schema}.")
         + "\n"
+        + (_PROJECT_ROOT / "migrations/v20/009_v245_history.sql")
+        .read_text(encoding="utf-8")
+        .replace("v20.", f"{schema}.")
+        + "\n"
     )
 
 
@@ -3567,7 +3571,12 @@ class V20Repository:
     async def load_v245_state_before(
         self, *, official_stream_id: str, lineage_id: str, trade_date: date
     ) -> dict[str, Any]:
-        """Read the immutable prestate for a new run; never advance or create state."""
+        """Read today's frozen prestate, inheriting verified legacy history once.
+
+        Existing policy state remains a read-only path. An empty overlay is
+        initialized under the original lineage lock, without replaying any
+        historical delivery, holding or original-state mutation.
+        """
         if not official_stream_id or not lineage_id or type(trade_date) is not date:
             raise ValueError("invalid V24.5 state scope/date")
         async with self.pool.acquire() as connection:
@@ -3585,6 +3594,43 @@ class V20Repository:
                     lineage_id,
                     trade_date,
                 )
+            if current is None:
+                # The initial read is not a lock: another process can bootstrap
+                # or commit while we wait. READ COMMITTED re-reads after taking
+                # the same first lock as commit_selection_run.
+                async with connection.transaction(isolation="read_committed"):
+                    official = await connection.fetchrow(
+                        f"SELECT revision FROM {self.schema}.official_state "
+                        "WHERE lineage_id=$1 FOR UPDATE",
+                        lineage_id,
+                    )
+                    if official is None:
+                        raise V20StateConflict("state lineage does not exist")
+                    current = await connection.fetchrow(
+                        "SELECT revision,state_hash,state_json "
+                        f"FROM {self.schema}.v245_policy_state "
+                        "WHERE official_stream_id=$1 AND lineage_id=$2",
+                        official_stream_id,
+                        lineage_id,
+                    )
+                    daily = await connection.fetchrow(
+                        f"SELECT * FROM {self.schema}.v245_policy_days "
+                        "WHERE official_stream_id=$1 AND lineage_id=$2 AND trade_date=$3",
+                        official_stream_id,
+                        lineage_id,
+                        trade_date,
+                    )
+                    if current is None:
+                        if daily is not None:
+                            raise V20StateConflict(
+                                "V24.5 daily state exists without its policy state"
+                            )
+                        current = await self._bootstrap_v245_history(
+                            connection,
+                            official_stream_id=official_stream_id,
+                            lineage_id=lineage_id,
+                            trade_date=trade_date,
+                        )
         state, revision = self._v245_state_row(current)
         if daily is not None:
             before = self._v245_day_before(daily)
@@ -3597,6 +3643,212 @@ class V20Repository:
                 raise V20StateConflict("V24.5 has a later state without the requested daily record")
             before, status = state, "ABSENT"
         return {"state_before": before, "expected_revision": revision, "day_status": status}
+
+    @staticmethod
+    def _v245_history_record(
+        row: Mapping[str, Any],
+        *,
+        official_stream_id: str,
+        lineage_id: str,
+        fallback: bool = False,
+    ) -> dict[str, Any]:
+        """Verify the committed event and input identity before exposing a gate."""
+        from src.strategy.v24_5.history import FAMILY, original_gate
+
+        try:
+            day = row["trade_date"]
+            semantic = _json_value(row["semantic_json"])
+            snapshot = _json_value(row["snapshot_json"])
+            if (
+                type(day) is not date
+                or row["official_stream_id"] != official_stream_id
+                or row["lineage_id"] != lineage_id
+                or row["slot_strategy_version"] not in FAMILY
+                or row["slot_status"] not in {"COMPLETED", "FAILED"}
+                or row["event_type"] != "ENTRY_DECISION"
+                or row["event_stream_id"] != official_stream_id
+                or row["event_lineage_id"] != lineage_id
+                or not row["event_id"]
+                or not row["snapshot_id"]
+                or not isinstance(semantic, Mapping)
+                or not isinstance(snapshot, Mapping)
+                or sha256_json(semantic) != row["semantic_content_hash"]
+                or sha256_json(snapshot) != row["snapshot_hash"]
+                or semantic.get("event_id") != row["event_id"]
+                or semantic.get("trade_date") != day.isoformat()
+                or snapshot.get("trade_date") != day.isoformat()
+                or row["snapshot_trade_date"] != day
+                or semantic.get("config_hash") != row["config_hash"]
+            ):
+                raise ValueError("historical scope/event/snapshot identity mismatch")
+            if fallback:
+                proposal = _json_value(row["proposal_json"])
+                if (
+                    sha256_json(proposal) != row["proposal_hash"]
+                    or proposal.get("snapshot_hash") != row["snapshot_hash"]
+                    or semantic != {**proposal["semantic"], "event_id": row["event_id"]}
+                    or semantic.get("action") not in {"ENTER", "BLOCK", "NO_SIGNAL"}
+                ):
+                    raise ValueError("historical valid selection proposal identity mismatch")
+                action, multiplier = semantic["action"], semantic["final_multiplier"]
+                version = semantic["strategy_version"]
+            else:
+                event_semantic = _json_value(row["event_semantic_json"])
+                if (
+                    event_semantic != semantic
+                    or sha256_json(event_semantic) != row["event_semantic_content_hash"]
+                    or semantic.get("decision_id") != row["decision_id"]
+                    or row["terminal_event_id"] != row["event_id"]
+                    or row["terminal_decision_id"] != row["decision_id"]
+                    or (row["slot_status"] == "FAILED") != (row["action"] == "INPUT_INVALID")
+                ):
+                    raise ValueError("canonical historical decision/event identity mismatch")
+                action, multiplier = row["action"], row["final_multiplier"]
+                version = row["slot_strategy_version"]
+            raw = original_gate(
+                semantic, strategy_version=version, action=action, final_multiplier=multiplier
+            )
+            previous = snapshot.get("prior_trade_date")
+            if previous is not None:
+                previous = date.fromisoformat(previous).isoformat()
+            if raw is not None and previous is None:
+                raise ValueError("known historical gate has no exchange predecessor")
+            if version == "V24.5" and raw is not None:
+                transition = semantic["v245_transition"]
+                if (
+                    transition["trade_date"] != day.isoformat()
+                    or transition["previous_trade_date"] != previous
+                ):
+                    raise ValueError("historical V24.5 transition/input dates mismatch")
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            raise V20SemanticConflict(f"invalid V24.5 historical source: {exc}") from exc
+        return {
+            "trade_date": day.isoformat(),
+            "prior_trade_date": previous,
+            "raw_open": raw,
+            "source": {
+                "kind": "FIRST_VALID_SELECTION_RUN" if fallback else "CANONICAL_DAILY_DECISION",
+                "slot_id": row["slot_id"],
+                "slot_strategy_version": row["slot_strategy_version"],
+                "strategy_version": version,
+                "event_id": row["event_id"],
+                "semantic_content_hash": row["semantic_content_hash"],
+                "snapshot_id": row["snapshot_id"],
+                "snapshot_hash": row["snapshot_hash"],
+                "run_id": row.get("run_id") if fallback else None,
+                "proposal_hash": row.get("proposal_hash") if fallback else None,
+                "action": action,
+                "final_multiplier": float(multiplier),
+            },
+        }
+
+    async def _bootstrap_v245_history(
+        self,
+        connection: Any,
+        *,
+        official_stream_id: str,
+        lineage_id: str,
+        trade_date: date,
+    ) -> Mapping[str, Any] | None:
+        from src.strategy.v24_5.history import replay_history
+
+        rows = await connection.fetch(
+            f"SELECT slot.slot_id,slot.trade_date,slot.official_stream_id,slot.lineage_id,"
+            "slot.strategy_version AS slot_strategy_version,slot.slot_status,slot.config_hash,"
+            "slot.terminal_event_id,slot.terminal_decision_id,"
+            "decision.decision_id,decision.event_id,decision.action,decision.final_multiplier,"
+            "decision.semantic_json,decision.semantic_content_hash,decision.snapshot_id,"
+            "snapshot.snapshot_json,snapshot.snapshot_hash,"
+            "snapshot.trade_date AS snapshot_trade_date,"
+            "event.semantic_json AS event_semantic_json,"
+            "event.semantic_content_hash AS event_semantic_content_hash,event.event_type,"
+            "event.official_stream_id AS event_stream_id,event.lineage_id AS event_lineage_id "
+            f"FROM {self.schema}.decision_slots slot "
+            f"LEFT JOIN {self.schema}.entry_decisions decision USING(slot_id) "
+            f"LEFT JOIN {self.schema}.input_snapshots snapshot USING(snapshot_id) "
+            f"LEFT JOIN {self.schema}.outbox_events event ON event.event_id=decision.event_id "
+            "WHERE slot.official_stream_id=$1 AND slot.lineage_id=$2 AND slot.trade_date<$3 "
+            "AND slot.strategy_version IN ('V22-slim','V24.5') "
+            "AND slot.slot_status IN ('COMPLETED','FAILED') ORDER BY slot.trade_date",
+            official_stream_id,
+            lineage_id,
+            trade_date,
+        )
+        records = []
+        for row in rows:
+            record = self._v245_history_record(
+                row,
+                official_stream_id=official_stream_id,
+                lineage_id=lineage_id,
+            )
+            if record["raw_open"] is None:
+                repaired = await connection.fetchrow(
+                    "SELECT run.*,slot.slot_id,slot.slot_status,"
+                    "slot.strategy_version AS slot_strategy_version,"
+                    "event.semantic_json,event.semantic_content_hash,event.event_type,"
+                    "event.official_stream_id AS event_stream_id,"
+                    "event.lineage_id AS event_lineage_id,"
+                    "snapshot.snapshot_hash,snapshot.snapshot_json,"
+                    "snapshot.trade_date AS snapshot_trade_date "
+                    f"FROM {self.schema}.selection_runs run "
+                    f"JOIN {self.schema}.decision_slots slot ON "
+                    "slot.official_stream_id=run.official_stream_id "
+                    "AND slot.trade_date=run.trade_date "
+                    "AND slot.lineage_id=run.lineage_id "
+                    f"LEFT JOIN {self.schema}.outbox_events event ON event.event_id=run.event_id "
+                    f"LEFT JOIN {self.schema}.input_snapshots snapshot "
+                    "ON snapshot.snapshot_id=run.snapshot_id "
+                    "WHERE run.official_stream_id=$1 AND run.lineage_id=$2 AND run.trade_date=$3 "
+                    "AND run.proposal_json->'semantic'->>'strategy_version' "
+                    "IN ('V22-slim','V24.5') "
+                    "AND run.proposal_json->'semantic'->>'action' IN ('ENTER','BLOCK','NO_SIGNAL') "
+                    "ORDER BY run.created_at,run.run_id LIMIT 1",
+                    official_stream_id,
+                    lineage_id,
+                    row["trade_date"],
+                )
+                if repaired is not None:
+                    original_source = record["source"]
+                    record = self._v245_history_record(
+                        repaired,
+                        official_stream_id=official_stream_id,
+                        lineage_id=lineage_id,
+                        fallback=True,
+                    )
+                    record["source"]["invalid_canonical_source"] = original_source
+            records.append(record)
+        if not records:
+            return None  # A genuinely new lineage still starts from genesis.
+        try:
+            audit = replay_history(records, target_trade_date=trade_date)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise V20SemanticConflict(f"invalid V24.5 historical session chain: {exc}") from exc
+        audit.update({"official_stream_id": official_stream_id, "lineage_id": lineage_id})
+        state = audit["state"]
+        state_hash = sha256_json(state)
+        await connection.execute(
+            f"INSERT INTO {self.schema}.v245_policy_state "
+            "(official_stream_id,lineage_id,revision,state_hash,state_json) "
+            "VALUES ($1,$2,0,$3,$4::jsonb)",
+            official_stream_id,
+            lineage_id,
+            state_hash,
+            canonical_json(state),
+        )
+        await connection.execute(
+            f"INSERT INTO {self.schema}.v245_policy_bootstraps "
+            "(official_stream_id,lineage_id,target_trade_date,history_until,"
+            "state_hash,audit_hash,audit_json) "
+            "VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)",
+            official_stream_id,
+            lineage_id,
+            trade_date,
+            date.fromisoformat(audit["history_until"]),
+            state_hash,
+            sha256_json(audit),
+            canonical_json(audit),
+        )
+        return {"revision": 0, "state_hash": state_hash, "state_json": state}
 
     async def _commit_v245_transition(
         self, connection: Any, commit: EntryCommit, event_id: str
