@@ -34,9 +34,11 @@ jobs:
           tests/unit/web/test_v20_mews_guard_service_acceptance.py
           tests/unit/data/database/test_v20_mews_guard_store.py
           tests/unit/strategy/test_v245_policy.py
+          tests/unit/strategy/test_v245_history.py
           tests/unit/strategy/test_v245_entry_integration.py
           tests/unit/strategy/test_v245_references.py
           tests/unit/data/database/test_v245_repository.py
+          tests/unit/data/database/test_v245_history_repository.py
           tests/unit/data/database/test_v245_switch_positions.py
           tests/unit/web/test_v245_selection_task.py
           tests/unit/web/test_v245_exit_monitor.py
@@ -156,6 +158,7 @@ jobs:
           tests/integration/data/database/test_v245_policy_postgres.py
           tests/integration/data/database/test_v245_positions_postgres.py
           tests/integration/data/database/test_v245_upgrade_postgres.py
+          tests/integration/data/database/test_v245_inheritance_postgres.py
           tests/integration/common/test_v245_publisher_postgres.py
           --tb=short
 

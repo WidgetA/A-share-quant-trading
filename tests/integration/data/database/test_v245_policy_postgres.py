@@ -41,11 +41,16 @@ async def case(repository, *, day_offset=0):
     day = now.date() + timedelta(days=day_offset)
     calendar = tuple(day + timedelta(days=n) for n in range(-3, 4))
     state = replace(state, lineage_id=config.state_lineage_id)
-    snapshot = {**bundle.snapshot, "trade_date": str(day)}
+    snapshot = {
+        **bundle.snapshot,
+        "trade_date": str(day),
+        "prior_trade_date": str(calendar[2]),
+    }
     bundle = replace(
         bundle,
         trade_date=day,
         frozen_at=now,
+        prior_trade_date=calendar[2],
         snapshot=snapshot,
         snapshot_hash=sha256_json(snapshot),
         computation_calendar=calendar,
