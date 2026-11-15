@@ -33,6 +33,17 @@ jobs:
           tests/unit/web/test_v22_canonical_artifact.py
           tests/unit/web/test_v20_mews_guard_service_acceptance.py
           tests/unit/data/database/test_v20_mews_guard_store.py
+          tests/unit/strategy/test_v245_policy.py
+          tests/unit/strategy/test_v245_entry_integration.py
+          tests/unit/strategy/test_v245_references.py
+          tests/unit/data/database/test_v245_repository.py
+          tests/unit/data/database/test_v245_switch_positions.py
+          tests/unit/web/test_v245_selection_task.py
+          tests/unit/web/test_v245_exit_monitor.py
+          tests/unit/common/test_v245_message.py
+          tests/unit/common/test_v245_publisher_guard.py
+          tests/unit/web/test_v24_5_release_contract.py
+          tests/unit/scripts/test_v24_5_release_verifier.py
           --tb=short
 
   lint:
@@ -142,6 +153,10 @@ jobs:
           tests/integration/data/database/test_legacy_position_sync_postgres.py
           tests/integration/data/database/test_v20_state_semantics_postgres.py
           tests/integration/common/test_v20_feishu_postgres.py
+          tests/integration/data/database/test_v245_policy_postgres.py
+          tests/integration/data/database/test_v245_positions_postgres.py
+          tests/integration/data/database/test_v245_upgrade_postgres.py
+          tests/integration/common/test_v245_publisher_postgres.py
           --tb=short
 
   build-and-push:

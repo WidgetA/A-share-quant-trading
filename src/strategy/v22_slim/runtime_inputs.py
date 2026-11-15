@@ -16,6 +16,7 @@ from math import isfinite
 from src.data.database.v20_repository import sha256_json
 from src.strategy.v20.decision_engine import CompletedHealth, CompletedRolling
 from src.strategy.v20.models import deserialize_health_snapshot, serialize_health_snapshot
+from src.strategy.v22_slim import is_v22_family
 from src.strategy.v22_slim.policy import close_risk_count, h90, strong_condition
 from src.strategy.v22_slim.selection import read_asset
 
@@ -109,9 +110,17 @@ async def build_inputs(service, bundle, health, rolling, gaps):
             status = await service._repository.get_entry_status(
                 service.config.official_stream_id, previous
             )
+            if service.config.strategy_version == "V24.5" and (
+                status is None or "v22_market" not in status.snapshot
+            ):
+                status = await service._repository.get_valid_selection_reference(
+                    service.config.official_stream_id,
+                    previous,
+                    lineage_id=service.config.state_lineage_id,
+                )
             if (
                 status is None
-                or status.strategy_version != "V22-slim"
+                or not is_v22_family(status.strategy_version)
                 or "v22_market" not in status.snapshot
             ):
                 raise ValueError(f"V22-slim needs reference-state recovery for {key}")

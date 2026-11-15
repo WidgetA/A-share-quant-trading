@@ -125,6 +125,7 @@ from src.strategy.v20.runtime_config import (
     validated_v20_tushare_token,
 )
 from src.strategy.v20.shadow_evaluator import evaluate_shadow_batch
+from src.strategy.v22_slim import is_v22_family
 from src.web.v20_canonical_selection import (
     LOOKBACK_DAYS,
     CanonicalV16ScanBundle,
@@ -285,7 +286,7 @@ async def _init_v20_scan_resources_with_token(
     if fundamentals is None:
         raise V20ConfigError("V20 scan requires prevalidated fundamentals resources")
     tushare = TushareRealtimeClient(token=token)
-    if scan_state.selection_version == "V22-slim":
+    if is_v22_family(scan_state.selection_version):
         tushare.EARLY_MARKET_CONCURRENCY = 10
     try:
         # ``start`` may allocate sockets before reporting a failure.  Keep it
@@ -365,6 +366,7 @@ class _DayContext:
     maturity_done: bool = False
     reminders_done: bool = False
     reference_finalized: bool = False
+    v245_reference_event_id: str | None = None
     shadow_reference_finalized: bool = False
     early_history_attempted: bool = False
     early_stored_history_loaded: bool = False
@@ -1426,7 +1428,7 @@ class V20Service:
         from src.data.database.fundamentals_db import create_fundamentals_db_from_config
 
         project_root = Path(__file__).resolve().parents[2]
-        config = load_v20_runtime_config(project_root, project_root / "config/v22-slim.yaml")
+        config = load_v20_runtime_config(project_root, project_root / "config/v24-5.yaml")
         database_config_path = project_root / "config" / "database-config.yaml"
         repository = create_v20_repository_from_config(database_config_path)
         if (
@@ -1509,7 +1511,7 @@ class V20Service:
         from src.data.database.fundamentals_db import create_fundamentals_db_from_config
 
         project_root = Path(__file__).resolve().parents[2]
-        base_config = load_v20_runtime_config(project_root, project_root / "config/v22-slim.yaml")
+        base_config = load_v20_runtime_config(project_root, project_root / "config/v24-5.yaml")
         if base_config.deployment_mode != "forward_shadow":
             raise V20ConfigError("embedded V20 only supports forward_shadow mode")
         if base_config.enabled:
@@ -2147,7 +2149,7 @@ class V20Service:
     def _v22_monitor(self) -> Any:
         from src.web.v22_exit_monitor import V22ExitMonitor
 
-        if self.config.strategy_version != "V22-slim":
+        if not is_v22_family(self.config.strategy_version):
             raise V20StateConflict("V22 holding alerts require V22-slim")
         if self._v22_exit_monitor is None:
             self._v22_exit_monitor = V22ExitMonitor(self)
@@ -2202,7 +2204,7 @@ class V20Service:
         immutable event and an idempotency key.
         """
 
-        if self.config.strategy_version == "V22-slim":
+        if is_v22_family(self.config.strategy_version):
             raise V20StateConflict("V22-slim is entry-only; new exit-monitor lots are disabled")
         await self._require_manual_trigger_ready()
         if not isinstance(source_event_id, str) or len(source_event_id) != 64:
@@ -2945,6 +2947,10 @@ class V20Service:
             "NOT_REQUIRED",
             "SENT",
         }
+        delivery_status = record.delivery_status
+        delivery_reason = getattr(record, "last_error", None)
+        if delivery_reason in {"V245_TARGET_SUPERSEDED", "V245_POSITION_NO_LONGER_SWITCHABLE"}:
+            delivery_status = "SUPERSEDED"
         return {
             "accepted": True,
             "created": created,
@@ -2957,13 +2963,16 @@ class V20Service:
             "final_multiplier": semantic["final_multiplier"],
             "symbols": list(semantic.get("symbols") or []),
             "reference_symbols": list(semantic.get("reference_symbols") or []),
+            "v245_transition": semantic.get("v245_transition"),
+            "v245_switch_plan": semantic.get("v245_switch_plan"),
             "calculation_result": "SUCCESS",
             "exact_automatic_message": True,
             "formal_decision_available": context.entry_status is not None,
             "official_state_changed": status_before is None and context.entry_status is not None,
             "retrospective_expired": self._aware_now().date() != trade_date,
             "orders_changed": False,
-            "delivery_status": record.delivery_status,
+            "delivery_status": delivery_status,
+            "delivery_reason": delivery_reason,
             "entry_timing_alert_event_id": timing_alert_id,
             "entry_timing_alert_delivery_status": timing_delivery_status,
             "feishu_delivery_confirmed": delivered,
@@ -3692,7 +3701,7 @@ class V20Service:
                     deadline=deadline,
                     tick_started_at=tick_started_at,
                 )
-                if self.config.strategy_version == "V22-slim":
+                if is_v22_family(self.config.strategy_version):
                     results = await asyncio.gather(
                         ordinary_cycle,
                         self._run_v22_exit_tick(now),
@@ -4651,7 +4660,7 @@ class V20Service:
 
         Calendar failures propagate; an unavailable calendar is not a closure.
         """
-        if self.config.strategy_version != "V22-slim":
+        if not is_v22_family(self.config.strategy_version):
             return False
         today = now.astimezone(SHANGHAI).date()
         return today not in await self._load_trade_calendar(today)
@@ -5612,7 +5621,7 @@ class V20Service:
                 if (
                     getattr(self._scan_state, "selection_version", None)
                     or self.config.strategy_version
-                ) == "V22-slim" and not canonical._integrity_hash:
+                ) in ("V22-slim", "V24.5") and not canonical._integrity_hash:
                     projected = self._project_canonical_v16(
                         canonical,
                         calendar=canonical_calendar,
@@ -7084,7 +7093,7 @@ class V20Service:
                 if len(code) == 6 and code.startswith(("00", "60")) and previous_close > 0
             )
         )
-        if self.config.strategy_version == "V22-slim" and fact_received_before is None:
+        if is_v22_family(self.config.strategy_version) and fact_received_before is None:
             from src.strategy.v22_slim.runtime_inputs import api_rows
 
             limits = await api_rows(
@@ -7135,7 +7144,7 @@ class V20Service:
             minute_source,
             len(seed),
         )
-        if self.config.strategy_version == "V22-slim":
+        if is_v22_family(self.config.strategy_version):
             from src.strategy.v22_slim.selection import FrozenBoards
 
             frozen_names = FrozenBoards().names
@@ -7270,7 +7279,7 @@ class V20Service:
         fingerprint_options: dict[str, Any] = {}
         if (
             getattr(self._scan_state, "selection_version", None) or self.config.strategy_version
-        ) == "V22-slim":
+        ) in ("V22-slim", "V24.5"):
             fingerprint_options["include_legacy_fingerprints"] = False
         canonical = await compute_canonical_v16_scan(
             self._scan_state,
@@ -7811,7 +7820,7 @@ class V20Service:
         if bundle.trade_date != trade_date:
             raise V20SemanticConflict("canonical V16 artifact belongs to another trade date")
         expected_dependencies = self.config.strategy_dependency_hashes
-        model_directory = "v22_slim" if self.config.strategy_version == "V22-slim" else "v20"
+        model_directory = "v22_slim" if is_v22_family(self.config.strategy_version) else "v20"
         for logical_path, snapshot_field in (
             (f"models/{model_directory}/lgbrank_latest.txt", "scorer_model_sha256"),
             (f"models/{model_directory}/feature_list.json", "scorer_feature_sha256"),
@@ -7891,7 +7900,7 @@ class V20Service:
             self._verify_entry_binding(status)
         cross_version_check = (
             status is not None
-            and self.config.strategy_version == "V22-slim"
+            and is_v22_family(self.config.strategy_version)
             and status.strategy_version != self.config.strategy_version
         )
         if cross_version_check and not allow_legacy_terminal_fresh_theoretical:
@@ -7938,9 +7947,13 @@ class V20Service:
                     trade_date,
                 )
         scheduled = tuple(dict(item) for item in scheduled_source)
-        if self.config.strategy_version == "V22-slim":
-            if status is not None and not cross_version_check:
-                if status.strategy_version != "V22-slim":
+        if is_v22_family(self.config.strategy_version):
+            if (
+                status is not None
+                and not cross_version_check
+                and "v22_slim_inputs" in status.snapshot
+            ):
+                if not is_v22_family(status.strategy_version):
                     raise V20SemanticConflict(
                         "This day's immutable slot belongs to V20; "
                         "V22-slim starts with the next new slot"
@@ -7977,6 +7990,15 @@ class V20Service:
         )
         if status is not None and not legacy_terminal_fresh_theoretical and not cross_version_check:
             self._verify_terminal_replay_transition(status, prepared)
+        if self.config.strategy_version == "V24.5":
+            from src.strategy.v24_5.entry import apply_turtle
+
+            turtle_state = await self._repository.load_v245_state_before(
+                official_stream_id=self.config.official_stream_id,
+                lineage_id=self.config.state_lineage_id,
+                trade_date=trade_date,
+            )
+            prepared = apply_turtle(prepared, turtle_state, bundle.prior_trade_date)
         if prepared.commit.semantic.get("action") not in {"ENTER", "BLOCK", "NO_SIGNAL"}:
             raise V20SemanticConflict(
                 "canonical V20 morning calculation produced an illegal action"
@@ -8345,7 +8367,7 @@ class V20Service:
     ) -> EntryCommit:
         """Evaluate the notification after selection, without changing its decision."""
         commit = calculation.prepared.commit
-        if self.config.strategy_version != "V22-slim":
+        if not is_v22_family(self.config.strategy_version):
             return commit
         action = str(commit.semantic.get("action") or "")
         advisory: dict[str, Any]
@@ -8364,6 +8386,12 @@ class V20Service:
                 "symbols": [],
                 "index": {},
             }
+            if (
+                self.config.strategy_version == "V24.5"
+                and commit.semantic.get("original_final_open") is True
+                and action == "BLOCK"
+            ):
+                advisory["reason"] = "TURTLE_CONFIRMATION_PENDING"
         else:
             from src.strategy.v22_slim.entry_timing import evaluate_entry_timing, matches_wait_rule
 
@@ -8467,6 +8495,20 @@ class V20Service:
             context.canonical_bundle = calculation.bundle
             context.canonical_first_received_at = calculation.canonical_first_received_at
             commit = await self._prepare_entry_timing_commit(calculation)
+            if self.config.strategy_version == "V24.5":
+                from src.data.database.v245_switch_positions import build_switch_plan
+
+                positions = await self._v22_monitor().store.list(unclosed=True)
+                switch_plan = build_switch_plan(
+                    positions,
+                    day=context.trade_date,
+                    permit=commit.semantic["v245_transition"]["permit"],
+                    calendar=calculation.calendar,
+                )
+                semantic = {**commit.semantic, "v245_switch_plan": switch_plan}
+                commit = replace(
+                    commit, semantic=semantic, semantic_content_hash=sha256_json(semantic)
+                )
             logger.info(
                 "Selection task request_id=%s stage=TIMING_PREPARED total_seconds=%.6f",
                 request_id,
@@ -8482,7 +8524,7 @@ class V20Service:
             )
         assert existing_id is not None
         record = await self._repository.seal_event(existing_id, seal_v20_payload)
-        if self.config.strategy_version == "V22-slim":
+        if is_v22_family(self.config.strategy_version):
             timing_alert_id = record.semantic.get("entry_timing_alert_event_id")
             if timing_alert_id:
                 await self._repository.seal_event(timing_alert_id, seal_v20_payload)
@@ -8560,6 +8602,24 @@ class V20Service:
                 exc,
             )
         status = await self._refresh_entry_status(context)
+        if self.config.strategy_version == "V24.5":
+            from src.strategy.v24_5.references import effective_reference_status
+
+            effective = await effective_reference_status(
+                self._repository,
+                status,
+                official_stream_id=self.config.official_stream_id,
+                lineage_id=self.config.state_lineage_id,
+                trade_date=context.trade_date,
+            )
+            if effective is not status:
+                self._verify_entry_binding(effective)
+                # The official failed slot remains immutable. A first valid
+                # recalculation has its own reference basket and raw receipts.
+                if getattr(context, "v245_reference_event_id", None) != effective.event_id:
+                    context.reference_finalized = False
+                    context.v245_reference_event_id = effective.event_id
+                status = effective
         if status is None or context.reference_finalized:
             return
         if status.action in {"NO_SIGNAL", "INPUT_INVALID"}:
@@ -9822,7 +9882,7 @@ class V20Service:
             # contract even while the morning selector uses its new profile.
             "strategy_version": (
                 "V20_BAD_E50_G_BASE_V1"
-                if self.config.strategy_version == "V22-slim"
+                if is_v22_family(self.config.strategy_version)
                 else self.config.strategy_version
             ),
             "config_hash": self.config.config_hash,

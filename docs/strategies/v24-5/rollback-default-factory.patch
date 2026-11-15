@@ -1,0 +1,12 @@
+--- a/src/web/v20_service.py
++++ b/src/web/v20_service.py
+@@ -1430,3 +1430,3 @@
+         project_root = Path(__file__).resolve().parents[2]
+-        config = load_v20_runtime_config(project_root, project_root / "config/v24-5.yaml")
++        config = load_v20_runtime_config(project_root, project_root / "config/v22-slim.yaml")
+         database_config_path = project_root / "config" / "database-config.yaml"
+@@ -1513,3 +1513,3 @@
+         project_root = Path(__file__).resolve().parents[2]
+-        base_config = load_v20_runtime_config(project_root, project_root / "config/v24-5.yaml")
++        base_config = load_v20_runtime_config(project_root, project_root / "config/v22-slim.yaml")
+         if base_config.deployment_mode != "forward_shadow":
