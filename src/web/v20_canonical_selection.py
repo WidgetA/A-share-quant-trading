@@ -2173,6 +2173,27 @@ async def compute_canonical_v16_scan(
             data_error_notification=data_error_notification,
         ) from e
 
+    # A partial input failure can remove the only qualifying stocks. Keep the
+    # existing tolerance when candidates remain, but never describe that
+    # incomplete search as a valid no-signal result. Only missing scanner inputs
+    # count here; breadth-only gaps and normal eligibility skips do not.
+    unready_scan_codes = [code for code in universe_list if code not in ready_set]
+    empty_input_errors = total_errors + len(unready_scan_codes)
+    if not scan_result.recommended and empty_input_errors:
+        details = [data_error_notification[1]] if data_error_notification else []
+        if unready_scan_codes:
+            details.append(
+                f"所需早盘行情未就绪({len(unready_scan_codes)}): "
+                + ", ".join(unready_scan_codes[:20])
+            )
+        raise CanonicalV16ScanError(
+            f"V16 scan: empty selection with {empty_input_errors} input errors; "
+            "cannot establish NO_SIGNAL",
+            notify_title="选股数据异常",
+            notify_detail="\n".join(details),
+            data_error_notification=data_error_notification,
+        )
+
     # Final name refresh is part of the canonical bundle (display only).
     if names_override is None and not slim:
         await _refresh_top10_names(scan_state.fundamentals_db, scan_result.recommended)

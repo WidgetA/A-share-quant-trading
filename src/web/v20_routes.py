@@ -19,6 +19,7 @@ from typing import Any, Literal, Protocol
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -491,6 +492,42 @@ async def _dispatch_manual_trigger(service: Any, request_id: str) -> Any:
     return await service.trigger_morning_selection(request_id)
 
 
+async def _call_selection_task(operation: Callable[[], Awaitable[Any]]) -> Any:
+    """A failed task is ERROR, never a successful empty selection result."""
+    from src.web.v20_canonical_selection import CanonicalV16ScanError
+    from src.web.v20_service import _NoCurrentSelectionData
+
+    async def select() -> Any:
+        try:
+            return await operation()
+        except _NoCurrentSelectionData as exc:
+            raise HTTPException(
+                status_code=503, detail="实时接口没有返回可用的当日数据，无法完成选股。"
+            ) from exc
+        except CanonicalV16ScanError as exc:
+            raise HTTPException(
+                status_code=503, detail=f"选股失败：{exc.notify_title or '必要数据或计算异常'}"
+            ) from exc
+        except TimeoutError as exc:
+            raise HTTPException(status_code=503, detail="选股任务超时，未形成有效结果。") from exc
+
+    try:
+        return await _call_service(select)
+    except HTTPException as exc:
+        return JSONResponse(
+            status_code=exc.status_code,
+            headers=exc.headers,
+            content={
+                "accepted": False,
+                "cycle_result": "ERROR",
+                "entry_action": "ERROR",
+                "calculation_result": "ERROR",
+                "task_success": False,
+                "detail": exc.detail,
+            },
+        )
+
+
 def create_v20_router() -> APIRouter:
     """Build the V20 status/evidence router."""
 
@@ -572,9 +609,10 @@ def create_v20_router() -> APIRouter:
                     status_code=400,
                     detail="V20 manual trigger does not accept a request body",
                 )
-        service = _get_service(request)
         request_id = idempotency_key or f"manual-{uuid4()}"
-        return await _call_service(lambda: _dispatch_manual_trigger(service, request_id))
+        return await _call_selection_task(
+            lambda: _dispatch_manual_trigger(_get_service(request), request_id)
+        )
 
     @router.post(
         "/manual-monitor",

@@ -27,6 +27,33 @@ from tests.unit.web.test_v20_auto_manual_exact_parity_acceptance import (
 )
 
 
+@pytest.mark.parametrize("failure_phase", ["ENTRY_COLLECTION_FAILED", "ENTRY_CYCLE_FAILED"])
+async def test_selection_stage_failure_is_error_in_public_status(monkeypatch, failure_phase):
+    service, _, _ = _service_and_artifact(monkeypatch)
+    context = service_module._DayContext(trade_date=RUN_AT.date(), calendar=(RUN_AT.date(),))
+    service._context = context
+    service._safe_alert = AsyncMock()
+
+    async def failed_stage():
+        raise RuntimeError("selection input unavailable")
+
+    assert not await service._run_phase_isolated(context, RUN_AT, failure_phase, failed_stage())
+    status = await service.status()
+    assert status["phase"] == status["entry_action"] == "ERROR"
+    assert status["runtime_lanes"]["decision"]["last_error"] is not None
+
+
+@pytest.mark.parametrize("action", ["NO_SIGNAL", "BLOCK", "ENTER", "INPUT_INVALID"])
+async def test_public_selection_status_preserves_valid_results(monkeypatch, action):
+    service, _, _ = _service_and_artifact(monkeypatch)
+    context = service_module._DayContext(trade_date=RUN_AT.date(), calendar=(RUN_AT.date(),))
+    context.last_phase = "DECISION_COMMITTED"
+    context.entry_status = SimpleNamespace(action=action, event_id="test-entry")
+    service._context = context
+    status = await service.status()
+    assert status["entry_action"] == ("ERROR" if action == "INPUT_INVALID" else action)
+
+
 @pytest.mark.parametrize("cached_n", [0, 2, 3])
 @pytest.mark.parametrize("current_n", [0, 2])
 @pytest.mark.parametrize("has_artifact", [False, True])
@@ -147,7 +174,8 @@ async def test_empty_current_realtime_returns_no_tickets_for_both_triggers(
         side_effect=AssertionError("empty input wrote tickets")
     )
     repository.seal_event = AsyncMock(side_effect=AssertionError("empty input sealed tickets"))
-    repository.enqueue_alert = AsyncMock(side_effect=AssertionError("empty input generated a push"))
+    repository.enqueue_alert = AsyncMock()
+    service._safe_alert = AsyncMock()
     await service._run_decision_iteration_with_cutoff(now)
     realtime_calls = [c for c in client._api_call.await_args_list if c.args[0] == "rt_min_daily"]
     if profile == "V22-slim" and day not in calendar:
@@ -168,15 +196,14 @@ async def test_empty_current_realtime_returns_no_tickets_for_both_triggers(
         assert not repository.selection_runs and repository.state.revision == 0
         return
     assert len(realtime_calls) == len(codes), "timer must fetch current realtime"
-    assert service._context.last_phase == "NO_CURRENT_DATA"
-    assert service._lane_health["decision"].last_error is None
-    result = await _dispatch_manual_trigger(service, f"current-data-{day.isoformat()}")
-    assert result["trade_date"] == day.isoformat()
-    assert result["cycle_result"] == "NO_CURRENT_DATA"
-    assert result["symbols"] == result["reference_symbols"] == []
-    assert result["entry_event_id"] is None and result["created"] is False
-    assert result["delivery_status"] == "NOT_REQUIRED"
-    assert result["calculation_result"] == "NOT_RUN"
+    assert service._context.last_phase == "ERROR"
+    assert service._lane_health["decision"].last_error is not None
+    service._safe_alert.assert_awaited_once()
+    assert service._safe_alert.await_args.kwargs["code"] == "NO_CURRENT_DATA"
+    status = await service.status()
+    assert status["entry_action"] == status["phase"] == "ERROR"
+    with pytest.raises(service_module._NoCurrentSelectionData):
+        await _dispatch_manual_trigger(service, f"current-data-{day.isoformat()}")
     # Both requests share the existing provider-minute acquisition, even empty data.
     assert [c for c in client._api_call.await_args_list if c.args[0] == "rt_min_daily"] == (
         realtime_calls

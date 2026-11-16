@@ -397,10 +397,36 @@ _FROZEN_REPLAY_SOURCE_BEGIN = "----- 早盘封存原文开始（逐字节未改�
 _FROZEN_REPLAY_SOURCE_END = "----- 早盘封存原文结束 -----"
 
 
+_ENTRY_NO_BUY_REASONS = {
+    "ENTRY_CALENDAR_UNKNOWN_NO_BUY": "09:40仍无法确认交易日历，系统不能安全运行入场策略。",
+    "ENTRY_CUTOFF_NO_BUY": "09:40截止前没有冻结出可执行的入场决策。",
+    "ENTRY_INPUT_UNAVAILABLE_BY_0940": "09:40截止前没有形成完整、可靠的V16入场结果。",
+    "SLOT_FINALIZED_FAILED": "系统直到09:45仍未完成并冻结早盘入场决策。",
+}
+_SELECTION_ERROR_REASONS = {
+    **_ENTRY_NO_BUY_REASONS,
+    "ENTRY_COLLECTION_FAILED": "选股数据准备失败，本次未形成有效结果。",
+    "ENTRY_CYCLE_FAILED": "选股任务执行失败，本次未形成有效结果。",
+    "ENTRY_CALCULATION_FAILED": "选股计算失败，本次未形成有效结果。",
+    "SCHEDULER_ITERATION_FAILED": "自动选股任务执行失败，本次未形成有效结果。",
+    "NO_CURRENT_DATA": "实时接口没有返回可用的当日数据，选股未能完成。",
+}
+
+
+def _selection_error_reason(semantic: Mapping[str, Any]) -> str:
+    """Describe known failures without publishing internal exception text."""
+    for code in semantic.get("reason_codes") or []:
+        if str(code) in _SELECTION_ERROR_REASONS:
+            return _SELECTION_ERROR_REASONS[str(code)]
+    return "关键入场数据不完整，系统无法给出买入结论。"
+
+
 def _render_entry_strategy_body(semantic: Mapping[str, Any]) -> str:
     """Render the one canonical strategy-output body for every entry surface."""
 
     action = str(semantic.get("action", "INPUT_INVALID"))
+    if action == "INPUT_INVALID":
+        return "计算结论：ERROR\n原因：" + _selection_error_reason(semantic)
     multiplier = float(semantic.get("final_multiplier", 0.0))
     slim = semantic.get("entry_only") is True
     turtle = semantic.get("strategy_version") == "V24.5"
@@ -801,24 +827,27 @@ def _render_data_alert_for_operator(
                 f"确认事件：{event_id[:16]}",
             ]
         )
-    no_buy_reasons = {
-        "ENTRY_CALENDAR_UNKNOWN_NO_BUY": "09:40仍无法确认交易日历，系统不能安全运行入场策略。",
-        "ENTRY_CUTOFF_NO_BUY": "09:40截止前没有冻结出可执行的入场决策。",
-        "ENTRY_INPUT_UNAVAILABLE_BY_0940": "09:40截止前没有形成完整、可靠的V16入场结果。",
-        "SLOT_FINALIZED_FAILED": "系统直到09:45仍未完成并冻结早盘入场决策。",
-    }
     trade_date = str(semantic.get("event_trade_date", "-"))
     alert_time = generated_at.astimezone(SHANGHAI).strftime("%H:%M")
-    if code in no_buy_reasons:
+    if code in _ENTRY_NO_BUY_REASONS:
         return "\n".join(
             [
-                f"{title_prefix} 入场报警｜不开仓",
+                f"{title_prefix} 入场报警｜ERROR",
                 "",
                 "🔴 现在操作：不开仓，不补买，不追买",
-                f"原因：{no_buy_reasons[code]}",
+                f"原因：{_SELECTION_ERROR_REASONS[code]}",
                 "已有持仓不因本报警处理，继续按既定卖出规则管理。",
                 "若稍后收到09:39复盘，它也只用于核查，不能据此追买。",
                 "",
+                f"交易日：{trade_date}｜消息生成：{alert_time}｜事件：{event_id[:16]}",
+            ]
+        )
+
+    if code in _SELECTION_ERROR_REASONS:
+        return "\n".join(
+            [
+                f"{title_prefix} 选股错误｜ERROR",
+                f"原因：{_SELECTION_ERROR_REASONS[code]}",
                 f"交易日：{trade_date}｜消息生成：{alert_time}｜事件：{event_id[:16]}",
             ]
         )
@@ -895,17 +924,12 @@ def render_entry_message(
     action = str(semantic.get("action", "INPUT_INVALID"))
     multiplier = float(semantic.get("final_multiplier", 0.0))
     if action == "INPUT_INVALID":
-        reason_codes = {str(item) for item in (semantic.get("reason_codes") or [])}
-        if "SLOT_FINALIZED_FAILED" in reason_codes:
-            reason = "系统直到09:45仍未完成并冻结早盘入场决策。"
-        elif "ENTRY_INPUT_UNAVAILABLE_BY_0940" in reason_codes:
-            reason = "09:40截止前没有形成完整、可靠的V16入场结果。"
-        else:
-            reason = "关键入场数据不完整，系统无法安全给出买入结论。"
+        reason = _selection_error_reason(semantic)
         lines = [
-            f"{title}｜不开仓 ({trade_date} 09:40)",
+            f"{title}｜ERROR ({trade_date} 09:40)",
             "",
             "🔴 现在操作：不开仓，不补买，不追买",
+            "计算结论：ERROR",
             f"原因：{reason}",
             "若稍后收到09:39复盘，它也只用于核查，不能据此追买。",
         ]

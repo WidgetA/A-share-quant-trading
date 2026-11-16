@@ -173,7 +173,8 @@ def test_last_completed_session_and_at_least_five_rows_are_required():
 def test_nonfinite_selected_ohlcv_is_unusable(field, value):
     values = history()
     values[field][-1] = value
-    assert build(values) is None
+    with pytest.raises(RuntimeError, match="invalid historical OHLCV"):
+        build(values)
 
 
 @pytest.mark.parametrize(
@@ -183,7 +184,8 @@ def test_nonfinite_selected_ohlcv_is_unusable(field, value):
 def test_illegal_ohlcv_is_unusable(field, value):
     values = history()
     values[field][-1] = value
-    assert build(values) is None
+    with pytest.raises(RuntimeError, match="invalid historical OHLCV"):
+        build(values)
 
 
 def test_zero_volume_row_is_retained_but_zero_average_or_current_flow_is_unusable():
