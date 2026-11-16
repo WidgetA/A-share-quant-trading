@@ -25,6 +25,9 @@ jobs:
         run: >-
           uv run pytest -q
           tests/unit/web/test_selection_task_contract.py
+          tests/unit/web/test_v20_routes_task_adapter.py
+          tests/unit/web/test_canonical_no_signal_errors.py
+          tests/unit/strategy/test_v22_stock_input_errors.py
           tests/unit/web/test_v22_non_trading_day.py
           tests/unit/web/test_v22_entry_timing_task.py
           tests/unit/strategy/test_v22_entry_timing.py

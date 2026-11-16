@@ -1,7 +1,9 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from src.common.v20_feishu import render_entry_message
+import pytest
+
+from src.common.v20_feishu import _render_entry_strategy_body, render_entry_message
 
 
 def semantic(permit=False):
@@ -71,3 +73,39 @@ def test_t1_deferred_position_has_an_explicit_next_session_date():
     )
     message = render(value)
     assert "2026-11-17" in message and "T+1" in message
+
+
+@pytest.mark.parametrize("reason", ["ENTRY_INPUT_UNAVAILABLE", "SLOT_FINALIZED_FAILED"])
+def test_invalid_selection_is_error_instead_of_a_normal_no_buy_decision(reason):
+    value = semantic()
+    value.update(
+        action="INPUT_INVALID",
+        reason_codes=[reason],
+        failure_detail="internal traceback with private transport settings",
+    )
+    message = render(value)
+    assert "ERROR" in message.splitlines()[0]
+    assert "计算结论：ERROR" in message
+    assert "原因：" in message
+    assert "NO_SIGNAL" not in message
+    assert "买入或继续持有" not in message
+    assert value["failure_detail"] not in message
+
+
+def test_invalid_selection_body_does_not_describe_an_empty_successful_stock_list():
+    value = semantic()
+    value.update(action="INPUT_INVALID", reason_codes=["ENTRY_INPUT_UNAVAILABLE"])
+    body = _render_entry_strategy_body(value)
+    assert "计算结论：ERROR" in body
+    assert "原因：" in body
+    assert "最终倍率" not in body
+    assert "资金目标为工商银行" not in body
+
+
+@pytest.mark.parametrize("action", ["NO_SIGNAL", "BLOCK"])
+def test_valid_no_candidate_or_gate_decision_is_not_an_error(action):
+    value = semantic()
+    value["action"] = action
+    message = render(value)
+    assert f"计算结论：{action}" in message
+    assert "ERROR" not in message

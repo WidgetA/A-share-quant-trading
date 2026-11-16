@@ -869,7 +869,9 @@ def test_trigger_leadership_loss_is_503_not_inherited_state_conflict_409() -> No
     )
 
     assert response.status_code == 503
-    assert response.json() == {"detail": "V20 runtime leadership is unavailable"}
+    assert response.json()["detail"] == "V20 runtime leadership is unavailable"
+    assert response.json()["entry_action"] == "ERROR"
+    assert response.json()["task_success"] is False
 
 
 @pytest.mark.parametrize(

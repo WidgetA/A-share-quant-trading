@@ -1217,7 +1217,7 @@ def test_entry_cutoff_data_alert_is_rendered_as_a_human_no_buy_notice() -> None:
     )
 
     lines = payload["message"].splitlines()
-    assert lines[0] == "[V20][SHADOW] 入场报警｜不开仓"
+    assert lines[0] == "[V20][SHADOW] 入场报警｜ERROR"
     assert lines[2] == "🔴 现在操作：不开仓，不补买，不追买"
     assert "09:40截止前没有冻结出可执行的入场决策" in payload["message"]
     assert "DATA_ALERT" not in payload["message"]
@@ -1289,6 +1289,44 @@ def test_input_invalid_message_translates_cutoff_failure_for_operator() -> None:
     assert "ENTRY_INPUT_UNAVAILABLE_BY_0940" not in message
     assert "09:39 terminal coverage 73/100" not in message
     assert "建立新模型批次" not in message
+
+
+@pytest.mark.parametrize(
+    ("alert_code", "expected_reason"),
+    [
+        ("ENTRY_CALENDAR_UNKNOWN_NO_BUY", "交易日历"),
+        ("ENTRY_CUTOFF_NO_BUY", "截止前"),
+        ("ENTRY_INPUT_UNAVAILABLE_BY_0940", "入场结果"),
+        ("SLOT_FINALIZED_FAILED", "09:45"),
+        ("ENTRY_COLLECTION_FAILED", "选股数据准备失败"),
+        ("ENTRY_CYCLE_FAILED", "选股任务执行失败"),
+        ("ENTRY_CALCULATION_FAILED", "选股计算失败"),
+        ("SCHEDULER_ITERATION_FAILED", "自动选股任务执行失败"),
+    ],
+)
+def test_selection_failure_alerts_are_explicit_errors(alert_code, expected_reason):
+    semantic = {
+        "schema_version": V20_DATA_ALERT_SEMANTIC_SCHEMA,
+        "feishu_formatter_profile": V20_FEISHU_FORMATTER_PROFILE,
+        "strategy_version": "V24.5",
+        "deployment_mode": "forward_shadow",
+        "alert_code": alert_code,
+        "event_trade_date": "2026-11-16",
+        "message": "Traceback: private transport settings",
+    }
+    payload = seal_v20_payload(
+        _outbox_record("DATA_ALERT", semantic, event_id=f"error-{alert_code}"),
+        datetime(2026, 11, 16, 9, 45, tzinfo=TZ),
+        20,
+        True,
+    )
+    message = payload["message"]
+    assert "ERROR" in message.splitlines()[0]
+    assert expected_reason in message
+    assert "NO_SIGNAL" not in message
+    assert semantic["message"] not in message
+    if alert_code in {"ENTRY_CALCULATION_FAILED", "SCHEDULER_ITERATION_FAILED"}:
+        assert "不补买，不追买" not in message
 
 
 def test_exit_is_scoped_to_one_model_leg_not_account_holding() -> None:

@@ -176,12 +176,12 @@ def build_stock(code: str, name: str, quote, history: dict, calendar: tuple[date
         or not (values[:, :4] > 0).all()
         or not (values[:, 4] >= 0).all()
     ):
-        return None
+        raise RuntimeError(f"{code}: invalid historical OHLCV values")
     if (
         not (values[:, 1] >= values[:, :4].max(axis=1)).all()
         or not (values[:, 2] <= values[:, :4].min(axis=1)).all()
     ):
-        return None
+        raise RuntimeError(f"{code}: invalid historical OHLCV price bounds")
     closes, volumes = values[:, 3], values[:, 4]
     if volumes.mean() <= 0 or quote.early_volume <= 0 or quote.amount <= 0:
         return None

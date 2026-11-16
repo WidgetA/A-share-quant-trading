@@ -7223,7 +7223,7 @@ async def test_missing_0939_coverage_remains_retryable_after_0940_and_0945(
     assert repository.commits == []
     assert service._attempt_entry.await_count == 3
     assert service._safe_alert.await_count == 3
-    assert context.last_phase == "ENTRY_RETRY"
+    assert context.last_phase == "ERROR"
 
 
 async def test_entry_collection_never_precomputes_canonical_selection(
@@ -9664,7 +9664,7 @@ async def test_run_once_reconciliation_failure_does_not_starve_exit_cycle(
     await service.run_once(now)
 
     assert exit_calls == [now]
-    assert context.last_phase == "ENTRY_RETRY"
+    assert context.last_phase == "ERROR"
     assert "state predecessor unavailable" in context.last_entry_failure_detail
 
 

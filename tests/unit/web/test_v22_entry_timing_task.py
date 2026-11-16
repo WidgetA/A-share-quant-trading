@@ -186,15 +186,14 @@ async def test_missing_current_data_still_does_not_create_tickets_or_advisory(tr
     service._orchestrate_morning_selection.side_effect = _NoCurrentSelectionData(
         "empty current data"
     )
-    if trigger == "timer":
-        await service._commit_entry_from_bundle(context, NOW)
-    else:
-        result = await service._execute_selection_task(context, NOW, request_id="button-new")
-        assert result == (None, False)
+    with pytest.raises(_NoCurrentSelectionData):
+        if trigger == "timer":
+            await service._commit_entry_from_bundle(context, NOW)
+        else:
+            await service._execute_selection_task(context, NOW, request_id="button-new")
     service._prepare_entry_timing_commit.assert_not_awaited()
     service._repository.commit_selection_run.assert_not_awaited()
     service._repository.seal_event.assert_not_awaited()
-    assert context.last_phase == "NO_CURRENT_DATA"
 
 
 @pytest.mark.parametrize(

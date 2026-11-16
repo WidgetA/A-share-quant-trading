@@ -39,3 +39,66 @@ async def test_route_does_not_convert_task_failure_into_success(error):
 
     with pytest.raises(type(error), match=str(error)):
         await _dispatch_manual_trigger(Service(), "one-failed-task-001")
+
+
+@pytest.mark.parametrize("kind", ["empty", "coverage", "timeout", "calculation", "storage"])
+def test_selection_http_failures_are_explicit_errors(kind):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from src.data.database.v20_repository import V20RepositoryError
+    from src.web.v20_canonical_selection import CanonicalV16ScanError
+    from src.web.v20_routes import create_v20_router
+    from src.web.v20_service import _NoCurrentSelectionData
+
+    errors = {
+        "empty": _NoCurrentSelectionData("empty current realtime"),
+        "coverage": CanonicalV16ScanError(
+            "coverage failed", notify_title="行情覆盖不足", notify_detail="缺少必要行情"
+        ),
+        "timeout": TimeoutError("provider timed out"),
+        "calculation": RuntimeError("scorer failed"),
+        "storage": V20RepositoryError("database unavailable"),
+    }
+
+    class Service:
+        async def trigger_morning_selection(self, _request_id):
+            raise errors[kind]
+
+    app = FastAPI()
+    app.state.v20_service = Service()
+    app.include_router(create_v20_router())
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v20/trigger-scan", headers={"Idempotency-Key": "failure-business-001"}
+        )
+    assert response.status_code == 503
+    body = response.json()
+    assert body["cycle_result"] == body["entry_action"] == body["calculation_result"] == "ERROR"
+    assert body["task_success"] is False and body["accepted"] is False
+    assert body["detail"] and "NO_SIGNAL" not in body["detail"]
+    if kind == "empty":
+        assert "实时" in body["detail"] and "数据" in body["detail"]
+    elif kind == "coverage":
+        assert "行情覆盖不足" in body["detail"]
+
+
+@pytest.mark.parametrize("action", ["NO_SIGNAL", "BLOCK", "ENTER"])
+def test_selection_http_keeps_normal_business_results(action):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from src.web.v20_routes import create_v20_router
+
+    expected = {"accepted": True, "entry_action": action, "calculation_result": "SUCCESS"}
+
+    class Service:
+        async def trigger_morning_selection(self, _request_id):
+            return expected
+
+    app = FastAPI()
+    app.state.v20_service = Service()
+    app.include_router(create_v20_router())
+    with TestClient(app) as client:
+        response = client.post("/api/v20/trigger-scan")
+    assert response.status_code == 202 and response.json() == expected

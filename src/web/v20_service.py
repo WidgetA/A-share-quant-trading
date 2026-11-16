@@ -1962,6 +1962,12 @@ class V20Service:
         phase = (
             context.last_phase if context else "DISABLED" if not self.config.enabled else "STARTING"
         )
+        entry_action = context.entry_status.action if context and context.entry_status else None
+        if (
+            phase in {"ERROR", "INPUT_INVALID", "ENTRY_COLLECTION_FAILED", "ENTRY_CYCLE_FAILED"}
+            or entry_action == "INPUT_INVALID"
+        ):
+            phase, entry_action = "ERROR", "ERROR"
         snapshot = self._status_snapshot
         ledger = dict(snapshot["ledger"]) if snapshot is not None else None
         outbox = dict(snapshot["outbox"]) if snapshot is not None else None
@@ -2045,9 +2051,7 @@ class V20Service:
             ),
             "trade_date": context.trade_date.isoformat() if context else None,
             "phase": phase,
-            "entry_action": (
-                context.entry_status.action if context and context.entry_status else None
-            ),
+            "entry_action": entry_action,
             "entry_event_id": (
                 context.entry_status.event_id if context and context.entry_status else None
             ),
@@ -2882,31 +2886,25 @@ class V20Service:
                 config=self.config,
             )
 
-    def _selection_not_run_response(
-        self, request_id: str, now: datetime, *, non_trading: bool = False
-    ) -> Mapping[str, Any]:
+    def _selection_not_run_response(self, request_id: str, now: datetime) -> Mapping[str, Any]:
         return {
             "accepted": True,
             "created": False,
             "manual_request_id": request_id,
             "trade_date": now.date().isoformat(),
-            "cycle_result": "NON_TRADING_DAY" if non_trading else "NO_CURRENT_DATA",
+            "cycle_result": "NON_TRADING_DAY",
             "entry_event_id": None,
             "selection_version": self.config.strategy_version,
             "symbols": [],
             "reference_symbols": [],
             "calculation_result": "NOT_RUN",
-            "data_source": None if non_trading else "rt_min_daily",
+            "data_source": None,
             "delivery_status": "NOT_REQUIRED",
             "feishu_delivery_confirmed": False,
             "task_success": False,
             "official_state_changed": False,
             "orders_changed": False,
-            "message": (
-                "今天是中国股票市场非交易日，本次不请求行情、不出票。"
-                if non_trading
-                else "实时接口没有返回可用的当日数据，本次不出票。"
-            ),
+            "message": "今天是中国股票市场非交易日，本次不请求行情、不出票。",
         }
 
     async def trigger_morning_selection(self, request_id: str) -> Mapping[str, Any]:
@@ -2918,7 +2916,7 @@ class V20Service:
         calendar = tuple(await self._load_trade_calendar(now.date()))
         trade_date = now.date()
         if await self._is_non_trading_market_day(now):
-            return self._selection_not_run_response(request_id, now, non_trading=True)
+            return self._selection_not_run_response(request_id, now)
         if now.time() < time(9, 39):
             raise V20StateConflict("09:39 selection input is not ready")
         async with self._decision_cycle_lock:
@@ -8305,12 +8303,16 @@ class V20Service:
         except V20LeadershipLost:
             raise
         except Exception as exc:
-            context.last_phase = "ENTRY_RETRY"
-            context.last_entry_failure_detail = f"ENTRY_RETRY: {type(exc).__name__}: {exc}"
+            context.last_phase = "ERROR"
+            context.last_entry_failure_detail = f"ERROR: {type(exc).__name__}: {exc}"
             self._record_lane_error("decision", context.last_entry_failure_detail, now)
             logger.warning("V20 entry attempt will retry: %s", exc)
             await self._safe_alert(
-                code="ENTRY_CALCULATION_FAILED",
+                code=(
+                    "NO_CURRENT_DATA"
+                    if isinstance(exc, _NoCurrentSelectionData)
+                    else "ENTRY_CALCULATION_FAILED"
+                ),
                 entity_id=context.trade_date.isoformat(),
                 message=context.last_entry_failure_detail,
                 now=self._aware_now(),
@@ -8475,18 +8477,9 @@ class V20Service:
             self.kick_mews_for_selection_trigger(now)
             calculation_started = perf_counter()
             logger.info("Selection task request_id=%s stage=CALCULATION_START", request_id)
-            try:
-                calculation = await self._orchestrate_morning_selection(
-                    context.trade_date, allow_legacy_terminal_fresh_theoretical=True
-                )
-            except _NoCurrentSelectionData:
-                context.last_phase = "NO_CURRENT_DATA"
-                logger.info(
-                    "Selection task request_id=%s stage=NO_CURRENT_DATA total_seconds=%.6f",
-                    request_id,
-                    perf_counter() - task_started,
-                )
-                return None, False
+            calculation = await self._orchestrate_morning_selection(
+                context.trade_date, allow_legacy_terminal_fresh_theoretical=True
+            )
             logger.info(
                 "Selection task request_id=%s stage=CALCULATION_END seconds=%.6f",
                 request_id,

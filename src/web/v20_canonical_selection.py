@@ -2173,6 +2173,19 @@ async def compute_canonical_v16_scan(
             data_error_notification=data_error_notification,
         ) from e
 
+    # A partial input failure can remove the only qualifying stocks. Keep the
+    # existing tolerance when candidates remain, but never describe that
+    # incomplete search as a valid no-signal result.
+    if not scan_result.recommended and total_errors:
+        assert data_error_notification is not None
+        raise CanonicalV16ScanError(
+            f"V16 scan: empty selection with {total_errors} input errors; "
+            "cannot establish NO_SIGNAL",
+            notify_title="选股数据异常",
+            notify_detail=data_error_notification[1],
+            data_error_notification=data_error_notification,
+        )
+
     # Final name refresh is part of the canonical bundle (display only).
     if names_override is None and not slim:
         await _refresh_top10_names(scan_state.fundamentals_db, scan_result.recommended)
